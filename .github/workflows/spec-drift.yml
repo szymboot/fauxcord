@@ -106,7 +106,7 @@ jobs:
           pnpm test               # Contract tests show which mock responses changed
           # Fix failing tests or add entries to spec/skip.ts with a reason
           git add spec/openapi.json src/ spec/skip.ts
-          git commit -m "fix: Discord API spec スナップショットを最新版に更新"
+          git commit -m "fix: update Discord API spec snapshot"
           git push origin HEAD
           gh pr create --title "fix: Discord API spec drift ($DATE)" --body "Closes this issue"
           ```
