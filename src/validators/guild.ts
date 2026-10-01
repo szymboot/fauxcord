@@ -181,12 +181,13 @@ export interface GuildMemberUpdatePayload {
 export function validateGuildMemberUpdate(
   payload: GuildMemberUpdatePayload
 ): ValidationErrors {
-  const errors: ValidationErrors = {
-    ...(payload.nick !== undefined &&
-      payload.nick !== null &&
-      payload.nick.length > NICK_MAX && {
-        nick: { _errors: [maxLengthError(NICK_MAX)] },
-      }),
+  const errors: ValidationErrors = {}
+  if (payload.nick !== undefined && payload.nick !== null) {
+    if (typeof payload.nick !== 'string') {
+      errors.nick = { _errors: [typeError('string')] }
+    } else if (payload.nick.length > NICK_MAX) {
+      errors.nick = { _errors: [maxLengthError(NICK_MAX)] }
+    }
   }
 
   return errors

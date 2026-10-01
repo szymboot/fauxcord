@@ -1,7 +1,16 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
+import { GatewayIntentBits } from 'discord-api-types/v10'
 import { GatewayOp } from './gateway/opcodes'
 import { createRealServer } from './test-helpers'
+import type { GuildMemberObject } from './services/guild-members'
+
+/** Gateway frame captured from the real WebSocket connection. */
+interface ControlGatewayFrame {
+  op: number
+  t?: string
+  d: unknown
+}
 
 const token = 'Bot control-api-token'
 const applicationId = '100000000000000001'
@@ -14,6 +23,127 @@ describe('Fauxcord control APIs over a real server', () => {
   afterEach(async () => {
     await close?.()
     close = undefined
+  })
+
+  it('delivers human join, leave, and rejoin through the real Gateway and REST', async () => {
+    const server = await createRealServer()
+    close = server.close
+    const setup = await fetch(`${server.baseUrl}/_test/setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token,
+        user: { id: applicationId, username: 'ControlBot' },
+        guilds: [{ id: guildId, name: 'Control Guild' }],
+      }),
+    })
+    expect(setup.status).toBe(201)
+    const userResponse = await fetch(`${server.baseUrl}/_test/users`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'WelcomeHuman', discriminator: '1234' }),
+    })
+    expect(userResponse.status).toBe(201)
+    const user = (await userResponse.json()) as { id: string }
+
+    const frames: ControlGatewayFrame[] = []
+    const ws = new WebSocket(server.baseUrl.replace('http:', 'ws:'))
+    ws.on('message', (raw: Buffer) => {
+      frames.push(JSON.parse(raw.toString()) as ControlGatewayFrame)
+    })
+    await vi.waitFor(() => {
+      expect(frames[0]?.op).toBe(GatewayOp.Hello)
+    })
+    ws.send(
+      JSON.stringify({
+        op: GatewayOp.Identify,
+        d: {
+          token,
+          intents: GatewayIntentBits.Guilds | GatewayIntentBits.GuildMembers,
+        },
+      })
+    )
+    await vi.waitFor(() => {
+      expect(frames.some((frame) => frame.t === 'GUILD_CREATE')).toBe(true)
+    })
+    expect(frames.some((frame) => frame.t === 'READY')).toBe(true)
+    const initialCount = frames.length
+    const joinUrl = `${server.baseUrl}/_test/guilds/${guildId}/members/${user.id}`
+    const memberUrl = `${server.baseUrl}/api/v10/guilds/${guildId}/members/${user.id}`
+    const join = await fetch(joinUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nick: 'Welcome nickname' }),
+    })
+    expect(join.status).toBe(201)
+    const member = (await join.json()) as GuildMemberObject
+    await vi.waitFor(() => {
+      expect(frames[initialCount]?.t).toBe('GUILD_MEMBER_ADD')
+    })
+    expect(frames[initialCount]).toMatchObject({
+      op: GatewayOp.Dispatch,
+      d: {
+        ...member,
+        guild_id: guildId,
+        user: {
+          id: user.id,
+          bot: false,
+          username: 'WelcomeHuman',
+          discriminator: '1234',
+        },
+      },
+    })
+    const rest = await fetch(memberUrl, { headers: { Authorization: token } })
+    expect(rest.status).toBe(200)
+    await expect(rest.json()).resolves.toEqual(member)
+
+    const duplicate = await fetch(joinUrl, { method: 'POST' })
+    expect(duplicate.status).toBe(409)
+    const removed = await fetch(memberUrl, {
+      method: 'DELETE',
+      headers: { Authorization: token },
+    })
+    expect(removed.status).toBe(204)
+    await vi.waitFor(() => {
+      expect(frames[initialCount + 1]?.t).toBe('GUILD_MEMBER_REMOVE')
+    })
+    expect(frames[initialCount + 1].d).toMatchObject({
+      guild_id: guildId,
+      user: { id: user.id },
+    })
+    const absent = await fetch(memberUrl, { headers: { Authorization: token } })
+    expect(absent.status).toBe(404)
+
+    const rejoin = await fetch(joinUrl, { method: 'POST' })
+    expect(rejoin.status).toBe(201)
+    const returned = (await rejoin.json()) as GuildMemberObject
+    expect(returned.user).toEqual(member.user)
+    expect(returned.nick).toBeNull()
+    await vi.waitFor(() => {
+      expect(frames[initialCount + 2]?.t).toBe('GUILD_MEMBER_ADD')
+    })
+    expect(frames[initialCount + 2].d).toEqual({
+      ...returned,
+      guild_id: guildId,
+    })
+    await expect(
+      fetch(memberUrl, { headers: { Authorization: token } }).then((response) =>
+        response.json()
+      )
+    ).resolves.toEqual(returned)
+
+    // The heartbeat ACK is a barrier for frames queued before it.
+    ws.send(JSON.stringify({ op: GatewayOp.Heartbeat, d: null }))
+    await vi.waitFor(() => {
+      expect(frames.at(-1)?.op).toBe(GatewayOp.HeartbeatAck)
+    })
+    expect(
+      frames
+        .slice(initialCount)
+        .filter((frame) => frame.op === GatewayOp.Dispatch)
+        .map((frame) => frame.t)
+    ).toEqual(['GUILD_MEMBER_ADD', 'GUILD_MEMBER_REMOVE', 'GUILD_MEMBER_ADD'])
+    ws.close()
   })
 
   it('sets up and deletes an isolated environment', async () => {

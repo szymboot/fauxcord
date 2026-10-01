@@ -39,7 +39,13 @@ const addFormats = _require('ajv-formats') as (
   ajv: InstanceType<typeof Ajv2020>
 ) => void
 
-import { createContractFixture, createFullTestApp } from './test-helpers'
+import {
+  createContractFixture,
+  createFullTestApp,
+  seedBot,
+  seedGuild,
+} from './test-helpers'
+import { closeDatabase } from './db'
 import { MANIFEST } from '../spec/manifest'
 import type { SpecEndpoint, SpecSuccessBranch } from '../spec/manifest'
 import '../spec/manifest.test'
@@ -77,6 +83,34 @@ describe('Discord custom schema formats', () => {
     expect(validate('1')).toBe(true)
     expect(validate('01')).toBe(false)
     expect(validate('not-a-snowflake')).toBe(false)
+  })
+})
+
+describe('Test API member join schema contract', () => {
+  it('returns the Discord GuildMemberResponse schema for a registered human', async () => {
+    const { db, app } = createFullTestApp()
+    try {
+      const guildId = seedGuild(db, seedBot(db))
+      const registered = await app.request('/_test/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'SchemaHuman' }),
+      })
+      expect(registered.status).toBe(201)
+      const user = (await registered.json()) as { id: string }
+      const response = await app.request(
+        `/_test/guilds/${guildId}/members/${user.id}`,
+        { method: 'POST' }
+      )
+      expect(response.status).toBe(201)
+      const body: unknown = await response.json()
+      const validate = ajv.compile({
+        $ref: 'https://discord.com/spec#/components/schemas/GuildMemberResponse',
+      })
+      expect(validate(body), JSON.stringify(validate.errors)).toBe(true)
+    } finally {
+      closeDatabase(db)
+    }
   })
 })
 

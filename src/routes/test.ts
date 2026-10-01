@@ -12,12 +12,15 @@ import {
   resetTestData,
   getTestMessages,
   createTestUser,
+  joinTestGuildMember,
   injectTestMessage,
   createTestInteraction,
 } from '../services/test-control'
 import type { TestInteractionRequest } from '../services/test-control'
 import { getChannelWebhooks } from '../services/webhooks'
 import { injectPollVote } from '../services/polls'
+import { DiscordErrorCode, discordError, validationError } from '../errors'
+import { validateGuildMemberUpdate } from '../validators/guild'
 
 /**
  * Creates the test control API routes.
@@ -89,6 +92,61 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
         return c.json({ message: '409: Conflict', code: 0 }, 409)
       }
       throw err
+    }
+  })
+
+  // POST /_test/guilds/:guildId/members/:userId — Join an existing non-bot user
+  app.post('/_test/guilds/:guildId/members/:userId', async (c) => {
+    const { guildId, userId } = c.req.param()
+    const body = await c.req.text()
+    let parsed: unknown
+    try {
+      parsed = body.trim() ? JSON.parse(body) : {}
+    } catch {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
+    const payload = parsed as Record<string, unknown>
+    const errors = validateGuildMemberUpdate(payload)
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
+
+    const result = joinTestGuildMember(
+      db,
+      guildId,
+      userId,
+      typeof payload.nick === 'string' ? payload.nick : null
+    )
+    switch (result) {
+      case 'UNKNOWN_GUILD': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild', 404)
+            .body,
+          404
+        )
+      }
+      case 'UNKNOWN_USER': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404).body,
+          404
+        )
+      }
+      case 'BOT_USER': {
+        return c.json({ message: 'User must not be a bot', code: 0 }, 400)
+      }
+      case 'CONFLICT': {
+        return c.json({ message: '409: Conflict', code: 0 }, 409)
+      }
+      default: {
+        return c.json(result, 201)
+      }
     }
   })
 

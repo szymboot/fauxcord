@@ -143,9 +143,9 @@ curl http://localhost:3000/_test/webhooks/333333333333333333
 
 ## `POST /_test/users` — Register a non-bot user
 
-Registers a plain (non-bot) user, for use as the `author` of an injected
-message (see below). Unlike `/_test/setup`, an explicit `id` collision is a
-hard error — this endpoint never silently reuses an existing row.
+Registers a plain (non-bot) user, for joining a Guild or use as the `author`
+of an injected message (see below). Unlike `/_test/setup`, an explicit `id`
+collision is a hard error — this endpoint never silently reuses an existing row.
 
 ```bash
 curl -X POST http://localhost:3000/_test/users \
@@ -168,6 +168,66 @@ curl -X POST http://localhost:3000/_test/users \
 | `id`            | —        | User ID. A Snowflake is auto-generated if omitted. Returns `409 Conflict` if an explicit `id` already exists. |
 | `username`      | ✅       | Username.                                                                                                     |
 | `discriminator` | —        | Defaults to `"0"`.                                                                                            |
+
+---
+
+## `POST /_test/guilds/:guildId/members/:userId` — Join a non-bot user to a Guild
+
+Joins an already registered non-bot user (typically created by `POST /_test/users`)
+to an existing Guild. No Authorization header is required. This operation preserves
+the user's profile, including `bot: false`, and does not modify the Guild's name,
+owner, Bot registrations, Channels, or Roles.
+
+```bash
+curl -X POST http://localhost:3000/_test/guilds/222222222222222222/members/555555555555555555 \
+  -H "Content-Type: application/json" \
+  -d '{"nick": "Test nickname"}'
+```
+
+**Fields**
+
+| Field              | Required | Description                                                                                                              |
+| ------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `guildId` (path)   | ✅       | Existing Guild ID.                                                                                                       |
+| `userId` (path)    | ✅       | Existing non-bot user ID. No profile is created or overwritten.                                                          |
+| `nick` (JSON body) | —        | Guild nickname, at most 32 characters. Defaults to `null`; explicit `null` is accepted. The body may be omitted or `{}`. |
+
+**Response**: `201 Created` with the actual Guild member object, identical to
+`GET /guilds/:guildId/members/:userId`. It contains the stored `user`, `nick`,
+server-generated `joined_at` (Discord timestamp with microseconds and `+00:00`),
+empty `roles`, `mute: false`, `deaf: false`, and the existing member model's defaults.
+
+The membership transaction commits before exactly one `guild.member.add` is
+emitted on Fauxcord's event bus. The existing Gateway sends `GUILD_MEMBER_ADD`
+with that member object plus `guild_id` to connected clients with the
+`GUILD_MEMBERS` intent (`2`). Membership is immediately readable through REST
+when the event arrives. Joining does not emit `GUILD_CREATE`.
+
+**Errors** (no state changes or events):
+
+| Status | Code    | Cause                                                                     |
+| ------ | ------- | ------------------------------------------------------------------------- |
+| `404`  | `10004` | Unknown Guild.                                                            |
+| `404`  | `10013` | Unknown User.                                                             |
+| `409`  | `0`     | The user is already a member; their nickname and join time are preserved. |
+| `400`  | `0`     | The user is a Bot rather than a non-bot account.                          |
+| `400`  | `0`     | Malformed JSON or a body that is not a JSON object.                       |
+| `400`  | `50035` | Invalid nickname type or a nickname longer than 32 characters.            |
+
+To test leaving and returning, use the existing authenticated member DELETE:
+
+```bash
+curl -X DELETE http://localhost:3000/api/v10/guilds/222222222222222222/members/555555555555555555 \
+  -H "Authorization: Bot mytoken"
+
+# Join the same profile again, with a new join time and default null nickname.
+curl -X POST http://localhost:3000/_test/guilds/222222222222222222/members/555555555555555555
+```
+
+DELETE returns `204`, removes membership and role assignments, and emits
+`GUILD_MEMBER_REMOVE` through the existing Gateway path. The user profile remains
+registered, so the next test join returns `201` and emits a new `GUILD_MEMBER_ADD`.
+This endpoint operates on current state; event replay is not provided.
 
 ---
 

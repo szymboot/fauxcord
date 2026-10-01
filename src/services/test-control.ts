@@ -7,9 +7,10 @@
 import { randomBytes } from 'node:crypto'
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
+import { toDiscordTimestamp } from '../timestamp'
 import { gatewayBus } from '../gateway/bus'
 import { buildGuildCreatePayload } from './guilds'
-import { getGuildMember } from './guild-members'
+import { getGuildMember, type GuildMemberObject } from './guild-members'
 import { getChannel } from './channels'
 import {
   createMessage,
@@ -344,6 +345,55 @@ export function createTestUser(
   ).run(id, request.username, discriminator)
 
   return { id, username: request.username, discriminator }
+}
+
+/** Result of joining a registered non-bot user to an existing guild. */
+export type JoinTestGuildMemberResult =
+  GuildMemberObject | 'UNKNOWN_GUILD' | 'UNKNOWN_USER' | 'BOT_USER' | 'CONFLICT'
+
+/**
+ * Adds an existing non-bot user without modifying its profile or guild setup.
+ * Emits the stored member through the Gateway bus only after commit.
+ * @param db - Database
+ * @param guildId - Existing guild ID
+ * @param userId - Registered non-bot user ID
+ * @param nick - Guild nickname (null by default)
+ * @returns Stored member, or an error reason with no mutation or emission
+ */
+export function joinTestGuildMember(
+  db: Database,
+  guildId: string,
+  userId: string,
+  nick: string | null = null
+): JoinTestGuildMemberResult {
+  const join = db.transaction((): JoinTestGuildMemberResult => {
+    if (!db.prepare('SELECT id FROM guilds WHERE id = ?').get(guildId)) {
+      return 'UNKNOWN_GUILD'
+    }
+    const user = db
+      .prepare('SELECT bot FROM users WHERE id = ?')
+      .get(userId) as { bot: number } | undefined
+    if (!user) return 'UNKNOWN_USER'
+    if (getGuildMember(db, guildId, userId)) return 'CONFLICT'
+    if (user.bot === 1) return 'BOT_USER'
+
+    // Keep an explicit UTC offset so member serialization is timezone independent.
+    db.prepare(
+      'INSERT INTO guild_members (guild_id, user_id, nick, joined_at) VALUES (?, ?, ?, ?)'
+    ).run(guildId, userId, nick, toDiscordTimestamp(new Date()))
+    const member = getGuildMember(db, guildId, userId)
+    if (!member) throw new Error('Joined member could not be retrieved')
+    return member
+  })
+
+  const result = join()
+  if (typeof result !== 'string') {
+    gatewayBus.emit('guild.member.add', {
+      guildId,
+      member: result as unknown as Record<string, unknown>,
+    })
+  }
+  return result
 }
 
 /** Request payload for injecting a message authored by a pre-registered user */
