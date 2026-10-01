@@ -161,6 +161,13 @@ curl -X POST http://localhost:3000/channels/1234567890123456789/messages/bulk-de
 
 ## Test Control API
 
+To test a human joining a Guild, register a profile with `POST /_test/users`,
+then call `POST /_test/guilds/:guildId/members/:userId` (optionally with
+`{"nick":"Test nickname"}`). It returns the stored member and emits
+`GUILD_MEMBER_ADD` through the Gateway for clients with the `GUILD_MEMBERS`
+intent. See the [test API documentation](./docs/test-api.md) for errors and
+the leave/rejoin flow using the existing member DELETE.
+
 ### Reset the test environment
 
 ```bash
