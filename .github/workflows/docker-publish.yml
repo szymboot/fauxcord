@@ -1,0 +1,36 @@
+# Keep the reusable workflow's write permissions out of pull request runs.
+name: Docker Publish
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Let publication finish so tags and releases are not left partially published.
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Docker
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+      deployments: write
+    uses: book000/templates/.github/workflows/reusable-docker.yml@master
+    with:
+      targets: >-
+        [
+          { "imageName": "${{ github.repository }}", "context": ".", "file": "Dockerfile", "packageName": "fauxcord" }
+        ]
+      is-merged: true
+      pr-head-sha: ${{ github.sha }}
+    secrets:
+      DOCKER_USERNAME: ${{ github.actor }}
+      DOCKER_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
