@@ -114,6 +114,7 @@ interface ChannelRecipientRow {
   discriminator: string
   avatar: string | null
   bot: number
+  global_name: string | null
 }
 
 /**
@@ -128,7 +129,7 @@ export function getChannelRecipientUsers(
 ): ChannelRecipientUser[] {
   const rows = db
     .prepare(
-      `SELECT u.id, u.username, u.discriminator, u.avatar, u.bot
+      `SELECT u.id, u.username, u.discriminator, u.avatar, u.bot, u.global_name
        FROM channel_recipients cr
        JOIN users u ON u.id = cr.user_id
        WHERE cr.channel_id = ?`
@@ -142,7 +143,7 @@ export function getChannelRecipientUsers(
     bot: row.bot === 1,
     public_flags: 0,
     flags: 0,
-    global_name: null,
+    global_name: row.global_name ?? null,
     primary_guild: null,
   }))
 }

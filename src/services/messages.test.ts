@@ -25,6 +25,21 @@ describe('toMessageObject', () => {
     bot: 1,
   }
 
+  it.each(['Display Name', null, undefined])(
+    'preserves author global_name=%s',
+    (globalName) => {
+      const message = toMessageObject(
+        row,
+        { ...author, global_name: globalName },
+        [],
+        [],
+        [],
+        'http://localhost:3000'
+      )
+      expect(message.author.global_name).toBe(globalName ?? null)
+    }
+  )
+
   it('includes the full Reaction shape (count_details, me_burst, burst_colors)', () => {
     // Real Discord's Reaction object (discord-api-types APIReaction) requires
     // count_details/me_burst/burst_colors — omitting them causes a real

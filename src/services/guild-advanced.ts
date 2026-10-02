@@ -437,7 +437,7 @@ interface TemplateRow {
 function userObject(db: Database, userId: string): JsonObject {
   const user = db
     .prepare(
-      'SELECT id, username, discriminator, avatar, bot FROM users WHERE id = ?'
+      'SELECT id, username, discriminator, avatar, bot, global_name FROM users WHERE id = ?'
     )
     .get(userId) as
     | {
@@ -446,6 +446,7 @@ function userObject(db: Database, userId: string): JsonObject {
         discriminator: string
         avatar: string | null
         bot: number
+        global_name: string | null
       }
     | undefined
   return {
@@ -456,7 +457,7 @@ function userObject(db: Database, userId: string): JsonObject {
     bot: user?.bot === 1,
     public_flags: 0,
     flags: 0,
-    global_name: null,
+    global_name: user?.global_name ?? null,
     primary_guild: null,
   }
 }

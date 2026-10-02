@@ -35,18 +35,19 @@ curl -X POST http://localhost:3000/_test/setup \
 
 **Fields**
 
-| Field                      | Required | Description                                        |
-| -------------------------- | -------- | -------------------------------------------------- |
-| `token`                    | ✅       | Bot token (including the `"Bot "` prefix)          |
-| `user.id`                  | —        | User ID (a Snowflake is auto-generated if omitted) |
-| `user.username`            | —        | Username (default: `"MockBot"`)                    |
-| `guilds`                   | —        | Array of Guilds to create                          |
-| `guilds[].id`              | —        | Guild ID (auto-generated if omitted)               |
-| `guilds[].name`            | ✅       | Guild name                                         |
-| `guilds[].channels`        | —        | Array of channels to create                        |
-| `guilds[].channels[].id`   | —        | Channel ID (auto-generated if omitted)             |
-| `guilds[].channels[].name` | ✅       | Channel name                                       |
-| `guilds[].channels[].type` | —        | Channel type (`0`: text, default: `0`)             |
+| Field                      | Required | Description                                         |
+| -------------------------- | -------- | --------------------------------------------------- |
+| `token`                    | ✅       | Bot token (including the `"Bot "` prefix)           |
+| `user.id`                  | —        | User ID (a Snowflake is auto-generated if omitted)  |
+| `user.global_name`         | —        | Global display name (string or null; default: null) |
+| `user.username`            | —        | Username (default: `"MockBot"`)                     |
+| `guilds`                   | —        | Array of Guilds to create                           |
+| `guilds[].id`              | —        | Guild ID (auto-generated if omitted)                |
+| `guilds[].name`            | ✅       | Guild name                                          |
+| `guilds[].channels`        | —        | Array of channels to create                         |
+| `guilds[].channels[].id`   | —        | Channel ID (auto-generated if omitted)              |
+| `guilds[].channels[].name` | ✅       | Channel name                                        |
+| `guilds[].channels[].type` | —        | Channel type (`0`: text, default: `0`)              |
 
 **Response**: The setup result (including any auto-generated IDs)
 
@@ -166,8 +167,17 @@ curl -X POST http://localhost:3000/_test/users \
 | Field           | Required | Description                                                                                                   |
 | --------------- | -------- | ------------------------------------------------------------------------------------------------------------- |
 | `id`            | —        | User ID. A Snowflake is auto-generated if omitted. Returns `409 Conflict` if an explicit `id` already exists. |
+| `global_name`   | —        | Optional global display name (string or null). Omitted/null values serialize as null in Discord user objects. |
 | `username`      | ✅       | Username.                                                                                                     |
 | `discriminator` | —        | Defaults to `"0"`.                                                                                            |
+
+The stored `global_name` appears in Discord user/member REST responses and
+Gateway payloads, including the initial `GUILD_CREATE` member list and later
+`GUILD_MEMBER_UPDATE` events from nickname PATCH requests. For example,
+`{"username":"TestHuman","global_name":"Display Name"}` creates a user whose
+global display name remains available when their guild nickname is cleared.
+`POST /_test/setup` and `SEED_FILE` bot fixtures accept the same nullable field
+as `user.global_name`.
 
 ---
 

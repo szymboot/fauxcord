@@ -64,6 +64,19 @@ function migrateChannelsFeatureColumns(db: Database): void {
 }
 
 /**
+ * Adds nullable global display names to databases created before fixture support.
+ * @param db - Database instance
+ */
+function migrateUserGlobalName(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(users)').all() as {
+    name: string
+  }[]
+  if (columns.every((column) => column.name !== 'global_name')) {
+    db.exec('ALTER TABLE users ADD COLUMN global_name TEXT')
+  }
+}
+
+/**
  * Initializes the database and creates tables.
  * @param dbPath - SQLite file path (":memory:" for an in-memory DB)
  * @returns Initialized Database instance
@@ -92,6 +105,7 @@ export function initializeDatabase(dbPath: string): Database {
       username      TEXT NOT NULL,
       discriminator TEXT NOT NULL DEFAULT '0',
       avatar        TEXT,
+      global_name   TEXT,
       bot           INTEGER NOT NULL DEFAULT 0,
       created_at    TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -800,6 +814,7 @@ export function initializeDatabase(dbPath: string): Database {
     );
   `)
 
+  migrateUserGlobalName(db)
   migrateChannelsThreadColumns(db)
   migrateChannelsFeatureColumns(db)
 

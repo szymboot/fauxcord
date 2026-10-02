@@ -378,6 +378,44 @@ describe('initializeDatabase', () => {
     expect(columnNames).toContain('username')
   })
 
+  it('migrates legacy user profiles and preserves global names on reopening', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-user-db-'))
+    const dbPath = path.join(dir, 'legacy.db')
+    try {
+      const legacy = new BetterSqlite3(dbPath)
+      legacy.exec(`
+        CREATE TABLE users (
+          id TEXT PRIMARY KEY,
+          username TEXT NOT NULL,
+          discriminator TEXT NOT NULL DEFAULT '0',
+          avatar TEXT,
+          bot INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO users (id, username) VALUES ('1', 'Legacy User');
+      `)
+      legacy.close()
+      db = initializeDatabase(dbPath)
+      expect(
+        db
+          .prepare('SELECT username, global_name FROM users WHERE id = ?')
+          .get('1')
+      ).toEqual({ username: 'Legacy User', global_name: null })
+      db.prepare('UPDATE users SET global_name = ? WHERE id = ?').run(
+        'Saved Name',
+        '1'
+      )
+      closeDatabase(db)
+      db = initializeDatabase(dbPath)
+      expect(
+        db.prepare('SELECT global_name FROM users WHERE id = ?').get('1')
+      ).toEqual({ global_name: 'Saved Name' })
+    } finally {
+      closeDatabase(db)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('migrates thread columns onto a legacy channels table that predates thread support', () => {
     // Simulate a database file created before thread support: a `channels`
     // table without any of the thread-related columns.

@@ -324,7 +324,7 @@ export function createUserRoutes(db: Database): Hono<AppEnv> {
       return c.json({ message: '403: Forbidden', code: 50_001 }, 403)
     const row = db
       .prepare(
-        'SELECT guild_members.*, users.id, users.username, users.discriminator, users.avatar, users.bot FROM guild_members JOIN users ON users.id = guild_members.user_id WHERE guild_id = ? AND user_id = ?'
+        'SELECT guild_members.*, users.id, users.username, users.discriminator, users.avatar, users.bot, users.global_name FROM guild_members JOIN users ON users.id = guild_members.user_id WHERE guild_id = ? AND user_id = ?'
       )
       .get(c.req.param('guildId'), accessToken.user_id) as
       | {
@@ -338,6 +338,7 @@ export function createUserRoutes(db: Database): Hono<AppEnv> {
           discriminator: string
           avatar: string | null
           bot: number
+          global_name: string | null
         }
       | undefined
     return row
@@ -361,7 +362,7 @@ export function createUserRoutes(db: Database): Hono<AppEnv> {
             bot: row.bot === 1,
             public_flags: 0,
             flags: 0,
-            global_name: null,
+            global_name: row.global_name,
             primary_guild: null,
           },
           mute: row.mute === 1,

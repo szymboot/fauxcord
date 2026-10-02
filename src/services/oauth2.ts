@@ -39,7 +39,7 @@ export interface OAuth2MeResponse {
     avatar: string | null
     public_flags: number
     flags: number
-    global_name: null
+    global_name: string | null
     primary_guild: null
   }
 }
@@ -289,6 +289,7 @@ export function getOAuth2Me(
             username: string
             discriminator: string
             avatar: string | null
+            global_name: string | null
           }
         | undefined)
     : undefined
@@ -317,7 +318,7 @@ export function getOAuth2Me(
           avatar: user.avatar,
           public_flags: 0,
           flags: 0,
-          global_name: null,
+          global_name: user.global_name ?? null,
           primary_guild: null,
         },
       }

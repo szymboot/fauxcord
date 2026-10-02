@@ -68,7 +68,7 @@ export interface MemberUserObject {
   flags: number
   /** User public flags bitset (always 0 in the mock) */
   public_flags: number
-  /** Display name (always null in the mock) */
+  /** Stored global display name, or null when absent */
   global_name: string | null
   /** Primary guild info (always null in the mock) */
   primary_guild: string | null
@@ -142,6 +142,7 @@ export function getGuildMember(
         discriminator: string
         avatar: string | null
         bot: number
+        global_name: string | null
       }
     | undefined
   return userRow
@@ -163,7 +164,7 @@ export function getGuildMember(
           bot: userRow.bot === 1,
           flags: 0,
           public_flags: 0,
-          global_name: null,
+          global_name: userRow.global_name ?? null,
           primary_guild: null,
         },
         mute: memberRow.mute === 1,
@@ -210,6 +211,7 @@ export function getGuildMembers(
     discriminator: string
     avatar: string | null
     bot: number
+    global_name: string | null
   }[]
   const usersById = new Map(userRows.map((u) => [u.id, u]))
 
@@ -252,7 +254,7 @@ export function getGuildMembers(
               bot: userRow.bot === 1,
               flags: 0,
               public_flags: 0,
-              global_name: null,
+              global_name: userRow.global_name ?? null,
               primary_guild: null,
             },
             mute: memberRow.mute === 1,

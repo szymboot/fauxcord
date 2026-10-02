@@ -10,6 +10,8 @@ import {
   seedWebhook,
 } from '../test-helpers'
 import { createTestUser } from '../services/test-control'
+import { getUser, getBotUser } from '../services/users'
+import { getGuildMember, getGuildMembers } from '../services/guild-members'
 import { createPoll } from '../services/polls'
 import type { Database } from '../db'
 
@@ -30,6 +32,44 @@ describe('Test Control API', () => {
   })
 
   describe('POST /_test/setup', () => {
+    it('stores the bot fixture global name in the user profile', async () => {
+      const res = await app.request('/_test/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: 'Bot display-name',
+          user: { username: 'TestBot', global_name: 'Bot Display Name' },
+        }),
+      })
+      expect(res.status).toBe(201)
+      expect(getBotUser(db, 'Bot display-name')?.global_name).toBe(
+        'Bot Display Name'
+      )
+    })
+
+    it.each(['New Name', null, undefined])(
+      'preserves or updates a pre-registered profile when setup global_name=%s',
+      async (globalName) => {
+        const user = createTestUser(db, {
+          username: 'TestHuman',
+          global_name: 'Original Name',
+        })
+        const res = await app.request('/_test/setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: 'Bot reused-user',
+            user: { id: user.id, global_name: globalName },
+          }),
+        })
+        expect(res.status).toBe(201)
+        expect(getUser(db, user.id)).toMatchObject({
+          bot: true,
+          global_name: globalName === undefined ? 'Original Name' : globalName,
+        })
+      }
+    )
+
     it('sets up the test environment', async () => {
       const res = await app.request('/_test/setup', {
         method: 'POST',
@@ -161,6 +201,65 @@ describe('Test Control API', () => {
   })
 
   describe('POST /_test/users', () => {
+    it.each(['Display Name', null, undefined])(
+      'persists global_name=%s and serializes it in user and member views',
+      async (globalName) => {
+        const res = await app.request('/_test/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: 'TestHuman',
+            global_name: globalName,
+          }),
+        })
+        expect(res.status).toBe(201)
+        const { id } = (await res.json()) as { id: string }
+        const expected = globalName ?? null
+        expect(
+          db.prepare('SELECT global_name FROM users WHERE id = ?').get(id)
+        ).toEqual({ global_name: expected })
+        expect(getUser(db, id)?.global_name).toBe(expected)
+        const token = seedBot(db)
+        const guild = seedGuild(db, token)
+        db.prepare(
+          'INSERT INTO guild_members (guild_id, user_id) VALUES (?, ?)'
+        ).run(guild, id)
+        expect(getGuildMember(db, guild, id)?.user.global_name).toBe(expected)
+        expect(
+          getGuildMembers(db, guild, 100).find((m) => m.user.id === id)?.user
+            .global_name
+        ).toBe(expected)
+      }
+    )
+
+    it.each([42, true, {}, []])(
+      'rejects invalid global_name=%s',
+      async (globalName) => {
+        for (const endpoint of ['/_test/users', '/_test/setup']) {
+          const res = await app.request(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              endpoint === '/_test/users'
+                ? { username: 'TestHuman', global_name: globalName }
+                : {
+                    token: 'Bot invalid-name',
+                    user: { global_name: globalName },
+                  }
+            ),
+          })
+          expect(res.status).toBe(400)
+          expect(await res.json()).toEqual({
+            message: '400: Bad Request',
+            code: 0,
+          })
+        }
+        expect(db.prepare('SELECT COUNT(*) AS count FROM users').get()).toEqual(
+          { count: 0 }
+        )
+      }
+    )
+
     it('registers a non-bot user with an auto-generated ID', async () => {
       const res = await app.request('/_test/users', {
         method: 'POST',
