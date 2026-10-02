@@ -160,6 +160,7 @@ export function createChannelReactionRoutes(db: Database): Hono<AppEnv> {
         discriminator: u.discriminator,
         avatar: u.avatar,
         bot: u.bot === 1,
+        global_name: u.global_name ?? null,
       }))
     )
   })

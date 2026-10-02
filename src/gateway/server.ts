@@ -10,6 +10,7 @@ import { GatewayIntentBits } from 'discord-api-types/v10'
 import type { GatewayReadyDispatchData } from 'discord-api-types/v10'
 import type { WSContext, WSEvents } from 'hono/ws'
 import type { Database } from '../db'
+import { getUser } from '../services/users'
 import { buildGuildCreatePayload } from '../services/guilds'
 import { SessionManager, type Session } from './session'
 import { GatewayOp, GatewayCloseCode } from './opcodes'
@@ -29,6 +30,7 @@ interface IdentifiedBot {
   username: string
   discriminator: string
   avatar: string | null
+  globalName: string | null
   /** Normalized (`"Bot <token>"`-prefixed) token, used to look up the bot's guilds (`guilds.bot_token`) */
   token: string
 }
@@ -73,6 +75,7 @@ function resolveBotForIdentify(
       username: row.username,
       discriminator: row.discriminator,
       avatar: row.avatar,
+      globalName: getUser(db, row.user_id)?.global_name ?? null,
       token: lookupToken,
     }
   }
@@ -82,6 +85,7 @@ function resolveBotForIdentify(
         username: 'MockBot',
         discriminator: '0',
         avatar: null,
+        globalName: null,
         token: lookupToken,
       }
     : undefined
@@ -183,7 +187,7 @@ interface ReadyPayload {
     bot: boolean
     flags: number
     public_flags: number
-    global_name: null
+    global_name: string | null
     mfa_enabled: boolean
     locale: string
     verified: boolean
@@ -291,7 +295,7 @@ function handleIdentify(
       bot: true,
       flags: 0,
       public_flags: 0,
-      global_name: null,
+      global_name: bot.globalName,
       mfa_enabled: false,
       locale: 'en-US',
       verified: true,

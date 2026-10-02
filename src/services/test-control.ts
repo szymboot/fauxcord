@@ -27,6 +27,7 @@ export interface SetupRequest {
     id?: string
     username?: string
     discriminator?: string
+    global_name?: string | null
   }
   guilds?: SetupGuildRequest[]
 }
@@ -91,10 +92,18 @@ export function setupTestEnvironment(
     // existing row untouched -- POST /_test/users can register this same id
     // beforehand as a non-bot user (bot=0), and this row is now the bot's
     // own account, so it must win regardless of what existed before.
+    // Preserve the existing global name unless the fixture explicitly sets it.
     db.prepare(
-      `INSERT INTO users (id, username, discriminator, bot) VALUES (?, ?, ?, 1)
-       ON CONFLICT(id) DO UPDATE SET bot = 1`
-    ).run(userId, username, discriminator)
+      `INSERT INTO users (id, username, discriminator, global_name, bot) VALUES (?, ?, ?, ?, 1)
+       ON CONFLICT(id) DO UPDATE SET bot = 1,
+         global_name = CASE WHEN ? THEN excluded.global_name ELSE users.global_name END`
+    ).run(
+      userId,
+      username,
+      discriminator,
+      request.user?.global_name ?? null,
+      request.user?.global_name === undefined ? 0 : 1
+    )
 
     // Create the bot
     db.prepare(
@@ -304,6 +313,7 @@ export function getTestMessages(
 export interface CreateTestUserRequest {
   id?: string
   username: string
+  global_name?: string | null
   discriminator?: string
 }
 
@@ -341,8 +351,8 @@ export function createTestUser(
   }
 
   db.prepare(
-    'INSERT INTO users (id, username, discriminator, bot) VALUES (?, ?, ?, 0)'
-  ).run(id, request.username, discriminator)
+    'INSERT INTO users (id, username, discriminator, global_name, bot) VALUES (?, ?, ?, ?, 0)'
+  ).run(id, request.username, discriminator, request.global_name ?? null)
 
   return { id, username: request.username, discriminator }
 }

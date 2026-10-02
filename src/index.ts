@@ -10,7 +10,10 @@ import { buildApp } from './app'
 import { sendReconnect } from './gateway/server'
 import { serveWithGateway } from './http-server'
 import { readFile } from 'node:fs/promises'
-import { setupTestEnvironment } from './services/test-control'
+import {
+  setupTestEnvironment,
+  type SetupRequest,
+} from './services/test-control'
 
 const config = loadConfig()
 
@@ -22,15 +25,7 @@ const { app, wss, sessionManager } = buildApp(db, config)
 if (config.seedFile) {
   try {
     const seedData = JSON.parse(await readFile(config.seedFile, 'utf8')) as {
-      bots: {
-        token: string
-        user?: { id?: string; username?: string }
-        guilds?: {
-          id?: string
-          name: string
-          channels?: { id?: string; name: string; type?: number }[]
-        }[]
-      }[]
+      bots: SetupRequest[]
     }
 
     for (const bot of seedData.bots) {

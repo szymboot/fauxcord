@@ -39,6 +39,7 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
         id?: string
         username?: string
         discriminator?: string
+        global_name?: string | null
       }
       guilds?: {
         id?: string
@@ -46,6 +47,14 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
         channels?: { id?: string; name: string; type?: number }[]
       }[]
     }>()
+
+    if (
+      payload.user?.global_name !== undefined &&
+      payload.user.global_name !== null &&
+      typeof payload.user.global_name !== 'string'
+    ) {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
 
     try {
       const result = setupTestEnvironment(db, payload)
@@ -74,9 +83,15 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
       id?: string
       username?: string
       discriminator?: string
+      global_name?: string | null
     }>()
 
-    if (!payload.username) {
+    if (
+      !payload.username ||
+      (payload.global_name !== undefined &&
+        payload.global_name !== null &&
+        typeof payload.global_name !== 'string')
+    ) {
       return c.json({ message: '400: Bad Request', code: 0 }, 400)
     }
 
@@ -85,6 +100,7 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
         id: payload.id,
         username: payload.username,
         discriminator: payload.discriminator,
+        global_name: payload.global_name,
       })
       return c.json(result, 201)
     } catch (err) {

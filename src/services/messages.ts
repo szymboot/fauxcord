@@ -72,6 +72,7 @@ export interface UserRow {
   discriminator: string
   avatar: string | null
   bot: number
+  global_name?: string | null
 }
 
 /** Embed record type retrieved from the DB */
@@ -141,7 +142,7 @@ export interface MessageObject {
     public_flags: number
     /** Account flags bitset (always 0 in the mock) */
     flags: number
-    /** Display name (always null in the mock) */
+    /** Stored global display name, or null when absent */
     global_name: string | null
     /** Primary guild info (always null in the mock) */
     primary_guild: string | null
@@ -223,7 +224,7 @@ export function toMessageObject(
       avatar: author.avatar,
       public_flags: 0,
       flags: 0,
-      global_name: null,
+      global_name: author.global_name ?? null,
       primary_guild: null,
     },
     content: row.content,

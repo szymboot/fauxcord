@@ -61,7 +61,7 @@ export interface UserObject {
   public_flags: number
   flags: number
   bot?: boolean
-  global_name: null
+  global_name: string | null
   primary_guild: null
 }
 
@@ -94,6 +94,7 @@ interface UserRow {
   discriminator: string
   avatar: string | null
   bot: number
+  global_name: string | null
 }
 
 /** Embedded activity instance response. */
@@ -223,7 +224,7 @@ function toUserObject(row: UserRow): UserObject {
     public_flags: 0,
     flags: 0,
     ...(row.bot === 1 && { bot: true }),
-    global_name: null,
+    global_name: row.global_name ?? null,
     primary_guild: null,
   }
 }

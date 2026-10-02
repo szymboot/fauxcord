@@ -191,6 +191,7 @@ export interface PollVoterUser {
   discriminator: string
   avatar: string | null
   bot: boolean
+  global_name: string | null
 }
 
 /**
@@ -226,7 +227,7 @@ export function getPollAnswerVoters(
 
   const rows = db
     .prepare(
-      `SELECT u.id, u.username, u.discriminator, u.avatar, u.bot
+      `SELECT u.id, u.username, u.discriminator, u.avatar, u.bot, u.global_name
        FROM poll_votes pv
        JOIN users u ON u.id = pv.user_id
        WHERE pv.message_id = ? AND pv.answer_id = ? ${afterClause}
@@ -239,6 +240,7 @@ export function getPollAnswerVoters(
     discriminator: string
     avatar: string | null
     bot: number
+    global_name: string | null
   }[]
 
   return rows.map((row) => ({
@@ -247,6 +249,7 @@ export function getPollAnswerVoters(
     discriminator: row.discriminator,
     avatar: row.avatar,
     bot: row.bot === 1,
+    global_name: row.global_name,
   }))
 }
 

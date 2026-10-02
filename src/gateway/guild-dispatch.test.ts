@@ -229,3 +229,133 @@ describe('GUILD_CREATE dispatch after READY (integration)', () => {
     ws.close()
   })
 })
+
+describe('global names in member Gateway state (integration)', () => {
+  let close: (() => Promise<void>) | undefined
+  let ws: WebSocket | undefined
+  afterEach(async () => {
+    ws?.close()
+    await close?.()
+    close = undefined
+    ws = undefined
+  })
+
+  it.each(['Display Name', null, undefined])(
+    'preserves global_name=%s from GUILD_CREATE through nickname set/change/clear',
+    async (globalName) => {
+      const server = await createTestGatewayServer()
+      close = server.close
+      const httpUrl = server.url.replace('ws://', 'http://')
+      const headers = { 'Content-Type': 'application/json' }
+      const setup = await fetch(`${httpUrl}/_test/setup`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          token: 'Bot global-name',
+          user: { global_name: 'Bot Display Name' },
+          guilds: [{ id: '222222222222222222', name: 'Test Guild' }],
+        }),
+      })
+      expect(setup.status).toBe(201)
+      const registration = await fetch(`${httpUrl}/_test/users`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          username: 'TestHuman',
+          global_name: globalName,
+        }),
+      })
+      expect(registration.status).toBe(201)
+      const { id } = (await registration.json()) as { id: string }
+      const guild = '222222222222222222'
+      const join = await fetch(
+        `${httpUrl}/_test/guilds/${guild}/members/${id}`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ nick: null }),
+        }
+      )
+      expect(join.status).toBe(201)
+      expect(await join.json()).toMatchObject({
+        nick: null,
+        user: { id, global_name: globalName ?? null },
+      })
+      ws = new WebSocket(server.url)
+      const nextMessage = createMessageReader(ws)
+      const hello = await nextMessage()
+      expect(hello.op).toBe(GatewayOp.Hello)
+      ws.send(
+        JSON.stringify({
+          op: GatewayOp.Identify,
+          d: {
+            token: 'global-name',
+            intents: GatewayIntentBits.Guilds | GatewayIntentBits.GuildMembers,
+          },
+        })
+      )
+      const ready = await nextMessage()
+      expect(ready.t).toBe('READY')
+      expect(
+        (ready.d as { user: { global_name: string } }).user.global_name
+      ).toBe('Bot Display Name')
+      const initial = await nextMessage()
+      expect(initial.t).toBe('GUILD_CREATE')
+      const data = initial.d as {
+        members: {
+          nick: string | null
+          user: { id: string; global_name: string | null }
+        }[]
+      }
+      expect(data.members.find((m) => m.user.id === id)).toMatchObject({
+        nick: null,
+        user: { id, global_name: globalName ?? null },
+      })
+      const authHeaders = { ...headers, Authorization: 'Bot global-name' }
+      const userResponse = await fetch(`${httpUrl}/api/v10/users/${id}`, {
+        headers: authHeaders,
+      })
+      expect(userResponse.status).toBe(200)
+      expect(await userResponse.json()).toMatchObject({
+        global_name: globalName ?? null,
+      })
+      const list = await fetch(
+        `${httpUrl}/api/v10/guilds/${guild}/members?limit=100`,
+        { headers: authHeaders }
+      )
+      expect(list.status).toBe(200)
+      expect(await list.json()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            user: expect.objectContaining({
+              id,
+              global_name: globalName ?? null,
+            }),
+          }),
+        ])
+      )
+      for (const nick of ['First Nick', 'Second Nick', null]) {
+        const response = await fetch(
+          `${httpUrl}/api/v10/guilds/${guild}/members/${id}`,
+          {
+            method: 'PATCH',
+            headers: authHeaders,
+            body: JSON.stringify({ nick }),
+          }
+        )
+        expect(response.status).toBe(200)
+        const expected = { nick, user: { id, global_name: globalName ?? null } }
+        expect(await response.json()).toMatchObject(expected)
+        const dispatch = await nextMessage()
+        expect(dispatch.t).toBe('GUILD_MEMBER_UPDATE')
+        expect(dispatch.d).toMatchObject({ guild_id: guild, ...expected })
+        const member = await fetch(
+          `${httpUrl}/api/v10/guilds/${guild}/members/${id}`,
+          { headers: authHeaders }
+        )
+        expect(member.status).toBe(200)
+        expect(await member.json()).toMatchObject(expected)
+      }
+    }
+  )
+})

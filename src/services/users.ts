@@ -45,7 +45,7 @@ export interface UserObject {
   bot: boolean
   flags?: number
   public_flags?: number
-  /** Display name (always null in the mock) */
+  /** Stored global display name, or null when absent */
   global_name?: string | null
   /** Primary guild info (always null in the mock) */
   primary_guild?: string | null
@@ -82,6 +82,7 @@ export function getBotUser(db: Database, botToken: string): UserObject | null {
         discriminator: string
         avatar: string | null
         bot: number
+        global_name: string | null
       }
     | undefined
 
@@ -94,7 +95,7 @@ export function getBotUser(db: Database, botToken: string): UserObject | null {
         bot: user.bot === 1,
         flags: 0,
         public_flags: 0,
-        global_name: null,
+        global_name: user.global_name ?? null,
         mfa_enabled: false,
         locale: 'en-US',
         verified: true,
@@ -170,6 +171,7 @@ export function getUser(db: Database, userId: string): UserObject | null {
         discriminator: string
         avatar: string | null
         bot: number
+        global_name: string | null
       }
     | undefined
 
@@ -182,7 +184,7 @@ export function getUser(db: Database, userId: string): UserObject | null {
         bot: user.bot === 1,
         flags: 0,
         public_flags: 0,
-        global_name: null,
+        global_name: user.global_name ?? null,
         primary_guild: null,
       }
     : null
