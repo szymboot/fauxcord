@@ -1,8 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { initializeDatabase, closeDatabase } from '../db'
 import type { Database } from '../db'
-import { addMemberRole, removeMemberRole } from './guild-members'
+import {
+  addMemberRole,
+  removeMemberRole,
+  removeGuildMember,
+} from './guild-members'
 import { gatewayBus } from '../gateway/bus'
+import { seedBot, seedGuild, seedMember, seedRole } from '../test-helpers'
 
 describe('Guilds Service', () => {
   let db: Database
@@ -13,6 +18,89 @@ describe('Guilds Service', () => {
 
   afterEach(() => {
     closeDatabase(db)
+  })
+
+  describe('removeGuildMember', () => {
+    it.each([false, true])(
+      'emits a normalized user with bot=%s and only removes membership in the target guild',
+      (bot) => {
+        const token = seedBot(db)
+        const guildId = seedGuild(db, token)
+        const otherGuildId = seedGuild(db, token, '666666666666666666')
+        const userId = seedMember(db, guildId)
+        seedMember(db, otherGuildId, userId)
+        db.prepare(
+          'UPDATE users SET username = ?, discriminator = ?, avatar = ?, bot = ? WHERE id = ?'
+        ).run('DepartingMember', '1234', 'avatar-hash', bot ? 1 : 0, userId)
+        const profile = db
+          .prepare('SELECT * FROM users WHERE id = ?')
+          .get(userId)
+        const roleId = seedRole(db, guildId)
+        const otherRoleId = seedRole(db, otherGuildId)
+        addMemberRole(db, guildId, userId, roleId)
+        addMemberRole(db, otherGuildId, userId, otherRoleId)
+
+        const listener = vi.fn()
+        gatewayBus.on('guild.member.remove', listener)
+        try {
+          expect(removeGuildMember(db, guildId, userId)).toBe(true)
+          expect(listener).toHaveBeenCalledExactlyOnceWith({
+            guildId,
+            userId,
+            user: {
+              id: userId,
+              username: 'DepartingMember',
+              discriminator: '1234',
+              avatar: 'avatar-hash',
+              bot,
+              flags: 0,
+              public_flags: 0,
+              global_name: null,
+              primary_guild: null,
+            },
+          })
+          expect(
+            db
+              .prepare('SELECT * FROM guild_members WHERE user_id = ?')
+              .all(userId)
+          ).toEqual([
+            expect.objectContaining({
+              guild_id: otherGuildId,
+              user_id: userId,
+            }),
+          ])
+          expect(
+            db
+              .prepare('SELECT * FROM member_roles WHERE user_id = ?')
+              .all(userId)
+          ).toEqual([
+            { guild_id: otherGuildId, user_id: userId, role_id: otherRoleId },
+          ])
+          expect(
+            db.prepare('SELECT * FROM users WHERE id = ?').get(userId)
+          ).toEqual(profile)
+
+          expect(removeGuildMember(db, guildId, userId)).toBe(false)
+          expect(listener).toHaveBeenCalledTimes(1)
+        } finally {
+          gatewayBus.off('guild.member.remove', listener)
+        }
+      }
+    )
+
+    it('returns false without emitting for a user who is not a member', () => {
+      const token = seedBot(db)
+      const guildId = seedGuild(db, token)
+      const listener = vi.fn()
+      gatewayBus.on('guild.member.remove', listener)
+      try {
+        expect(removeGuildMember(db, guildId, '111111111111111111')).toBe(false)
+        expect(removeGuildMember(db, guildId, '999999999999999999')).toBe(false)
+        expect(listener).not.toHaveBeenCalled()
+      } finally {
+        gatewayBus.off('guild.member.remove', listener)
+      }
+    })
   })
 
   describe('addMemberRole', () => {

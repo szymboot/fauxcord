@@ -10,6 +10,7 @@ import type { Database } from '../db'
 import type { APIGuildMember, APIUser } from 'discord-api-types/v10'
 import { gatewayBus } from '../gateway/bus'
 import { toDiscordTimestamp } from '../timestamp'
+import { getUser } from './users'
 
 /**
  * Compile-time guard: ensures the safe-field subset of GuildMemberObject is
@@ -352,11 +353,12 @@ export function removeGuildMember(
 
   // Deleting guild_members/member_roles does not delete the users row, so the
   // user info is still available here for the dispatch payload.
-  const userRow = db.prepare('SELECT * FROM users WHERE id = ?').get(userId)
+  // Use the API user helper to normalize SQLite's numeric bot flag.
+  const user = getUser(db, userId)
   gatewayBus.emit('guild.member.remove', {
     guildId,
     userId,
-    user: userRow as Record<string, unknown>,
+    user: user as unknown as Record<string, unknown>,
   })
 
   return true

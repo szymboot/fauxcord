@@ -1,7 +1,12 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import WebSocket from 'ws'
 import { GatewayIntentBits } from 'discord-api-types/v10'
-import { createTestGatewayServer, seedBot, seedGuild } from '../test-helpers'
+import {
+  createTestGatewayServer,
+  seedBot,
+  seedGuild,
+  seedMember,
+} from '../test-helpers'
 import { GatewayOp } from './opcodes'
 
 /**
@@ -37,6 +42,78 @@ function createMessageReader(
       }
     })
 }
+
+describe('GUILD_MEMBER_REMOVE dispatch (integration)', () => {
+  let close: (() => Promise<void>) | undefined
+  let ws: WebSocket | undefined
+  afterEach(async () => {
+    ws?.terminate()
+    ws = undefined
+    await close?.()
+    close = undefined
+  })
+
+  it.each([false, true])(
+    'delivers a complete user with boolean bot=%s over the websocket after REST removal',
+    async (bot) => {
+      const { db, url, close: c } = await createTestGatewayServer()
+      close = c
+      const token = seedBot(db)
+      const guildId = seedGuild(db, token)
+      const userId = '555555555555555555'
+      if (bot) seedBot(db, 'Bot departing-bot', userId)
+      seedMember(db, guildId, userId)
+      db.prepare(
+        'UPDATE users SET username = ?, discriminator = ?, avatar = ? WHERE id = ?'
+      ).run('DepartingMember', '1234', 'avatar-hash', userId)
+
+      ws = new WebSocket(url)
+      const nextMessage = createMessageReader(ws)
+      const hello = await nextMessage()
+      expect(hello.op).toBe(GatewayOp.Hello)
+      ws.send(
+        JSON.stringify({
+          op: GatewayOp.Identify,
+          d: {
+            token,
+            intents: GatewayIntentBits.Guilds | GatewayIntentBits.GuildMembers,
+          },
+        })
+      )
+      const ready = await nextMessage()
+      expect(ready.t).toBe('READY')
+      const guildCreate = await nextMessage()
+      expect(guildCreate.t).toBe('GUILD_CREATE')
+
+      const response = await fetch(
+        `${url.replace('ws://', 'http://')}/api/v10/guilds/${guildId}/members/${userId}`,
+        { method: 'DELETE', headers: { Authorization: token } }
+      )
+      expect(response.status).toBe(204)
+
+      const dispatch = await nextMessage()
+      expect(dispatch).toEqual({
+        op: GatewayOp.Dispatch,
+        t: 'GUILD_MEMBER_REMOVE',
+        s: Number(guildCreate.s) + 1,
+        d: {
+          guild_id: guildId,
+          user: {
+            id: userId,
+            username: 'DepartingMember',
+            discriminator: '1234',
+            avatar: 'avatar-hash',
+            bot,
+            flags: 0,
+            public_flags: 0,
+            global_name: null,
+            primary_guild: null,
+          },
+        },
+      })
+    }
+  )
+})
 
 describe('CHANNEL_CREATE dispatch (integration)', () => {
   let close: (() => Promise<void>) | undefined
