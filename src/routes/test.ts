@@ -6,6 +6,7 @@
 
 import { Hono } from 'hono'
 import type { Database } from '../db'
+import { validateInteractionLocale } from '../validators/interaction'
 import {
   setupTestEnvironment,
   deleteTestSetup,
@@ -349,6 +350,10 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
   // command, without a real Discord client.
   app.post('/_test/interactions', async (c) => {
     const body = await c.req.json<TestInteractionRequest>()
+    const errors = validateInteractionLocale(body.locale)
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
     const result = createTestInteraction(db, body)
     return result.ok
       ? c.json(result.interaction, 201)

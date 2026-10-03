@@ -94,6 +94,22 @@ function migrateMemberTimeout(db: Database): void {
 }
 
 /**
+ * Adds the invoking user's locale to existing interactions, including a
+ * default for rows and callers created before locale support.
+ * @param db - Database instance
+ */
+function migrateInteractionLocale(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(interactions)').all() as {
+    name: string
+  }[]
+  if (columns.every((column) => column.name !== 'locale')) {
+    db.exec(
+      "ALTER TABLE interactions ADD COLUMN locale TEXT NOT NULL DEFAULT 'en-US'"
+    )
+  }
+}
+
+/**
  * Initializes the database and creates tables.
  * @param dbPath - SQLite file path (":memory:" for an in-memory DB)
  * @returns Initialized Database instance
@@ -472,6 +488,7 @@ export function initializeDatabase(dbPath: string): Database {
       application_id              TEXT NOT NULL,
       token                       TEXT NOT NULL UNIQUE,
       type                        INTEGER NOT NULL,
+      locale                      TEXT NOT NULL DEFAULT 'en-US',
       guild_id                    TEXT,
       channel_id                  TEXT,
       command_id                  TEXT,
@@ -853,6 +870,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateMemberTimeout(db)
   migrateChannelsThreadColumns(db)
   migrateChannelsFeatureColumns(db)
+  migrateInteractionLocale(db)
 
   return db
 }

@@ -564,6 +564,8 @@ export function editTestMessage(
 export interface TestInteractionRequest {
   application_id: string
   type?: number
+  /** Invoking user's Discord locale; defaults to en-US. */
+  locale?: string
   command_name: string
   guild_id?: string
   channel_id?: string
@@ -627,6 +629,7 @@ export function createTestInteraction(
     applicationId: request.application_id,
     token: interactionToken,
     type: request.type ?? 2,
+    locale: request.locale,
     guildId: request.guild_id,
     channelId: request.channel_id,
     commandId: command.id,

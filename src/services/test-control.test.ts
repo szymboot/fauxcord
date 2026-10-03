@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { initializeDatabase } from '../db'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { initializeDatabase, closeDatabase } from '../db'
 import type { Database } from '../db'
 import {
   createTestInteraction,
@@ -42,9 +42,27 @@ describe('createTestInteraction', () => {
       channel_id: channelId,
     })
     expect(result.ok).toBe(true)
-    if (result.ok) {
-      expect(result.interaction.data?.name).toBe('ping')
+    if (!result.ok) {
+      return
     }
+
+    expect(result.interaction.data?.name).toBe('ping')
+    expect(result.interaction.locale).toBe('en-US')
+  })
+
+  afterEach(() => {
+    closeDatabase(db)
+  })
+
+  it('passes the requested user locale to the interaction service', () => {
+    const result = createTestInteraction(db, {
+      application_id: applicationId,
+      command_name: 'ping',
+      guild_id: guildId,
+      channel_id: channelId,
+      locale: 'pl',
+    })
+    expect(result).toMatchObject({ ok: true, interaction: { locale: 'pl' } })
   })
 
   it('returns unknown_command for an unregistered command name', () => {
