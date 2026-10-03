@@ -16,7 +16,10 @@ import {
   injectTestMessage,
   createTestInteraction,
 } from '../services/test-control'
-import type { TestInteractionRequest } from '../services/test-control'
+import type {
+  SetupRequest,
+  TestInteractionRequest,
+} from '../services/test-control'
 import { getChannelWebhooks } from '../services/webhooks'
 import { injectPollVote } from '../services/polls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
@@ -33,20 +36,7 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
 
   // POST /_test/setup — Set up Bot, Guild, and Channel
   app.post('/_test/setup', async (c) => {
-    const payload = await c.req.json<{
-      token: string
-      user?: {
-        id?: string
-        username?: string
-        discriminator?: string
-        global_name?: string | null
-      }
-      guilds?: {
-        id?: string
-        name: string
-        channels?: { id?: string; name: string; type?: number }[]
-      }[]
-    }>()
+    const payload = await c.req.json<SetupRequest>()
 
     if (
       payload.user?.global_name !== undefined &&
@@ -62,6 +52,24 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
     } catch (err) {
       if (err instanceof Error && err.message === 'CONFLICT') {
         return c.json({ message: '409: Conflict', code: 0 }, 409)
+      }
+      if (err instanceof Error && err.message === 'INVALID_OWNER_ID') {
+        return c.json(
+          { message: 'owner_id must be a non-empty user ID', code: 0 },
+          400
+        )
+      }
+      if (err instanceof Error && err.message === 'UNKNOWN_USER') {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404).body,
+          404
+        )
+      }
+      if (err instanceof Error && err.message === 'BOT_OWNER') {
+        return c.json(
+          { message: 'Guild owner must not be a bot', code: 0 },
+          400
+        )
       }
       throw err
     }

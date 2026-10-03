@@ -35,24 +35,61 @@ curl -X POST http://localhost:3000/_test/setup \
 
 **Fields**
 
-| Field                      | Required | Description                                         |
-| -------------------------- | -------- | --------------------------------------------------- |
-| `token`                    | ✅       | Bot token (including the `"Bot "` prefix)           |
-| `user.id`                  | —        | User ID (a Snowflake is auto-generated if omitted)  |
-| `user.global_name`         | —        | Global display name (string or null; default: null) |
-| `user.username`            | —        | Username (default: `"MockBot"`)                     |
-| `guilds`                   | —        | Array of Guilds to create                           |
-| `guilds[].id`              | —        | Guild ID (auto-generated if omitted)                |
-| `guilds[].name`            | ✅       | Guild name                                          |
-| `guilds[].channels`        | —        | Array of channels to create                         |
-| `guilds[].channels[].id`   | —        | Channel ID (auto-generated if omitted)              |
-| `guilds[].channels[].name` | ✅       | Channel name                                        |
-| `guilds[].channels[].type` | —        | Channel type (`0`: text, default: `0`)              |
+| Field                      | Required | Description                                           |
+| -------------------------- | -------- | ----------------------------------------------------- |
+| `token`                    | ✅       | Bot token (including the `"Bot "` prefix)             |
+| `user.id`                  | —        | User ID (a Snowflake is auto-generated if omitted)    |
+| `user.global_name`         | —        | Global display name (string or null; default: null)   |
+| `user.username`            | —        | Username (default: `"MockBot"`)                       |
+| `guilds`                   | —        | Array of Guilds to create                             |
+| `guilds[].id`              | —        | Guild ID (auto-generated if omitted)                  |
+| `guilds[].name`            | ✅       | Guild name                                            |
+| `guilds[].owner_id`        | —        | Registered non-bot user ID; defaults to the setup bot |
+| `guilds[].channels`        | —        | Array of channels to create                           |
+| `guilds[].channels[].id`   | —        | Channel ID (auto-generated if omitted)                |
+| `guilds[].channels[].name` | ✅       | Channel name                                          |
+| `guilds[].channels[].type` | —        | Channel type (`0`: text, default: `0`)                |
 
 **Response**: The setup result (including any auto-generated IDs)
 
 **Note**: Calling this twice with the same token returns `409 Conflict`.  
 For subsequent calls, delete the existing data first via `/_test/reset` or `DELETE /_test/setup/:token`.
+
+To create a guild owned by a human, first register that user through
+`POST /_test/users`, then pass its returned ID as `guilds[].owner_id`:
+
+```json
+{
+  "token": "Bot human-owner-test",
+  "guilds": [
+    {
+      "name": "Human Owned Guild",
+      "owner_id": "555555555555555555"
+    }
+  ]
+}
+```
+
+Setup adds both the human owner and the bot as guild members. The registered
+human profile stays unchanged, including `bot: false`. Guild REST responses
+and Gateway `GUILD_CREATE` expose the human's `owner_id`; member REST and
+Gateway members expose that same user's identity. Other guilds can select
+different human owners or omit `owner_id` to retain the default bot owner.
+
+An explicit `owner_id` must be a non-empty string without surrounding
+whitespace. Invalid values (including null), bot users, and reuse of an owner's
+ID as the setup bot's `user.id` return `400`. An unregistered owner returns
+`404` with Discord code `10013` (Unknown User). A later setup also cannot reuse
+an existing human guild owner's ID for its bot account. Failed setup leaves no
+partial fixture state or Gateway events.
+
+Deleting a setup still follows its bot token, even when a human owns its guilds.
+It deletes those guilds and memberships while retaining registered human users
+and other setups, including guilds that share the same human owner.
+
+`SEED_FILE` uses the same `guilds[].owner_id` reference and validation. Referenced
+human users must already exist in the database before startup seeding; the
+current seed file format registers only bots.
 
 ---
 
