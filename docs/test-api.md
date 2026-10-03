@@ -403,6 +403,51 @@ This option applies only to this injection and leaves no pending control behind.
 
 ---
 
+## `PATCH /_test/channels/:channelId/messages/:messageId` — Edit a human message
+
+Replaces the content of an existing message authored by a registered non-bot
+user, including messages created with the injection route above. Like other
+`/_test/*` routes, this control endpoint requires no authentication. Use the
+channel and message IDs returned by injection; no author ID or human token is
+needed. Normal Discord REST message edits still enforce bot authorship.
+
+```bash
+# After registering the human and injecting a retained message, use its ID:
+curl -X PATCH http://localhost:3000/_test/channels/333333333333333333/messages/MESSAGE_ID \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Updated human message"}'
+```
+
+The JSON object must contain a string `content` of at most 2,000 characters
+(the same length validation as ordinary message edits). Empty strings, Unicode,
+and unchanged content are accepted. Other fields are ignored. Only content and
+the edit timestamp change: message ID, channel, author (`bot: false`), original
+timestamp, embeds, attachments, reactions, flags, and other fields are preserved.
+
+Returns `200` with the actual persisted message object. The ordinary message
+service emits native `MESSAGE_UPDATE` with the edited message, guild ID and
+member information for guild channels. Connect the application bot and wait for
+Gateway READY before injecting or editing, using the Guild Messages intent.
+The same bot connection and identity remain active; unchanged content also
+updates the edit timestamp and emits an update, as with ordinary REST edits.
+Dispatch is queued without waiting for a client acknowledgement.
+
+Errors leave the message unchanged and emit no update:
+
+| Status / code   | Meaning                                                                                                                              |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `400` / `50035` | Missing or invalid JSON object, missing/non-string `content`, or content over the existing message limit. Includes `errors.content`. |
+| `404` / `10003` | Unknown channel.                                                                                                                     |
+| `404` / `10008` | Missing/deleted message, missing author profile, or message belongs to another channel.                                              |
+| `400` / `0`     | Message author is a bot or webhook, rather than a registered human.                                                                  |
+
+This control operates synchronously on the current fixture data and installs no
+pending control. A message injected with `remove_after_create: true` is already
+deleted and cannot be edited. Test setup deletion/reset continues to govern
+message lifetime.
+
+---
+
 ## `POST /_test/interactions` — Simulate an interaction
 
 Generates a pseudo-interaction against a registered command (global or

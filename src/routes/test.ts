@@ -14,6 +14,7 @@ import {
   createTestUser,
   joinTestGuildMember,
   injectTestMessage,
+  editTestMessage,
   createTestInteraction,
 } from '../services/test-control'
 import type {
@@ -25,6 +26,9 @@ import { injectPollVote } from '../services/polls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { validateGuildMemberUpdate } from '../validators/guild'
 import { validateRestFault } from '../validators/rest-fault'
+import { validateMessageCreate } from '../validators/message'
+import { requiredError, typeError } from '../validators/common'
+import { parseJsonBody } from '../lib/route-helpers'
 import {
   createRestFault,
   getRestFault,
@@ -282,6 +286,63 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
     return result === 'UNKNOWN_CHANNEL' || result === 'UNKNOWN_USER'
       ? c.json({ message: '404: Not Found', code: 0 }, 404)
       : c.json(result, 201)
+  })
+
+  // PATCH /_test/channels/:channelId/messages/:messageId — Edit human content
+  app.patch('/_test/channels/:channelId/messages/:messageId', async (c) => {
+    const { channelId, messageId } = c.req.param()
+    const payload = await parseJsonBody(c)
+    if (typeof payload.content !== 'string') {
+      return c.json(
+        validationError({
+          content: {
+            _errors: [
+              payload.content === undefined
+                ? requiredError()
+                : typeError('string'),
+            ],
+          },
+        }).body,
+        400
+      )
+    }
+    const errors = validateMessageCreate({ content: payload.content })
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
+
+    const result = editTestMessage(
+      db,
+      channelId,
+      messageId,
+      payload.content,
+      baseUrl
+    )
+    switch (result) {
+      case 'UNKNOWN_CHANNEL': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_CHANNEL, 'Unknown Channel', 404)
+            .body,
+          404
+        )
+      }
+      case 'UNKNOWN_MESSAGE': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_MESSAGE, 'Unknown Message', 404)
+            .body,
+          404
+        )
+      }
+      case 'BOT_AUTHOR': {
+        return c.json(
+          { message: 'Message author must be a non-bot user', code: 0 },
+          400
+        )
+      }
+      default: {
+        return c.json(result)
+      }
+    }
   })
 
   // POST /_test/interactions — Simulate an interaction against a registered
