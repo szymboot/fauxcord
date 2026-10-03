@@ -77,6 +77,23 @@ function migrateUserGlobalName(db: Database): void {
 }
 
 /**
+ * Adds timeout state to existing guild memberships without changing other fields.
+ * @param db - Database instance
+ */
+function migrateMemberTimeout(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(guild_members)').all() as {
+    name: string
+  }[]
+  if (
+    columns.every((column) => column.name !== 'communication_disabled_until')
+  ) {
+    db.exec(
+      'ALTER TABLE guild_members ADD COLUMN communication_disabled_until TEXT'
+    )
+  }
+}
+
+/**
  * Initializes the database and creates tables.
  * @param dbPath - SQLite file path (":memory:" for an in-memory DB)
  * @returns Initialized Database instance
@@ -228,6 +245,7 @@ export function initializeDatabase(dbPath: string): Database {
       deaf       INTEGER NOT NULL DEFAULT 0,
       mute       INTEGER NOT NULL DEFAULT 0,
       flags      INTEGER NOT NULL DEFAULT 0,
+      communication_disabled_until TEXT,
       PRIMARY KEY (guild_id, user_id)
     );
 
@@ -815,6 +833,7 @@ export function initializeDatabase(dbPath: string): Database {
   `)
 
   migrateUserGlobalName(db)
+  migrateMemberTimeout(db)
   migrateChannelsThreadColumns(db)
   migrateChannelsFeatureColumns(db)
 

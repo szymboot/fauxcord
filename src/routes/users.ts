@@ -339,6 +339,7 @@ export function createUserRoutes(db: Database): Hono<AppEnv> {
           avatar: string | null
           bot: number
           global_name: string | null
+          communication_disabled_until: string | null
         }
       | undefined
     return row
@@ -346,7 +347,7 @@ export function createUserRoutes(db: Database): Hono<AppEnv> {
           avatar: null,
           avatar_decoration_data: null,
           banner: null,
-          communication_disabled_until: null,
+          communication_disabled_until: row.communication_disabled_until,
           flags: row.flags,
           joined_at: new Date(`${row.joined_at}Z`).toISOString(),
           nick: row.nick,

@@ -6,6 +6,7 @@ import type Database from 'better-sqlite3'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { getGuildMember, updateGuildMember } from './services/guild-members'
 
 const DOMAIN_TABLE_COLUMNS: Record<string, string[]> = {
   applications: [
@@ -376,6 +377,60 @@ describe('initializeDatabase', () => {
     expect(columnNames).toContain('token')
     expect(columnNames).toContain('user_id')
     expect(columnNames).toContain('username')
+  })
+
+  it('migrates legacy memberships and persists timeout set/change/clear on reopening', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-member-db-'))
+    const dbPath = path.join(dir, 'legacy.db')
+    try {
+      db = initializeDatabase(dbPath)
+      const token = testHelpers.seedBot(db)
+      const guildId = testHelpers.seedGuild(db, token)
+      const userId = testHelpers.seedMember(db, guildId)
+      const roleId = testHelpers.seedRole(db, guildId)
+      updateGuildMember(db, guildId, userId, {
+        nick: 'Legacy Nick',
+        roles: [roleId],
+        mute: true,
+      })
+      db.exec(
+        'ALTER TABLE guild_members DROP COLUMN communication_disabled_until'
+      )
+      closeDatabase(db)
+      db = initializeDatabase(dbPath)
+      const original = getGuildMember(db, guildId, userId)
+      expect(original).toMatchObject({
+        communication_disabled_until: null,
+        nick: 'Legacy Nick',
+        roles: [roleId],
+        mute: true,
+      })
+      for (const deadline of [
+        '2026-10-04T12:00:00.000000+00:00',
+        '2026-10-05T12:00:00.000000+00:00',
+        null,
+      ]) {
+        updateGuildMember(db, guildId, userId, {
+          communication_disabled_until: deadline,
+        })
+        closeDatabase(db)
+        db = initializeDatabase(dbPath)
+        expect(getGuildMember(db, guildId, userId)).toEqual({
+          ...original,
+          communication_disabled_until: deadline,
+        })
+      }
+      expect(
+        (
+          db.prepare('PRAGMA table_info(guild_members)').all() as {
+            name: string
+          }[]
+        ).filter((column) => column.name === 'communication_disabled_until')
+      ).toHaveLength(1)
+    } finally {
+      closeDatabase(db)
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('migrates legacy user profiles and preserves global names on reopening', () => {
