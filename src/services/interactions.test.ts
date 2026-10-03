@@ -5,6 +5,7 @@ import { gatewayBus } from '../gateway/bus'
 import {
   createInteraction,
   getInteractionFollowupTarget,
+  getInteractionCallbackObservation,
   handleInteractionCallback,
 } from './interactions'
 import { getMessage, getMessages, updateMessage } from './messages'
@@ -328,6 +329,74 @@ describe('deferred interaction responses', () => {
       } finally {
         gatewayBus.off('message.create', created)
         gatewayBus.off('message.update', updated)
+      }
+    }
+  )
+
+  it('rolls back callback observation when original creation fails', () => {
+    db.exec("DELETE FROM channels WHERE id = '222222222222222222'")
+    expect(() =>
+      handleInteractionCallback(
+        db,
+        'deferred',
+        'deferred-token',
+        { type: 4 },
+        BASE_URL
+      )
+    ).toThrow()
+    expect(
+      getInteractionCallbackObservation(
+        db,
+        'deferred',
+        applicationId,
+        'deferred-token'
+      )
+    ).toEqual({
+      interaction_id: 'deferred',
+      application_id: applicationId,
+      responded: false,
+      initial_callback_type: null,
+    })
+    expect(
+      getInteractionFollowupTarget(db, applicationId, 'deferred-token')
+        ?.initialResponseMessageId
+    ).toBeNull()
+  })
+
+  it.each([4, 5])(
+    'records type %i with response state before dispatch',
+    (type) => {
+      const observations: unknown[] = []
+      /** Observes the acceptance state available during message dispatch. */
+      const observe = (): void => {
+        observations.push(
+          getInteractionCallbackObservation(
+            db,
+            'deferred',
+            applicationId,
+            'deferred-token'
+          )
+        )
+      }
+      gatewayBus.on('message.create', observe)
+      try {
+        handleInteractionCallback(
+          db,
+          'deferred',
+          'deferred-token',
+          { type },
+          BASE_URL
+        )
+        expect(observations).toEqual([
+          {
+            interaction_id: 'deferred',
+            application_id: applicationId,
+            responded: true,
+            initial_callback_type: type,
+          },
+        ])
+      } finally {
+        gatewayBus.off('message.create', observe)
       }
     }
   )

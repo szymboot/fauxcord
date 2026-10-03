@@ -42,6 +42,7 @@ interface InteractionRow {
   user_id: string
   member_json: string | null
   responded: number
+  initial_callback_type: number | null
   initial_response_message_id: string | null
   created_at: string
 }
@@ -184,14 +185,58 @@ export function getInteractionFollowupTarget(
     : null
 }
 
+/** Durable initial callback state; never includes the interaction token. */
+export interface InteractionCallbackObservation {
+  interaction_id: string
+  application_id: string
+  responded: boolean
+  /** Null for pending interactions and acknowledged rows predating recording. */
+  initial_callback_type: number | null
+}
+
+/**
+ * Reads the accepted callback only when all three correlation keys match.
+ * @param db - Database
+ * @param interactionId - Exact interaction ID
+ * @param applicationId - Exact application ID
+ * @param token - Interaction token credential
+ * @returns Recorded state, or null for unknown or mismatched credentials
+ */
+export function getInteractionCallbackObservation(
+  db: Database,
+  interactionId: string,
+  applicationId: string,
+  token: string
+): InteractionCallbackObservation | null {
+  const row = db
+    .prepare(
+      `SELECT id, application_id, responded, initial_callback_type
+       FROM interactions WHERE id = ? AND application_id = ? AND token = ?`
+    )
+    .get(interactionId, applicationId, token) as
+    | Pick<
+        InteractionRow,
+        'id' | 'application_id' | 'responded' | 'initial_callback_type'
+      >
+    | undefined
+  return row
+    ? {
+        interaction_id: row.id,
+        application_id: row.application_id,
+        responded: row.responded === 1,
+        initial_callback_type: row.initial_callback_type,
+      }
+    : null
+}
+
 /** Callback (initial response) payload for POST .../callback */
 export interface InteractionCallbackPayload {
   type: number
   data?: {
-    content?: string
-    embeds?: unknown[]
-    tts?: boolean
-    flags?: number
+    content?: string | null
+    embeds?: unknown[] | null
+    tts?: boolean | null
+    flags?: number | null
   }
 }
 
@@ -269,8 +314,8 @@ export function handleInteractionCallback(
       // Link before creation so REST hydration and Gateway dispatch both carry
       // the original interaction correlation. Roll back if creation fails.
       db.prepare(
-        'UPDATE interactions SET responded = 1, initial_response_message_id = ? WHERE id = ?'
-      ).run(messageId, row.id)
+        'UPDATE interactions SET responded = 1, initial_callback_type = ?, initial_response_message_id = ? WHERE id = ?'
+      ).run(payload.type, messageId, row.id)
       return createMessage(
         db,
         {
@@ -284,9 +329,9 @@ export function handleInteractionCallback(
                 ? 20
                 : 23
               : 0,
-          content: deferred ? undefined : payload.data?.content,
-          tts: deferred ? undefined : payload.data?.tts,
-          embeds: deferred ? undefined : payload.data?.embeds,
+          content: deferred ? undefined : (payload.data?.content ?? undefined),
+          tts: deferred ? undefined : (payload.data?.tts ?? undefined),
+          embeds: deferred ? undefined : (payload.data?.embeds ?? undefined),
           flags,
         },
         baseUrl
@@ -299,7 +344,9 @@ export function handleInteractionCallback(
     )
     if (!deferred) resource = { type: 4, message }
   } else {
-    db.prepare('UPDATE interactions SET responded = 1 WHERE id = ?').run(row.id)
+    db.prepare(
+      'UPDATE interactions SET responded = 1, initial_callback_type = ? WHERE id = ?'
+    ).run(payload.type, row.id)
   }
 
   return {

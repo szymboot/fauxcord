@@ -7,6 +7,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { getGuildMember, updateGuildMember } from './services/guild-members'
+import {
+  createInteraction,
+  getInteractionCallbackObservation,
+  handleInteractionCallback,
+} from './services/interactions'
 
 const DOMAIN_TABLE_COLUMNS: Record<string, string[]> = {
   applications: [
@@ -595,6 +600,7 @@ describe('application commands / interactions tables', () => {
         'user_id',
         'member_json',
         'responded',
+        'initial_callback_type',
         'initial_response_message_id',
         'created_at',
       ])
@@ -652,6 +658,112 @@ describe('application commands / interactions tables', () => {
           .get()
       ).toBe('pl')
       reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('migrates without inventing historical types and durably records new callbacks', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-callback-type-'))
+    const dbPath = path.join(dir, 'legacy.db')
+    try {
+      const legacy = initializeDatabase(dbPath)
+      legacy.exec('ALTER TABLE interactions DROP COLUMN initial_callback_type')
+      legacy
+        .prepare(
+          `INSERT INTO interactions (id, application_id, token, type, user_id, responded)
+         VALUES ('acknowledged', 'app', 'old-token', 2, 'user', 1),
+                ('pending', 'app', 'pending-token', 2, 'user', 0)`
+        )
+        .run()
+      legacy.close()
+
+      const migrated = initializeDatabase(dbPath)
+      expect(
+        getInteractionCallbackObservation(
+          migrated,
+          'acknowledged',
+          'app',
+          'old-token'
+        )
+      ).toEqual({
+        interaction_id: 'acknowledged',
+        application_id: 'app',
+        responded: true,
+        initial_callback_type: null,
+      })
+      expect(
+        handleInteractionCallback(
+          migrated,
+          'acknowledged',
+          'old-token',
+          { type: 4 },
+          'http://localhost'
+        )
+      ).toEqual({ ok: false, reason: 'already_responded' })
+      expect(
+        getInteractionCallbackObservation(
+          migrated,
+          'pending',
+          'app',
+          'pending-token'
+        )
+      ).toMatchObject({
+        responded: false,
+        initial_callback_type: null,
+      })
+      migrated
+        .prepare(
+          "INSERT INTO users (id, username, discriminator, bot) VALUES ('app', 'Bot', '0', 1), ('user', 'Caller', '0', 0)"
+        )
+        .run()
+      migrated
+        .prepare("INSERT INTO channels (id, type) VALUES ('channel', 0)")
+        .run()
+      for (const type of [4, 5]) {
+        createInteraction(migrated, {
+          interactionId: `new-${type}`,
+          applicationId: 'app',
+          token: `new-token-${type}`,
+          type: 2,
+          channelId: 'channel',
+          userId: 'user',
+        })
+        expect(
+          handleInteractionCallback(
+            migrated,
+            `new-${type}`,
+            `new-token-${type}`,
+            { type },
+            'http://localhost'
+          )
+        ).toMatchObject({ ok: true })
+      }
+      migrated.close()
+
+      const reopened = initializeDatabase(dbPath)
+      try {
+        for (const type of [4, 5]) {
+          expect(
+            getInteractionCallbackObservation(
+              reopened,
+              `new-${type}`,
+              'app',
+              `new-token-${type}`
+            )
+          ).toMatchObject({ responded: true, initial_callback_type: type })
+        }
+        expect(
+          getInteractionCallbackObservation(
+            reopened,
+            'acknowledged',
+            'app',
+            'old-token'
+          )
+        ).toMatchObject({ responded: true, initial_callback_type: null })
+      } finally {
+        reopened.close()
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

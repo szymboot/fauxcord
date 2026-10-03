@@ -23,6 +23,7 @@ import type {
   TestInteractionRequest,
 } from '../services/test-control'
 import { getChannelWebhooks } from '../services/webhooks'
+import { getInteractionCallbackObservation } from '../services/interactions'
 import { injectPollVote } from '../services/polls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { validateGuildMemberUpdate } from '../validators/guild'
@@ -344,6 +345,25 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
         return c.json(result)
       }
     }
+  })
+
+  // GET /_test/interactions/:interactionId/callback — Read accepted callback state.
+  app.get('/_test/interactions/:interactionId/callback', (c) => {
+    const applicationId = c.req.query('application_id')
+    const token = c.req.header('X-Interaction-Token')
+    if (!applicationId || !token) {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
+    const observation = getInteractionCallbackObservation(
+      db,
+      c.req.param('interactionId'),
+      applicationId,
+      token
+    )
+    c.header('Cache-Control', 'no-store')
+    return observation
+      ? c.json(observation)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
   })
 
   // POST /_test/interactions — Simulate an interaction against a registered

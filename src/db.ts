@@ -110,6 +110,19 @@ function migrateInteractionLocale(db: Database): void {
 }
 
 /**
+ * Adds accepted callback types without guessing the mode of legacy responses.
+ * @param db - Database instance
+ */
+function migrateInteractionCallbackType(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(interactions)').all() as {
+    name: string
+  }[]
+  if (columns.every((column) => column.name !== 'initial_callback_type')) {
+    db.exec('ALTER TABLE interactions ADD COLUMN initial_callback_type INTEGER')
+  }
+}
+
+/**
  * Initializes the database and creates tables.
  * @param dbPath - SQLite file path (":memory:" for an in-memory DB)
  * @returns Initialized Database instance
@@ -496,6 +509,7 @@ export function initializeDatabase(dbPath: string): Database {
       user_id                     TEXT NOT NULL,
       member_json                 TEXT,
       responded                   INTEGER NOT NULL DEFAULT 0,
+      initial_callback_type       INTEGER,
       initial_response_message_id TEXT,
       created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -871,6 +885,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateChannelsThreadColumns(db)
   migrateChannelsFeatureColumns(db)
   migrateInteractionLocale(db)
+  migrateInteractionCallbackType(db)
 
   return db
 }
