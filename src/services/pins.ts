@@ -28,7 +28,7 @@ export function getPinnedMessages(
     .prepare(
       `SELECT m.* FROM messages m
        JOIN pins p ON p.message_id = m.id
-       WHERE p.channel_id = ?
+       WHERE p.channel_id = ? AND (m.flags & 64) = 0
        ORDER BY p.pinned_at ASC`
     )
     .all(channelId) as MessageRow[]
@@ -74,7 +74,7 @@ export function getPinnedMessageEntries(
     .prepare(
       `SELECT m.*, p.pinned_at AS pinned_at FROM messages m
        JOIN pins p ON p.message_id = m.id
-       WHERE p.channel_id = ?
+       WHERE p.channel_id = ? AND (m.flags & 64) = 0
        ORDER BY p.pinned_at ASC`
     )
     .all(channelId) as (MessageRow & { pinned_at: string })[]
@@ -102,7 +102,9 @@ export function pinMessage(
 ): 0 | 10_008 | 30_003 | 50_019 {
   // Verify the message is in the same channel
   const msg = db
-    .prepare('SELECT channel_id FROM messages WHERE id = ?')
+    .prepare(
+      'SELECT channel_id FROM messages WHERE id = ? AND (flags & 64) = 0'
+    )
     .get(messageId) as { channel_id: string } | undefined
 
   // Like real Discord, a nonexistent message returns 404 Unknown Message

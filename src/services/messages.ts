@@ -10,6 +10,7 @@ import { snowflakeToTimestamp } from '../snowflake'
 import { toDiscordTimestamp } from '../timestamp'
 import { gatewayBus } from '../gateway/bus'
 import { getGuildMember } from './guild-members'
+import { getUser, type UserObject } from './users'
 // Used for compile-time type drift detection.
 // When Renovate bumps discord-api-types, `pnpm lint:tsc` will fail if the
 // safe-field subset of MessageResponse is renamed or retyped upstream.
@@ -164,6 +165,15 @@ export interface MessageObject {
   type: number
   flags: number
   message_reference?: { message_id: string }
+  /** Application ID for an original interaction response */
+  application_id?: string
+  /** Interaction that created this original response (legacy Discord field) */
+  interaction?: {
+    id: string
+    type: number
+    name: string
+    user: UserObject
+  }
   /** Webhook ID when the message was sent via a webhook */
   webhook_id?: string
 }
@@ -309,7 +319,47 @@ export function hydrateMessageRow(
     )
     .all(row.id) as ReactionAggRow[]
 
-  return toMessageObject(row, author, embeds, attachments, reactions, baseUrl)
+  const message = toMessageObject(
+    row,
+    author,
+    embeds,
+    attachments,
+    reactions,
+    baseUrl
+  )
+  if (row.author_token === 'interaction') {
+    const interaction = db
+      .prepare(
+        `SELECT i.id, i.application_id, i.type, i.user_id, i.data, c.name
+       FROM interactions i LEFT JOIN application_commands c ON c.id = i.command_id
+       WHERE i.initial_response_message_id = ?`
+      )
+      .get(row.id) as
+      | {
+          id: string
+          application_id: string
+          type: number
+          user_id: string
+          data: string
+          name: string | null
+        }
+      | undefined
+    if (interaction) {
+      message.application_id = interaction.application_id
+      message.webhook_id = interaction.application_id
+      const user = getUser(db, interaction.user_id)
+      if (user && interaction.type === 2) {
+        const data = JSON.parse(interaction.data) as { name?: string }
+        message.interaction = {
+          id: interaction.id,
+          type: interaction.type,
+          name: interaction.name ?? data.name ?? '',
+          user,
+        }
+      }
+    }
+  }
+  return message
 }
 
 /**
@@ -359,24 +409,24 @@ export function getMessages(
 
   if (params.before) {
     query =
-      'SELECT * FROM messages WHERE channel_id = ? AND id < ? ORDER BY id DESC LIMIT ?'
+      'SELECT * FROM messages WHERE channel_id = ? AND (flags & 64) = 0 AND id < ? ORDER BY id DESC LIMIT ?'
     queryParams = [channelId, params.before, limit]
   } else if (params.after) {
     query =
-      'SELECT * FROM messages WHERE channel_id = ? AND id > ? ORDER BY id ASC LIMIT ?'
+      'SELECT * FROM messages WHERE channel_id = ? AND (flags & 64) = 0 AND id > ? ORDER BY id ASC LIMIT ?'
     queryParams = [channelId, params.after, limit]
   } else if (params.around) {
     const half = Math.floor(limit / 2)
     // Messages before "around" (fetch half items in newest-first order)
     const beforeRows = db
       .prepare(
-        'SELECT * FROM messages WHERE channel_id = ? AND id < ? ORDER BY id DESC LIMIT ?'
+        'SELECT * FROM messages WHERE channel_id = ? AND (flags & 64) = 0 AND id < ? ORDER BY id DESC LIMIT ?'
       )
       .all(channelId, params.around, half) as MessageRow[]
     // Messages from "around" onward, inclusive (fetch (limit - half) items in oldest-first order)
     const afterRows = db
       .prepare(
-        'SELECT * FROM messages WHERE channel_id = ? AND id >= ? ORDER BY id ASC LIMIT ?'
+        'SELECT * FROM messages WHERE channel_id = ? AND (flags & 64) = 0 AND id >= ? ORDER BY id ASC LIMIT ?'
       )
       .all(channelId, params.around, limit - half) as MessageRow[]
     // beforeRows is fetched in descending (newest-first) order and afterRows in ascending (oldest-first) order,
@@ -389,7 +439,7 @@ export function getMessages(
       .filter((m): m is MessageObject => m !== null)
   } else {
     query =
-      'SELECT * FROM messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?'
+      'SELECT * FROM messages WHERE channel_id = ? AND (flags & 64) = 0 ORDER BY id DESC LIMIT ?'
     queryParams = [channelId, limit]
   }
 
@@ -410,6 +460,8 @@ export interface MessageCreateParams {
   authorId: string
   authorToken: string
   messageId: string
+  /** Discord message type; defaults to DEFAULT (0) */
+  type?: number
   content?: string
   tts?: boolean
   embeds?: unknown[]
@@ -450,6 +502,10 @@ function dispatchMemberFor(
 export const MESSAGE_FLAGS = {
   /** Set when a message has been published to subscribed channels via crosspost */
   CROSSPOSTED: 1 << 1,
+  /** Interaction response visible only to its invoking user */
+  EPHEMERAL: 1 << 6,
+  /** Deferred interaction response still awaiting its final payload */
+  LOADING: 1 << 7,
 } as const
 
 /**
@@ -465,8 +521,8 @@ export function createMessage(
   baseUrl: string
 ): MessageObject {
   db.prepare(
-    `INSERT INTO messages (id, channel_id, author_id, author_token, content, tts, flags, referenced_message_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO messages (id, channel_id, author_id, author_token, content, tts, flags, referenced_message_id, type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     params.messageId,
     params.channelId,
@@ -475,7 +531,8 @@ export function createMessage(
     params.content ?? '',
     params.tts ? 1 : 0,
     params.flags ?? 0,
-    params.messageReference?.message_id ?? null
+    params.messageReference?.message_id ?? null,
+    params.type ?? 0
   )
 
   // Save embeds
@@ -487,22 +544,27 @@ export function createMessage(
     }
   }
 
-  // Update the channel's last_message_id
-  db.prepare('UPDATE channels SET last_message_id = ? WHERE id = ?').run(
-    params.messageId,
-    params.channelId
-  )
+  // Ephemeral responses are accessible through their interaction token only.
+  if (!((params.flags ?? 0) & MESSAGE_FLAGS.EPHEMERAL)) {
+    // Update the channel's last_message_id
+    db.prepare('UPDATE channels SET last_message_id = ? WHERE id = ?').run(
+      params.messageId,
+      params.channelId
+    )
+  }
 
   const msg = getMessage(db, params.messageId, baseUrl)
   if (!msg) throw new Error('Failed to create message')
 
-  const guildId = getGuildIdForChannel(db, params.channelId)
-  gatewayBus.emit('message.create', {
-    guildId,
-    channelId: params.channelId,
-    message: msg as unknown as Record<string, unknown>,
-    member: dispatchMemberFor(db, guildId, params.authorId),
-  })
+  if (!(msg.flags & MESSAGE_FLAGS.EPHEMERAL)) {
+    const guildId = getGuildIdForChannel(db, params.channelId)
+    gatewayBus.emit('message.create', {
+      guildId,
+      channelId: params.channelId,
+      message: msg as unknown as Record<string, unknown>,
+      member: dispatchMemberFor(db, guildId, params.authorId),
+    })
+  }
 
   return msg
 }
@@ -543,15 +605,23 @@ export function updateMessage(
     }
   }
 
-  if (payload.flags !== undefined) {
+  // Editing completes a deferred original. Its visibility is fixed by the
+  // initial callback, so clients cannot toggle EPHEMERAL or restore LOADING.
+  const flags =
+    row.author_token === 'interaction'
+      ? ((payload.flags ?? row.flags) &
+          ~(MESSAGE_FLAGS.EPHEMERAL | MESSAGE_FLAGS.LOADING)) |
+        (row.flags & MESSAGE_FLAGS.EPHEMERAL)
+      : payload.flags
+  if (flags !== undefined) {
     db.prepare('UPDATE messages SET flags = ? WHERE id = ?').run(
-      payload.flags,
+      flags,
       messageId
     )
   }
 
   const updated = getMessage(db, messageId, baseUrl)
-  if (updated) {
+  if (updated && !(updated.flags & MESSAGE_FLAGS.EPHEMERAL)) {
     const guildId = getGuildIdForChannel(db, row.channel_id)
     gatewayBus.emit('message.update', {
       guildId,
@@ -583,7 +653,8 @@ export function getDispatchMember(
 /**
  * Deletes a message. When `channelId` is provided, the deletion is scoped to
  * that channel so a message can only be removed through the channel it belongs
- * to (matching Discord's per-channel message endpoints).
+ * to (matching Discord's per-channel message endpoints). Channel-scoped
+ * deletion also excludes ephemeral interaction responses.
  * @param db - Database
  * @param messageId - Message ID
  * @param channelId - Optional channel ID the message must belong to
@@ -596,17 +667,23 @@ export function deleteMessage(
 ): boolean {
   // The row is gone after DELETE runs, so capture channel_id beforehand
   const target = db
-    .prepare('SELECT channel_id FROM messages WHERE id = ?')
-    .get(messageId) as { channel_id: string } | undefined
+    .prepare('SELECT channel_id, flags FROM messages WHERE id = ?')
+    .get(messageId) as { channel_id: string; flags: number } | undefined
 
   const result =
     channelId === undefined
       ? db.prepare('DELETE FROM messages WHERE id = ?').run(messageId)
       : db
-          .prepare('DELETE FROM messages WHERE id = ? AND channel_id = ?')
+          .prepare(
+            'DELETE FROM messages WHERE id = ? AND channel_id = ? AND (flags & 64) = 0'
+          )
           .run(messageId, channelId)
 
-  if (target && result.changes > 0) {
+  if (
+    target &&
+    result.changes > 0 &&
+    !(target.flags & MESSAGE_FLAGS.EPHEMERAL)
+  ) {
     gatewayBus.emit('message.delete', {
       guildId: getGuildIdForChannel(db, target.channel_id),
       channelId: target.channel_id,

@@ -143,3 +143,48 @@ export function validateWebhookExecute(
 export function isChannelWebhookLimitReached(currentCount: number): boolean {
   return currentCount >= WEBHOOK_LIMITS.CHANNEL_WEBHOOKS_MAX
 }
+
+/**
+ * Validates the supported original-response edit fields before mutation.
+ * Null content clears it; null embeds clears the embed list.
+ * @param payload - Untrusted edit JSON
+ * @returns Discord-shaped validation errors
+ */
+export function validateOriginalResponseEdit(
+  payload: unknown
+): ValidationErrors {
+  if (
+    typeof payload !== 'object' ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
+    return { body: { _errors: [typeError('object')] } }
+  }
+  const fields = payload as Record<string, unknown>
+  const errors: ValidationErrors = {
+    ...(fields.content !== undefined &&
+      fields.content !== null &&
+      typeof fields.content !== 'string' && {
+        content: { _errors: [typeError('string')] },
+      }),
+    ...(fields.embeds !== undefined &&
+      fields.embeds !== null &&
+      (!Array.isArray(fields.embeds) ||
+        fields.embeds.some(
+          (embed: unknown) =>
+            typeof embed !== 'object' || embed === null || Array.isArray(embed)
+        )) && {
+        embeds: { _errors: [typeError('array of objects')] },
+      }),
+    ...(fields.flags !== undefined &&
+      (typeof fields.flags !== 'number' ||
+        !Number.isSafeInteger(fields.flags) ||
+        fields.flags < 0 ||
+        fields.flags > 0x7f_ff_ff_ff) && {
+        flags: { _errors: [typeError('non-negative integer')] },
+      }),
+  }
+  return Object.keys(errors).length > 0
+    ? errors
+    : validateWebhookExecute(fields)
+}

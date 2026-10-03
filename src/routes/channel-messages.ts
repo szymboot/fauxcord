@@ -76,7 +76,11 @@ export function createChannelMessageRoutes(
   app.get('/channels/:channelId/messages/:messageId', (c) => {
     const { channelId, messageId } = c.req.param()
     const message = getMessage(db, messageId, baseUrl)
-    if (message && message.channel_id !== channelId) {
+    if (
+      message &&
+      (message.channel_id !== channelId ||
+        message.flags & MESSAGE_FLAGS.EPHEMERAL)
+    ) {
       const err = discordError(
         DiscordErrorCode.UNKNOWN_MESSAGE,
         'Unknown Message',
@@ -256,7 +260,10 @@ export function createChannelMessageRoutes(
       'Unknown Message'
     )
     if (existing instanceof Response) return existing
-    if (existing.channel_id !== channelId) {
+    if (
+      existing.channel_id !== channelId ||
+      existing.flags & MESSAGE_FLAGS.EPHEMERAL
+    ) {
       const err = discordError(
         DiscordErrorCode.UNKNOWN_MESSAGE,
         'Unknown Message',
@@ -367,6 +374,13 @@ export function createChannelMessageRoutes(
       'Unknown Message'
     )
     if (existing instanceof Response) return existing
+    if (existing.flags & MESSAGE_FLAGS.EPHEMERAL) {
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_MESSAGE, 'Unknown Message', 404)
+          .body,
+        404
+      )
+    }
 
     if (channel.type !== 5) {
       const err = discordError(

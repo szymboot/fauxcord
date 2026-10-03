@@ -73,7 +73,9 @@ export function createChannelThreadRoutes(db: Database): Hono<AppEnv> {
     // Scope the message lookup to the parent channel so a message from another
     // channel cannot be used to create a thread here (matches Discord's 404).
     const message = db
-      .prepare('SELECT id FROM messages WHERE id = ? AND channel_id = ?')
+      .prepare(
+        'SELECT id FROM messages WHERE id = ? AND channel_id = ? AND (flags & 64) = 0'
+      )
       .get(messageId, channelId) as { id: string } | undefined
     if (!message) {
       return c.json(
