@@ -482,6 +482,14 @@ curl -X POST http://localhost:3000/_test/interactions \
 Discord `Interaction` shape). `404` (`{"message": "404: Not Found", "code": 0}`)
 when `command_name` does not match any registered command in scope.
 
+The optional `locale` field accepts the invoking user's
+[Discord locale](https://docs.discord.com/developers/reference#locales), such
+as `pl` or `en-GB`, and defaults to `en-US`. The response and Gateway event
+include the same top-level `locale` on every interaction type except PING
+(`type: 1`). The user locale is independent of the guild's preferred locale.
+An unsupported, empty, or non-string locale returns `400` with code `50035`
+and a `locale` field error; no interaction is created or dispatched.
+
 ---
 
 ## `POST /_test/polls/:messageId/votes` — Inject a poll vote

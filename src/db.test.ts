@@ -587,6 +587,7 @@ describe('application commands / interactions tables', () => {
         'application_id',
         'token',
         'type',
+        'locale',
         'guild_id',
         'channel_id',
         'command_id',
@@ -599,6 +600,61 @@ describe('application commands / interactions tables', () => {
       ])
     )
     db.close()
+  })
+
+  it('migrates legacy interactions with a stable locale and preserves responses', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-interaction-locale-'))
+    const dbPath = path.join(dir, 'legacy.db')
+    try {
+      const legacy = initializeDatabase(dbPath)
+      legacy.exec('ALTER TABLE interactions DROP COLUMN locale')
+      legacy
+        .prepare(
+          `INSERT INTO interactions
+           (id, application_id, token, type, data, user_id, responded, initial_response_message_id)
+         VALUES ('legacy', 'app', 'token', 2, '{"options":[]}', 'user', 1, 'response')`
+        )
+        .run()
+      legacy.close()
+
+      const migrated = initializeDatabase(dbPath)
+      expect(
+        migrated
+          .prepare('SELECT * FROM interactions WHERE id = ?')
+          .get('legacy')
+      ).toMatchObject({
+        locale: 'en-US',
+        data: '{"options":[]}',
+        responded: 1,
+        initial_response_message_id: 'response',
+      })
+      migrated
+        .prepare("UPDATE interactions SET locale = 'pl' WHERE id = 'legacy'")
+        .run()
+      migrated
+        .prepare(
+          "INSERT INTO interactions (id, application_id, token, type, user_id) VALUES ('old-caller', 'app', 'other-token', 2, 'user')"
+        )
+        .run()
+      expect(
+        migrated
+          .prepare("SELECT locale FROM interactions WHERE id = 'old-caller'")
+          .pluck()
+          .get()
+      ).toBe('en-US')
+      migrated.close()
+
+      const reopened = initializeDatabase(dbPath)
+      expect(
+        reopened
+          .prepare("SELECT locale FROM interactions WHERE id = 'legacy'")
+          .pluck()
+          .get()
+      ).toBe('pl')
+      reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('enforces UNIQUE(application_id, guild_id, type, name) on application_commands', () => {

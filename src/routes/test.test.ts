@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { Hono } from 'hono'
 import { createTestRoutes } from './test'
 import { initializeDatabase, closeDatabase } from '../db'
@@ -13,6 +13,8 @@ import { createTestUser } from '../services/test-control'
 import { getUser, getBotUser } from '../services/users'
 import { getGuildMember, getGuildMembers } from '../services/guild-members'
 import { createPoll } from '../services/polls'
+import { createCommand } from '../services/application-commands'
+import { gatewayBus } from '../gateway/bus'
 import type { Database } from '../db'
 
 const BASE_URL = 'http://localhost:3000'
@@ -514,9 +516,84 @@ describe('Test Control API', () => {
         }),
       })
       expect(res.status).toBe(201)
-      const body = (await res.json()) as { data: { name: string } }
+      const body = (await res.json()) as {
+        data: { name: string }
+        locale: string
+      }
       expect(body.data.name).toBe('ping')
+      expect(body.locale).toBe('en-US')
     })
+
+    it.each(['pl', 'en-GB', 'pt-BR', 'es-419', 'zh-CN'])(
+      'serializes the requested locale %s for a global command',
+      async (locale) => {
+        seedBot(db)
+        createCommand(db, '111111111111111111', null, {
+          name: 'ping',
+          description: 'x',
+        })
+        const res = await app.request('/_test/interactions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            application_id: '111111111111111111',
+            command_name: 'ping',
+            locale,
+          }),
+        })
+        expect(res.status).toBe(201)
+        expect(await res.json()).toMatchObject({
+          locale,
+          data: { name: 'ping' },
+        })
+      }
+    )
+
+    it.each([
+      '',
+      ' ',
+      'en',
+      'en-us',
+      'not-a-locale',
+      'toString',
+      null,
+      42,
+      {},
+      [],
+    ])(
+      'rejects invalid locale %j without creating or dispatching an interaction',
+      async (locale) => {
+        seedBot(db)
+        createCommand(db, '111111111111111111', null, {
+          name: 'ping',
+          description: 'x',
+        })
+        const spy = vi.fn()
+        gatewayBus.on('interaction.create', spy)
+        try {
+          const res = await app.request('/_test/interactions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              application_id: '111111111111111111',
+              command_name: 'ping',
+              locale,
+            }),
+          })
+          expect(res.status).toBe(400)
+          expect(await res.json()).toMatchObject({
+            code: 50_035,
+            errors: { locale: { _errors: expect.any(Array) } },
+          })
+          expect(
+            db.prepare('SELECT COUNT(*) FROM interactions').pluck().get()
+          ).toBe(0)
+          expect(spy).not.toHaveBeenCalled()
+        } finally {
+          gatewayBus.off('interaction.create', spy)
+        }
+      }
+    )
 
     it('returns 404 for an unregistered command name', async () => {
       const res = await app.request('/_test/interactions', {
@@ -525,6 +602,7 @@ describe('Test Control API', () => {
         body: JSON.stringify({
           application_id: '000000000000000000',
           command_name: 'does-not-exist',
+          locale: 'pl',
         }),
       })
       expect(res.status).toBe(404)

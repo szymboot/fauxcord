@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { initializeDatabase } from '../db'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { initializeDatabase, closeDatabase } from '../db'
 import type { Database } from '../db'
 import { gatewayBus } from '../gateway/bus'
 import {
@@ -29,6 +29,10 @@ describe('interactions service', () => {
     ).run(userId)
   })
 
+  afterEach(() => {
+    closeDatabase(db)
+  })
+
   it('creates an interaction and emits interaction.create', () => {
     const spy = vi.fn()
     gatewayBus.on('interaction.create', spy)
@@ -47,12 +51,45 @@ describe('interactions service', () => {
     expect(interaction.application_id).toBe(applicationId)
     expect(interaction.channel_id).toBe(channelId)
     expect(interaction.user).toMatchObject({ id: userId })
+    expect(interaction.locale).toBe('en-US')
     expect(spy).toHaveBeenCalledWith({
       applicationId,
-      interaction: expect.objectContaining({ id: 'int1' }),
+      interaction: expect.objectContaining({ id: 'int1', locale: 'en-US' }),
     })
 
     gatewayBus.off('interaction.create', spy)
+  })
+
+  it.each([2, 3, 4, 5])('includes the requested locale for type %i', (type) => {
+    const interaction = createInteraction(db, {
+      interactionId: 'localized',
+      applicationId,
+      token: 'localized-token',
+      type,
+      channelId,
+      userId,
+      locale: 'pl',
+    })
+    expect(interaction.locale).toBe('pl')
+    expect(interaction.data).toBeUndefined()
+    expect(
+      db
+        .prepare('SELECT locale FROM interactions WHERE id = ?')
+        .pluck()
+        .get(interaction.id)
+    ).toBe('pl')
+  })
+
+  it('omits locale for PING interactions', () => {
+    const interaction = createInteraction(db, {
+      interactionId: 'ping',
+      applicationId,
+      token: 'ping-token',
+      type: 1,
+      userId,
+      locale: 'pl',
+    })
+    expect(interaction).not.toHaveProperty('locale')
   })
 
   it('resolves a followup target for a known interaction token', () => {

@@ -18,6 +18,7 @@ export interface InteractionObject {
   id: string
   application_id: string
   type: number
+  locale?: string
   data?: Record<string, unknown>
   guild_id?: string
   channel_id?: string
@@ -33,6 +34,7 @@ interface InteractionRow {
   application_id: string
   token: string
   type: number
+  locale: string
   guild_id: string | null
   channel_id: string | null
   command_id: string | null
@@ -85,6 +87,7 @@ function toInteractionObject(
     type: row.type,
     token: row.token,
     version: 1,
+    ...(row.type !== 1 && { locale: row.locale }),
     ...(data && { data }),
     ...(row.channel_id && { channel_id: row.channel_id }),
     ...(row.guild_id && { guild_id: row.guild_id }),
@@ -101,6 +104,8 @@ export interface CreateInteractionParams {
   applicationId: string
   token: string
   type: number
+  /** Invoking user's Discord locale; defaults to en-US. */
+  locale?: string
   guildId?: string
   channelId?: string
   commandId?: string
@@ -121,13 +126,14 @@ export function createInteraction(
 ): InteractionObject {
   db.prepare(
     `INSERT INTO interactions
-       (id, application_id, token, type, guild_id, channel_id, command_id, data, user_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (id, application_id, token, type, locale, guild_id, channel_id, command_id, data, user_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     params.interactionId,
     params.applicationId,
     params.token,
     params.type,
+    params.locale ?? 'en-US',
     params.guildId ?? null,
     params.channelId ?? null,
     params.commandId ?? null,
