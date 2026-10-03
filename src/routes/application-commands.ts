@@ -22,7 +22,10 @@ import {
   setCommandPermissions,
   normalizeName,
 } from '../services/application-commands'
-import { validateApplicationCommandCreate } from '../validators/application-command'
+import {
+  validateApplicationCommandCreate,
+  validateApplicationCommandOptions,
+} from '../validators/application-command'
 import type { ApplicationCommandCreatePayload } from '../validators/application-command'
 import { getGuild } from '../services/guilds'
 
@@ -157,6 +160,10 @@ export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
     if (denied) return denied
 
     const payload = await c.req.json<Partial<ApplicationCommandCreatePayload>>()
+    const errors = validateApplicationCommandOptions(payload.options)
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
     const result = updateCommand(db, applicationId, null, commandId, payload)
     if (!result.ok) {
       if (result.reason === 'not_found') {
@@ -317,6 +324,10 @@ export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
 
       const payload =
         await c.req.json<Partial<ApplicationCommandCreatePayload>>()
+      const errors = validateApplicationCommandOptions(payload.options)
+      if (Object.keys(errors).length > 0) {
+        return c.json(validationError(errors).body, 400)
+      }
       const result = updateCommand(
         db,
         applicationId,
