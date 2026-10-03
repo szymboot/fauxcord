@@ -273,6 +273,46 @@ shape.
 
 ---
 
+### OAuth command permission overrides
+
+The guild permission list, individual permission GET, and individual permission
+PUT endpoints accept an unexpired local OAuth Bearer token whose `client_id`
+matches the application ID and whose space-separated scopes include
+`applications.commands.permissions.update`. This applies to both global and
+guild commands and all three URL prefixes. PUT replaces the stored overrides;
+`{"permissions":[]}` clears them. Missing, malformed, expired, or revoked
+credentials return `401`; a different application or insufficient scope returns
+`403` with code `50001` (Missing Access).
+
+For a local test, request a token using the existing simplified client-credentials
+flow. Set `client_id` to the bot user ID used when registering the commands:
+
+```bash
+curl -X POST http://localhost:3000/api/v10/oauth2/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode 'grant_type=client_credentials' \
+  --data-urlencode 'client_id=111111111111111111' \
+  --data-urlencode 'scope=applications.commands.permissions.update'
+```
+
+Use the returned `access_token` as `Authorization: Bearer <access_token>` when
+calling `/applications/{application_id}/guilds/{guild_id}/commands/{command_id}/permissions`.
+Tokens exchanged through Fauxcord's authorization-code flow work with the same
+application and scope checks. A bot token used as a Bearer credential is invalid.
+Permission tokens do not authorize command CRUD.
+
+These are emulator conventions: Fauxcord's token endpoint accepts `client_id`
+in the form body, auto-registers unknown clients, and does not verify client
+secrets. Its client-credentials tokens have no user identity, and command
+permission routes do not evaluate the authorizing user's guild permissions or
+role hierarchy. Existing owning Bot access to permission GET/PUT is retained
+for compatibility. On [Discord](https://docs.discord.com/developers/interactions/application-commands#permissions),
+permission edits require a Bearer token authorized by a user with sufficient
+guild/resource permissions. Discord's [client-credentials flow](https://docs.discord.com/developers/topics/oauth2#client-credentials-grant)
+authenticates the client and returns a token for the bot owner; team applications
+are restricted to `identify` and `applications.commands.update`. Do not assume
+Fauxcord's simplified token issuance or Bot permission edits work on Discord.
+
 ## Environment variables
 
 | Variable       | Default                 | Description                                         |
