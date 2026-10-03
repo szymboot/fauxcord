@@ -76,12 +76,22 @@ export function createGuildMemberRoutes(db: Database): Hono<AppEnv> {
     if (guild instanceof Response) return guild
 
     const payload = (await parseJsonBody(c)) as GuildMemberUpdatePayload
-    const errors = validateGuildMemberUpdate(payload)
+    const currentMemberPayload = {
+      nick: payload.nick,
+      roles: payload.roles,
+      mute: payload.mute,
+    }
+    const errors = validateGuildMemberUpdate(currentMemberPayload)
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
     }
 
-    const updated = updateGuildMember(db, guildId, bot.user_id, payload)
+    const updated = updateGuildMember(
+      db,
+      guildId,
+      bot.user_id,
+      currentMemberPayload
+    )
     const result = requireEntity(
       c,
       updated,
@@ -152,7 +162,9 @@ export function createGuildMemberRoutes(db: Database): Hono<AppEnv> {
       'Unknown Member'
     )
     if (result instanceof Response) return result
-    return payload.roles !== undefined && payload.mute !== undefined
+    return payload.roles !== undefined &&
+      payload.mute !== undefined &&
+      payload.communication_disabled_until === undefined
       ? c.body(null, 204)
       : c.json(result)
   })

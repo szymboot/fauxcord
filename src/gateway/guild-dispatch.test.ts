@@ -8,6 +8,8 @@ import {
   seedMember,
 } from '../test-helpers'
 import { GatewayOp } from './opcodes'
+import { getGuildMember, updateGuildMember } from '../services/guild-members'
+import { toDiscordTimestamp } from '../timestamp'
 
 /**
  * Queues every incoming WebSocket message as it arrives, so that messages
@@ -113,6 +115,73 @@ describe('GUILD_MEMBER_REMOVE dispatch (integration)', () => {
       })
     }
   )
+})
+
+describe('guild member timeout Gateway state (integration)', () => {
+  let close: (() => Promise<void>) | undefined
+  let ws: WebSocket | undefined
+  afterEach(async () => {
+    ws?.terminate()
+    ws = undefined
+    await close?.()
+    close = undefined
+  })
+
+  it('delivers persisted deadlines in GUILD_CREATE and set/change/clear member updates', async () => {
+    const server = await createTestGatewayServer()
+    close = server.close
+    const token = seedBot(server.db)
+    const guildId = seedGuild(server.db, token)
+    const userId = seedMember(server.db, guildId)
+    const first = new Date(Date.now() + 60_000).toISOString()
+    const second = new Date(Date.now() + 120_000).toISOString()
+    updateGuildMember(server.db, guildId, userId, {
+      nick: 'Retained',
+      communication_disabled_until: first,
+    })
+    const original = getGuildMember(server.db, guildId, userId)
+    ws = new WebSocket(server.url)
+    const nextMessage = createMessageReader(ws)
+    const hello = await nextMessage()
+    expect(hello.op).toBe(GatewayOp.Hello)
+    ws.send(
+      JSON.stringify({
+        op: GatewayOp.Identify,
+        d: {
+          token,
+          intents: GatewayIntentBits.Guilds | GatewayIntentBits.GuildMembers,
+        },
+      })
+    )
+    const ready = await nextMessage()
+    expect(ready.t).toBe('READY')
+    const initial = await nextMessage()
+    expect(initial.t).toBe('GUILD_CREATE')
+    expect((initial.d as { members: unknown[] }).members).toContainEqual(
+      original
+    )
+
+    for (const deadline of [second, first, null]) {
+      const response = await fetch(
+        `${server.url.replace('ws://', 'http://')}/api/v10/guilds/${guildId}/members/${userId}`,
+        {
+          method: 'PATCH',
+          headers: { Authorization: token, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ communication_disabled_until: deadline }),
+        }
+      )
+      expect(response.status).toBe(200)
+      const expected = {
+        ...original,
+        communication_disabled_until:
+          deadline === null ? null : toDiscordTimestamp(new Date(deadline)),
+      }
+      expect(await response.json()).toEqual(expected)
+      const dispatch = await nextMessage()
+      expect(dispatch.t).toBe('GUILD_MEMBER_UPDATE')
+      expect(dispatch.d).toEqual({ ...expected, guild_id: guildId })
+    }
+  })
 })
 
 describe('CHANNEL_CREATE dispatch (integration)', () => {

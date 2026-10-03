@@ -21,10 +21,20 @@ import { getUser } from './users'
 type _MemberCompatGuard =
   Pick<
     APIGuildMember,
-    'nick' | 'roles' | 'joined_at' | 'deaf' | 'mute'
+    | 'nick'
+    | 'roles'
+    | 'joined_at'
+    | 'deaf'
+    | 'mute'
+    | 'communication_disabled_until'
   > extends Pick<
     GuildMemberObject,
-    'nick' | 'roles' | 'joined_at' | 'deaf' | 'mute'
+    | 'nick'
+    | 'roles'
+    | 'joined_at'
+    | 'deaf'
+    | 'mute'
+    | 'communication_disabled_until'
   >
     ? true
     : never
@@ -55,6 +65,7 @@ interface MemberRow {
   deaf: number
   mute: number
   flags: number
+  communication_disabled_until: string | null
 }
 
 /** User subset embedded in a guild member object */
@@ -80,7 +91,7 @@ export interface GuildMemberObject {
   avatar: string | null
   /** Member's guild-specific banner hash (always null in the mock) */
   banner: string | null
-  /** Timestamp when the member's timeout expires (always null in the mock) */
+  /** Timeout deadline; null or a past timestamp means the member is not timed out */
   communication_disabled_until: string | null
   flags: number
   joined_at: string
@@ -149,7 +160,7 @@ export function getGuildMember(
     ? {
         avatar: null,
         banner: null,
-        communication_disabled_until: null,
+        communication_disabled_until: memberRow.communication_disabled_until,
         flags: memberRow.flags,
         joined_at: toDiscordTimestamp(new Date(memberRow.joined_at)),
         nick: memberRow.nick,
@@ -239,7 +250,8 @@ export function getGuildMembers(
         ? {
             avatar: null,
             banner: null,
-            communication_disabled_until: null,
+            communication_disabled_until:
+              memberRow.communication_disabled_until,
             flags: memberRow.flags,
             joined_at: toDiscordTimestamp(new Date(memberRow.joined_at)),
             nick: memberRow.nick,
@@ -270,10 +282,11 @@ export interface GuildMemberUpdateParams {
   nick?: string | null
   roles?: string[]
   mute?: boolean | null
+  communication_disabled_until?: string | null
 }
 
 /**
- * Updates a guild member's information (nickname and/or role list).
+ * Updates a guild member's nickname, roles, voice mute and/or timeout deadline.
  * @param db - Database
  * @param guildId - Guild ID
  * @param userId - User ID
@@ -290,6 +303,17 @@ export function updateGuildMember(
     .prepare('SELECT * FROM guild_members WHERE guild_id = ? AND user_id = ?')
     .get(guildId, userId) as MemberRow | undefined
   if (!current) return null
+
+  if (payload.communication_disabled_until !== undefined) {
+    const deadline = payload.communication_disabled_until
+    db.prepare(
+      'UPDATE guild_members SET communication_disabled_until = ? WHERE guild_id = ? AND user_id = ?'
+    ).run(
+      deadline === null ? null : toDiscordTimestamp(new Date(deadline)),
+      guildId,
+      userId
+    )
+  }
 
   if (payload.nick !== undefined) {
     db.prepare(

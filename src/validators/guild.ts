@@ -166,15 +166,58 @@ export function validateRoleUpdate(
 /** Maximum guild member nickname length (Discord's limit) */
 const NICK_MAX = 32
 
+/** Discord permits timeout deadlines up to 28 days in the future. */
+const TIMEOUT_MAX_MS = 28 * 24 * 60 * 60 * 1000
+
+/** ISO 8601 datetimes must include a timezone and a valid time of day. */
+const TIMEOUT_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/
+
+/**
+ * Validates a nullable timeout deadline, including calendar dates and duration.
+ * @param deadline - Untrusted timeout field
+ * @returns Field errors, empty for omitted, cleared or valid deadlines
+ */
+function validateMemberTimeout(deadline: unknown): FieldError[] {
+  if (deadline === undefined || deadline === null) return []
+  if (typeof deadline !== 'string') return [typeError('string')]
+
+  const timestamp = Date.parse(deadline)
+  const calendarDate = deadline.slice(0, 10)
+  const calendarTimestamp = Date.parse(`${calendarDate}T00:00:00Z`)
+  if (
+    !TIMEOUT_TIMESTAMP.test(deadline) ||
+    !Number.isFinite(timestamp) ||
+    !Number.isFinite(calendarTimestamp) ||
+    new Date(calendarTimestamp).toISOString().slice(0, 10) !== calendarDate
+  ) {
+    return [
+      {
+        code: 'BASE_TYPE_BAD_FORMAT',
+        message: 'Must be a valid ISO8601 timestamp with a timezone.',
+      },
+    ]
+  }
+  return timestamp > Date.now() + TIMEOUT_MAX_MS
+    ? [
+        {
+          code: 'TIMEOUT_DURATION_TOO_LONG',
+          message: 'Timeout must not exceed 28 days in the future.',
+        },
+      ]
+    : []
+}
+
 /** Guild member update request type */
 export interface GuildMemberUpdatePayload {
   nick?: string | null
   roles?: string[]
   mute?: boolean | null
+  communication_disabled_until?: string | null
 }
 
 /**
- * Validates a guild member update payload: `nick` length.
+ * Validates a guild member update payload: nickname and timeout deadline.
  * @param payload - Payload to validate
  * @returns Validation error map (empty when valid)
  */
@@ -182,6 +225,12 @@ export function validateGuildMemberUpdate(
   payload: GuildMemberUpdatePayload
 ): ValidationErrors {
   const errors: ValidationErrors = {}
+  const timeoutErrors = validateMemberTimeout(
+    payload.communication_disabled_until
+  )
+  if (timeoutErrors.length > 0) {
+    errors.communication_disabled_until = { _errors: timeoutErrors }
+  }
   if (payload.nick !== undefined && payload.nick !== null) {
     if (typeof payload.nick !== 'string') {
       errors.nick = { _errors: [typeError('string')] }
