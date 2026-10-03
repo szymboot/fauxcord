@@ -55,7 +55,9 @@ function messageBelongsToChannel(
   messageId: string
 ): boolean {
   const message = db
-    .prepare('SELECT channel_id FROM messages WHERE id = ?')
+    .prepare(
+      'SELECT channel_id FROM messages WHERE id = ? AND (flags & 64) = 0'
+    )
     .get(messageId) as { channel_id: string } | undefined
   return message?.channel_id === channelId
 }

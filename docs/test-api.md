@@ -474,7 +474,7 @@ curl -X POST http://localhost:3000/_test/interactions \
 | `command_name`   | ✅       | Name of a command already registered via the Application Commands API                                       |
 | `type`           | —        | Interaction type (default: `2`, APPLICATION_COMMAND)                                                        |
 | `guild_id`       | —        | Guild ID. When set, prefers a guild-scoped command match, falling back to a global command of the same name |
-| `channel_id`     | —        | Channel ID the interaction is bound to (needed for `type: 4` callback responses and followups)              |
+| `channel_id`     | —        | Channel ID the interaction is bound to (needed for `type: 4`/`5` original responses and followups)          |
 | `user_id`        | —        | Invoking user ID (auto-generated if omitted)                                                                |
 | `options`        | —        | Command option values, passed through into the interaction's `data.options`                                 |
 
@@ -489,6 +489,31 @@ include the same top-level `locale` on every interaction type except PING
 (`type: 1`). The user locale is independent of the guild's preferred locale.
 An unsupported, empty, or non-string locale returns `400` with code `50035`
 and a `locale` field error; no interaction is created or dispatched.
+
+Bots can acknowledge the Gateway interaction with a type-5 callback
+(`DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE`) and later complete it through
+`PATCH /webhooks/{application_id}/{interaction_token}/messages/@original`.
+The callback returns `204`, or `200` with `with_response=true`; that response
+includes `response_message_id`, `response_message_loading: true`, and
+`response_message_ephemeral`. A second callback returns `400`, code `40060`
+(Interaction has already been acknowledged), so clients can fall back to
+editing the original response.
+
+`GET .../messages/@original` returns the pending message with the `LOADING`
+flag (`128`). Consumers waiting for completed output must check
+`(message.flags & 128) === 0` before using its content or embeds. Editing
+completes that same message and clears `LOADING`, preserving its ID, channel,
+bot author, application/webhook IDs, and original `interaction` metadata.
+Public responses can also be observed through channel message REST endpoints
+and Gateway `MESSAGE_CREATE`/`MESSAGE_UPDATE` events. Type-4 direct responses
+remain supported through the same original-response endpoints.
+
+Type-5 callbacks accept only the `EPHEMERAL` flag (`64`, or `0` for public).
+Ephemeral responses retain that visibility when edited, are available through
+the interaction token, and are excluded from channel message retrieval and
+Gateway message events. Other callback types retain the mock's existing scope;
+types 6/7/9 acknowledge without creating an original response. Token expiry,
+component rendering, and uploaded response attachments are not modeled here.
 
 ---
 

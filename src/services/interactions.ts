@@ -11,7 +11,7 @@ import { generateSnowflake } from '../snowflake'
 import { gatewayBus } from '../gateway/bus'
 import { getGuildMember } from './guild-members'
 import { getUser } from './users'
-import { createMessage, type MessageObject } from './messages'
+import { createMessage, MESSAGE_FLAGS, type MessageObject } from './messages'
 
 /** Interaction object for API responses and Gateway dispatch */
 export interface InteractionObject {
@@ -201,6 +201,8 @@ export interface InteractionCallbackResponse {
     id: string
     type: number
     response_message_id?: string
+    response_message_loading?: boolean
+    response_message_ephemeral?: boolean
     channel_id?: string
     guild_id?: string
   }
@@ -218,10 +220,9 @@ export type InteractionCallbackResult =
 
 /**
  * Handles POST /interactions/:id/:token/callback. Type 4 (CHANNEL_MESSAGE_
- * WITH_SOURCE) creates a message in the interaction's channel and records
- * it as the initial response; types 5/6/7/9 (deferred/component-ack/modal)
- * only mark the interaction as responded, matching this mock's documented
- * simplification (no placeholder "thinking..." message is modeled).
+ * WITH_SOURCE) creates the original response. Type 5 creates a loading
+ * original that can be completed through the webhook edit endpoint.
+ * Types 6/7/9 retain this mock's acknowledgement-only behavior.
  * @param db - Database
  * @param interactionId - `:interactionId` route param
  * @param token - `:interactionToken` route param
@@ -250,27 +251,53 @@ export function handleInteractionCallback(
   }
 
   let resource: InteractionCallbackResponse['resource']
-  if (payload.type === 4 && row.channel_id) {
+  if ((payload.type === 4 || payload.type === 5) && row.channel_id) {
+    const channelId = row.channel_id
+    const deferred = payload.type === 5
     const messageId = generateSnowflake()
-    const message = createMessage(
-      db,
-      {
-        messageId,
-        channelId: row.channel_id,
-        authorId: row.application_id,
-        authorToken: 'interaction',
-        content: payload.data?.content,
-        tts: payload.data?.tts,
-        embeds: payload.data?.embeds,
-        flags: payload.data?.flags,
-      },
-      baseUrl
-    )
-    db.prepare(
-      'UPDATE interactions SET responded = 1, initial_response_message_id = ? WHERE id = ?'
-    ).run(messageId, row.id)
+    const flags = deferred
+      ? MESSAGE_FLAGS.LOADING |
+        ((payload.data?.flags ?? 0) & MESSAGE_FLAGS.EPHEMERAL)
+      : (payload.data?.flags ?? 0)
+    const command = row.command_id
+      ? (db
+          .prepare('SELECT type FROM application_commands WHERE id = ?')
+          .get(row.command_id) as { type: number } | undefined)
+      : undefined
+    const data = JSON.parse(row.data) as { type?: number }
+    const message = db.transaction(() => {
+      // Link before creation so REST hydration and Gateway dispatch both carry
+      // the original interaction correlation. Roll back if creation fails.
+      db.prepare(
+        'UPDATE interactions SET responded = 1, initial_response_message_id = ? WHERE id = ?'
+      ).run(messageId, row.id)
+      return createMessage(
+        db,
+        {
+          messageId,
+          channelId,
+          authorId: row.application_id,
+          authorToken: 'interaction',
+          type:
+            row.type === 2
+              ? (command?.type ?? data.type ?? 1) === 1
+                ? 20
+                : 23
+              : 0,
+          content: deferred ? undefined : payload.data?.content,
+          tts: deferred ? undefined : payload.data?.tts,
+          embeds: deferred ? undefined : payload.data?.embeds,
+          flags,
+        },
+        baseUrl
+      )
+    })()
     interaction.response_message_id = messageId
-    resource = { type: 4, message }
+    interaction.response_message_loading = deferred
+    interaction.response_message_ephemeral = Boolean(
+      flags & MESSAGE_FLAGS.EPHEMERAL
+    )
+    if (!deferred) resource = { type: 4, message }
   } else {
     db.prepare('UPDATE interactions SET responded = 1 WHERE id = ?').run(row.id)
   }

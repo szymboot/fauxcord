@@ -8,9 +8,10 @@
 
 import { Hono } from 'hono'
 import type { Database } from '../db'
-import { DiscordErrorCode, discordError } from '../errors'
+import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { handleInteractionCallback } from '../services/interactions'
 import type { InteractionCallbackPayload } from '../services/interactions'
+import { validateInteractionCallback } from '../validators/interaction'
 
 /**
  * Creates the Interactions API routes.
@@ -26,13 +27,17 @@ export function createInteractionRoutes(db: Database, baseUrl: string): Hono {
     '/interactions/:interactionId/:interactionToken/callback',
     async (c) => {
       const { interactionId, interactionToken } = c.req.param()
-      const payload = await c.req.json<InteractionCallbackPayload>()
+      const payload: unknown = await c.req.json().catch(() => null)
+      const errors = validateInteractionCallback(payload)
+      if (Object.keys(errors).length > 0) {
+        return c.json(validationError(errors).body, 400)
+      }
 
       const result = handleInteractionCallback(
         db,
         interactionId,
         interactionToken,
-        payload,
+        payload as InteractionCallbackPayload,
         baseUrl
       )
 

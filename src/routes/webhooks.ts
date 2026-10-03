@@ -28,6 +28,7 @@ import { getInteractionFollowupTarget } from '../services/interactions'
 import {
   validateWebhookExecute,
   validateWebhookUpdate,
+  validateOriginalResponseEdit,
 } from '../validators/webhook'
 import { isEmptyMessage } from '../validators/message'
 import { parseGithubBody, parseSlackBody } from '../lib/route-helpers'
@@ -85,6 +86,14 @@ function createFollowupOrWebhookMessage(
       )
 }
 
+/**
+ * Resolves an interaction's recorded original response or the mock's latest
+ * message for a real webhook.
+ * @param db - Database
+ * @param webhookId - Application or webhook ID
+ * @param token - Interaction or webhook token
+ * @returns Original message ID, or null when absent
+ */
 function getOriginalMessageId(
   db: Database,
   webhookId: string,
@@ -440,8 +449,8 @@ export function createWebhookRoutes(db: Database, baseUrl: string): Hono {
   })
 
   // GET /webhooks/:webhookId/:token/messages/@original — Retrieve the
-  // interaction's initial response message (real webhooks have no
-  // "original" response concept; this 404s for them).
+  // interaction's initial response message (or the mock's latest real
+  // webhook message for its existing @original compatibility behavior).
   app.get('/webhooks/:webhookId/:token/messages/@original', (c) => {
     const { webhookId, token } = c.req.param()
     const messageId = getOriginalMessageId(db, webhookId, token)
@@ -477,11 +486,25 @@ export function createWebhookRoutes(db: Database, baseUrl: string): Hono {
       )
       return c.json(err.body, 404)
     }
-    const payload = await c.req.json<{
-      content?: string
-      embeds?: unknown[]
-    }>()
-    const updated = updateMessage(db, messageId, payload, baseUrl)
+    const rawPayload: unknown = await c.req.json().catch(() => null)
+    const errors = validateOriginalResponseEdit(rawPayload)
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
+    const payload = rawPayload as {
+      content?: string | null
+      embeds?: unknown[] | null
+      flags?: number
+    }
+    const updated = updateMessage(
+      db,
+      messageId,
+      {
+        ...payload,
+        content: payload.content === null ? '' : payload.content,
+      },
+      baseUrl
+    )
     if (!updated) {
       const err = discordError(
         DiscordErrorCode.UNKNOWN_MESSAGE,

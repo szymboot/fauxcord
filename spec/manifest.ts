@@ -3418,13 +3418,32 @@ function mutationEffectFor(
       )
     }
     case 'post /interactions/{interaction_id}/{interaction_token}/callback 204': {
-      return rowEffect(
-        f,
-        'target interaction to be marked responded without a response message',
-        `SELECT responded, initial_response_message_id FROM interactions
-         WHERE id = ? AND token = ?`,
-        [f.interactionId, f.interactionToken],
-        { responded: 1, initial_response_message_id: null }
+      return predicateEffect(
+        'target interaction to be acknowledged with a loading original response',
+        () => readRow(
+          db,
+          `SELECT i.responded, i.initial_response_message_id, m.channel_id,
+                  m.author_id, m.content, m.flags
+           FROM interactions i LEFT JOIN messages m
+             ON m.id = i.initial_response_message_id
+           WHERE i.id = ? AND i.token = ?`,
+          [f.interactionId, f.interactionToken]
+        ),
+        (after) => {
+          const row = after as {
+            responded?: unknown
+            initial_response_message_id?: unknown
+            channel_id?: unknown
+            author_id?: unknown
+            content?: unknown
+            flags?: unknown
+          }
+          return row.responded === 1 &&
+            typeof row.initial_response_message_id === 'string' &&
+            row.channel_id === f.channelId &&
+            row.author_id === f.userId &&
+            row.content === '' && row.flags === 128
+        }
       )
     }
     case 'post /channels/{channel_id}/threads 201': {
