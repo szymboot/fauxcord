@@ -9,6 +9,8 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import type { Database } from '../db'
 import type { AppEnv } from '../middleware/auth'
+import { parseJsonBody, requireEntity } from '../lib/route-helpers'
+import type { CommandPermissionEntry } from '../services/application-commands'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import {
   getCommands,
@@ -25,6 +27,7 @@ import {
 import {
   validateApplicationCommandCreate,
   validateApplicationCommandOptions,
+  validateCommandPermissions,
 } from '../validators/application-command'
 import type { ApplicationCommandCreatePayload } from '../validators/application-command'
 import { getGuild } from '../services/guilds'
@@ -62,6 +65,27 @@ function requireOwnApplication(
     return c.json(err.body, 403)
   }
   return undefined
+}
+
+/**
+ * Authorizes permission operations for the owning bot or a scoped OAuth token.
+ * OAuth client IDs are application IDs; the middleware has already checked
+ * token validity and expiry. Bot access is retained for mock compatibility.
+ * @param c - Authenticated Hono context
+ * @param applicationId - Application whose permissions are being accessed
+ * @returns A 403 response, or undefined when access is allowed
+ */
+function requireCommandPermissionAccess(
+  c: Context<AppEnv>,
+  applicationId: string
+): Response | undefined {
+  const accessToken = c.get('accessToken')
+  return accessToken?.client_id === applicationId &&
+    accessToken.scope
+      .split(' ')
+      .includes('applications.commands.permissions.update')
+    ? undefined
+    : requireOwnApplication(c, applicationId)
 }
 
 /**
@@ -279,7 +303,7 @@ export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
     '/applications/:applicationId/guilds/:guildId/commands/permissions',
     (c) => {
       const { applicationId, guildId } = c.req.param()
-      const denied = requireOwnApplication(c, applicationId)
+      const denied = requireCommandPermissionAccess(c, applicationId)
       if (denied) return denied
       if (!getGuild(db, guildId)) {
         const err = discordError(
@@ -376,8 +400,16 @@ export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
     '/applications/:applicationId/guilds/:guildId/commands/:commandId/permissions',
     (c) => {
       const { applicationId, guildId, commandId } = c.req.param()
-      const denied = requireOwnApplication(c, applicationId)
+      const denied = requireCommandPermissionAccess(c, applicationId)
       if (denied) return denied
+
+      const guild = requireEntity(
+        c,
+        getGuild(db, guildId),
+        DiscordErrorCode.UNKNOWN_GUILD,
+        'Unknown Guild'
+      )
+      if (guild instanceof Response) return guild
 
       const permissions = getCommandPermissions(
         db,
@@ -402,8 +434,16 @@ export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
     '/applications/:applicationId/guilds/:guildId/commands/:commandId/permissions',
     async (c) => {
       const { applicationId, guildId, commandId } = c.req.param()
-      const denied = requireOwnApplication(c, applicationId)
+      const denied = requireCommandPermissionAccess(c, applicationId)
       if (denied) return denied
+
+      const guild = requireEntity(
+        c,
+        getGuild(db, guildId),
+        DiscordErrorCode.UNKNOWN_GUILD,
+        'Unknown Guild'
+      )
+      if (guild instanceof Response) return guild
 
       const command =
         getCommand(db, applicationId, guildId, commandId) ??
@@ -417,18 +457,19 @@ export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
         return c.json(err.body, 404)
       }
 
-      const payload = await c.req.json<{
-        permissions: { id: string; type: number; permission: boolean }[]
-      }>()
-      return c.json(
-        setCommandPermissions(
-          db,
-          applicationId,
-          guildId,
-          commandId,
-          payload.permissions
-        )
-      )
+      const payload = await parseJsonBody(c)
+      const errors = validateCommandPermissions(payload.permissions)
+      return Object.keys(errors).length > 0
+        ? c.json(validationError(errors).body, 400)
+        : c.json(
+            setCommandPermissions(
+              db,
+              applicationId,
+              guildId,
+              commandId,
+              payload.permissions as CommandPermissionEntry[]
+            )
+          )
     }
   )
 

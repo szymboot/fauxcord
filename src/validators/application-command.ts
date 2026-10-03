@@ -58,6 +58,37 @@ const OPTIONS_TOO_DEEP_ERROR: FieldError = {
 }
 
 /**
+ * Validates the full permission overwrite list before it reaches storage.
+ * @param permissions - Raw permission list from the request body
+ * @returns Field validation errors, or an empty map for a valid list
+ */
+export function validateCommandPermissions(
+  permissions: unknown
+): ValidationErrors {
+  if (!Array.isArray(permissions)) {
+    return { permissions: { _errors: [typeError('array')] } }
+  }
+  if (permissions.length > 100) {
+    return { permissions: { _errors: [maxLengthError(100)] } }
+  }
+  for (const entry of permissions as unknown[]) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      return { permissions: { _errors: [typeError('object')] } }
+    }
+    const raw = entry as Record<string, unknown>
+    if (
+      typeof raw.id !== 'string' ||
+      raw.id.trim().length === 0 ||
+      ![1, 2, 3].includes(raw.type as number) ||
+      typeof raw.permission !== 'boolean'
+    ) {
+      return { permissions: { _errors: [typeError('command permission')] } }
+    }
+  }
+  return {}
+}
+
+/**
  * Recursively validates a command's `options` array.
  * @param options - Raw options value from the request payload
  * @param depth - Current nesting depth (0 = top-level options)
