@@ -12,8 +12,10 @@ import { gatewayBus } from '../gateway/bus'
 import { buildGuildCreatePayload } from './guilds'
 import { getGuildMember, type GuildMemberObject } from './guild-members'
 import { getChannel } from './channels'
+import { resetRestFaults } from './rest-faults'
 import {
   createMessage,
+  deleteMessage,
   getGuildIdForChannel,
   type MessageObject,
 } from './messages'
@@ -241,6 +243,7 @@ export function deleteTestSetup(db: Database, token: string): boolean {
  * @param token - Bot token to reset (all tokens if omitted)
  */
 export function resetTestData(db: Database, token?: string): void {
+  resetRestFaults(db, token)
   if (token) {
     const bot = db
       .prepare('SELECT user_id FROM bots WHERE token = ?')
@@ -408,8 +411,12 @@ export function joinTestGuildMember(
 
 /** Request payload for injecting a message authored by a pre-registered user */
 export interface InjectTestMessageRequest {
+  /** Optional unique Message ID, allowing exact DELETE faults to be prearmed. */
+  id?: string
   content: string
   author: { id: string }
+  /** Delete synchronously after the ordinary native create event is queued. */
+  remove_after_create?: boolean
 }
 
 /**
@@ -426,14 +433,15 @@ export interface InjectTestMessageRequest {
  * @param request - Message injection request
  * @param baseUrl - Base URL (for attachment URL generation)
  * @returns Created message object, or an error code when the channel or
- * author is unknown
+ * author is unknown, or CONFLICT when the explicit Message ID already exists.
+ * With remove_after_create, returns the create snapshot after actual deletion.
  */
 export function injectTestMessage(
   db: Database,
   channelId: string,
   request: InjectTestMessageRequest,
   baseUrl: string
-): MessageObject | 'UNKNOWN_CHANNEL' | 'UNKNOWN_USER' {
+): MessageObject | 'UNKNOWN_CHANNEL' | 'UNKNOWN_USER' | 'CONFLICT' {
   const channel = getChannel(db, channelId)
   if (!channel) return 'UNKNOWN_CHANNEL'
 
@@ -442,6 +450,13 @@ export function injectTestMessage(
     .get(request.author.id)
   if (!author) return 'UNKNOWN_USER'
 
+  if (
+    request.id &&
+    db.prepare('SELECT id FROM messages WHERE id = ?').get(request.id)
+  ) {
+    return 'CONFLICT'
+  }
+
   const guildId = getGuildIdForChannel(db, channelId)
   if (guildId) {
     db.prepare(
@@ -449,7 +464,7 @@ export function injectTestMessage(
     ).run(guildId, request.author.id)
   }
 
-  return createMessage(
+  const message = createMessage(
     db,
     {
       channelId,
@@ -457,11 +472,16 @@ export function injectTestMessage(
       // Neither a real bot token nor the webhook sentinel value, so this
       // message resolves to a plain, non-bot, non-webhook author.
       authorToken: '',
-      messageId: generateSnowflake(),
+      messageId: request.id ?? generateSnowflake(),
       content: request.content,
     },
     baseUrl
   )
+  // MESSAGE_CREATE has been synchronously queued by the ordinary Gateway bus.
+  // Remove before yielding to another HTTP request; no timer or acknowledgement
+  // is needed for the client to observe an actually missing message on DELETE.
+  if (request.remove_after_create) deleteMessage(db, message.id, channelId)
+  return message
 }
 
 /** Request body accepted by POST /_test/interactions */

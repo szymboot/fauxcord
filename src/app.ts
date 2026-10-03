@@ -15,6 +15,7 @@ import { versionMiddleware } from './middleware/version'
 import { createAuthMiddleware, type AppEnv } from './middleware/auth'
 import { rateLimitMiddleware } from './middleware/rate-limit'
 import { createLatencyMiddleware } from './middleware/latency'
+import { createRestFaultMiddleware } from './middleware/rest-faults'
 import { createChannelRoutes } from './routes/channels'
 import { createGuildRoutes } from './routes/guilds'
 import { createUserRoutes } from './routes/users'
@@ -137,6 +138,7 @@ export function buildApp(
   app.use('*', authMiddleware)
   app.use('*', latencyMiddleware)
   app.use('*', rateLimitMiddleware)
+  app.use('*', createRestFaultMiddleware(db))
 
   // Normalize version prefixes and mount each route
   // /api/v10/ → /

@@ -148,6 +148,23 @@ export function initializeDatabase(dbPath: string): Database {
 
     CREATE INDEX IF NOT EXISTS idx_channels_guild ON channels(guild_id);
 
+    CREATE TABLE IF NOT EXISTS test_rest_faults (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+      channel_id TEXT REFERENCES channels(id) ON DELETE CASCADE,
+      method TEXT NOT NULL,
+      path TEXT NOT NULL,
+      status INTEGER NOT NULL,
+      code INTEGER NOT NULL,
+      message TEXT NOT NULL,
+      times INTEGER NOT NULL,
+      remaining INTEGER NOT NULL,
+      consumed INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_active_rest_fault
+      ON test_rest_faults(method, path) WHERE remaining > 0;
+
     CREATE TABLE IF NOT EXISTS channel_recipients (
       channel_id TEXT NOT NULL,
       user_id TEXT NOT NULL,

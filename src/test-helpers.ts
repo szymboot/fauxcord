@@ -15,6 +15,7 @@ import { serveWithGateway } from './http-server'
 import { initializeDatabase, closeDatabase } from './db'
 import type { Database } from './db'
 import { createAuthMiddleware, type AppEnv } from './middleware/auth'
+import { createRestFaultMiddleware } from './middleware/rest-faults'
 import { corsMiddleware } from './middleware/cors'
 import { versionMiddleware } from './middleware/version'
 import { createChannelRoutes } from './routes/channels'
@@ -135,6 +136,7 @@ export function createFullTestApp(): FullTestContext {
   // Authentication middleware
   const authMiddleware = createAuthMiddleware(db, false)
   app.use('*', authMiddleware)
+  app.use('*', createRestFaultMiddleware(db))
 
   // Discord API routes (mounted under all three prefixes)
   const routePrefixes = ['/api/v10', '/api', '']

@@ -59,6 +59,7 @@ For subsequent calls, delete the existing data first via `/_test/reset` or `DELE
 ## `DELETE /_test/setup/:token` — Completely delete an environment
 
 Deletes the Bot and all of its related data (Guilds, Channels, Messages, Webhooks).
+Guild-scoped REST fault controls and their consumption history are also removed.
 
 ```bash
 curl -X DELETE "http://localhost:3000/_test/setup/Bot%20mytoken"
@@ -68,7 +69,7 @@ curl -X DELETE "http://localhost:3000/_test/setup/Bot%20mytoken"
 
 ---
 
-## `POST /_test/reset` — Delete messages only
+## `POST /_test/reset` — Reset posted data and REST faults
 
 Deletes only posted data, while keeping Guild, Channel, and Bot registrations intact.  
 Use this for initialization before and after each test case.
@@ -81,7 +82,8 @@ curl -X POST http://localhost:3000/_test/reset \
   -d '{}'
 ```
 
-What gets deleted: messages, webhooks, invites, reactions, pins, embeds, attachments
+What gets deleted: messages, webhooks, invites, reactions, pins, embeds, attachments,
+and all REST fault controls (including exhausted controls and consumption history).
 
 ### Reset only a specific Bot's data
 
@@ -92,6 +94,80 @@ curl -X POST http://localhost:3000/_test/reset \
 ```
 
 Only messages sent by that Bot and Webhooks/Invites belonging to that Bot's Guilds are deleted.
+REST fault controls in that Bot's Guilds are also deleted, including controls targeting
+human-authored messages. Other Bots' Guilds keep their controls.
+
+---
+
+## `POST /_test/rest-faults` — Fail bounded, exact REST attempts
+
+Arm a failure **before** sending the event that triggers the bot's request:
+
+```bash
+curl -X POST http://localhost:3000/_test/rest-faults \
+  -H "Content-Type: application/json" \
+  -d '{
+    "method": "DELETE",
+    "path": "/channels/333333333333333333/messages/1513052391153471489",
+    "status": 403,
+    "code": 50013,
+    "message": "Missing Permissions",
+    "times": 1
+  }'
+```
+
+Returns `201` with `id`, the supplied configuration, `guild_id`, `channel_id`
+(`null` for Guild routes), `remaining`, and `consumed`. Initially `remaining`
+equals `times` and `consumed` is zero.
+
+Supported selectors (replace **every** ID with a concrete numeric string):
+
+| Method   | Path                                                | Use                         |
+| -------- | --------------------------------------------------- | --------------------------- |
+| `DELETE` | `/channels/{channelId}/messages/{messageId}`        | Triggering-message deletion |
+| `PUT`    | `/guilds/{guildId}/bans/{userId}`                   | Ban creation                |
+| `PATCH`  | `/guilds/{guildId}/members/{userId}`                | Member update / mute        |
+| `PUT`    | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role assignment        |
+
+`path` must be a bare path with no query, version prefix, wildcard, or trailing
+slash. It selects the exact Channel/Message or Guild/User/Role IDs, so unrelated
+requests cannot consume the fault. The Channel must belong to an existing Guild,
+or the Guild must exist (`404` otherwise). The target Message/User/Role does not
+need to exist yet, allowing prearming before message injection. Faults apply to
+any authenticated caller issuing that exact request, regardless of token or body.
+
+`status` is an integer from `400` through `599`; `code` is a nonnegative safe
+integer; `message` is a nonempty string of at most 1000 characters. `times` is an
+integer from `1` through `100`, defaulting to `1`. Invalid/malformed input returns
+`400`. An already active fault for the same method/path returns `409`.
+
+On a matching authenticated request, Fauxcord atomically decrements `remaining`
+and increments `consumed`, then returns the chosen status with exactly
+`{"message":"...","code":...}`. The ordinary route does not run: no message
+deletion, ban/purge, member update, role assignment, or corresponding Gateway
+mutation event happens. Authentication runs first (`401` attempts do not count);
+the normal latency and rate-limit headers still apply. After exhaustion, requests
+use the ordinary REST behavior, including ordinary validation and 404 responses.
+Automatic library retries count as separate attempts. The control provides the
+two-field Discord error body; specialized rate-limit retry fields are not modeled.
+
+All three request prefixes (`/api/v10`, `/api`, and bare) match the same control.
+Request query parameters are ignored. Controls and counters are isolated per
+database. `/_test/reset` clears them, and environment/Guild deletion cascades
+them; Channel deletion also removes message-delete controls for that Channel.
+Exhausted records remain inspectable until cleared, and a fresh control may then
+be armed for the same selector.
+
+## `GET /_test/rest-faults/:id` — Inspect consumption
+
+Returns the control object, including `remaining` and `consumed`, or `404` for
+an unknown/cleared control. Assert `consumed === 1` and `remaining === 0` to prove
+a one-shot fault was exercised. Inspection does not consume a fault.
+
+## `DELETE /_test/rest-faults/:id` — Cancel and remove a control
+
+Returns `204` when removed, or `404` if unknown. Removes both the active failure
+and its history; subsequent requests run normally.
 
 ---
 
@@ -261,10 +337,32 @@ Returns the created message object (same shape as
 
 **Fields**
 
-| Field       | Required | Description                                                                                                          |
-| ----------- | -------- | -------------------------------------------------------------------------------------------------------------------- |
-| `content`   | ✅       | Message content.                                                                                                     |
-| `author.id` | ✅       | ID of a user already registered via `POST /_test/users` (or any other existing user). Returns `404` if unregistered. |
+| Field                 | Required | Description                                                                                                                       |
+| --------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `content`             | ✅       | Message content.                                                                                                                  |
+| `author.id`           | ✅       | ID of a user already registered via `POST /_test/users` (or any other existing user). Returns `404` if unregistered.              |
+| `id`                  | —        | Explicit numeric Message ID (1–20 digits), otherwise generated. An existing Message ID returns `409` without mutations or events. |
+| `remove_after_create` | —        | Boolean, default `false`. Remove the message immediately after its native create dispatch is queued.                              |
+
+To test a triggering-message DELETE failure, choose a unique `id`, arm its exact
+DELETE path through `/_test/rest-faults`, then inject with that same `id`. The bot
+receives the ordinary native `MESSAGE_CREATE` and its real REST DELETE consumes
+the fault. For example, use `403` / `50013` / `Missing Permissions` to exercise an
+error other than Unknown Message while retaining the message.
+
+To test **real Unknown Message** without a race or fixed sleep, inject with
+`"remove_after_create": true` and do not arm a DELETE fault. The service first
+creates the real stored message and synchronously emits its ordinary create
+event. It then uses ordinary deletion before yielding to another HTTP request,
+emitting `MESSAGE_DELETE`. Connected clients with the Guild Messages intent see
+`MESSAGE_CREATE` followed by `MESSAGE_DELETE` in order; the create payload still
+contains the original content and author. Any REST DELETE issued in response to
+the create event finds the actual message absent and returns the ordinary `404`
+/ `10008` / `Unknown Message`; GET and `/_test/messages` also show it absent.
+The injection still returns `201` with the created message snapshot, even though
+that message has already been deleted. Dispatch is queued synchronously, not
+acknowledged by clients: connect and wait for Gateway READY before injecting.
+This option applies only to this injection and leaves no pending control behind.
 
 ---
 
@@ -288,15 +386,15 @@ curl -X POST http://localhost:3000/_test/interactions \
 
 **Fields**
 
-| Field            | Required | Description                                                        |
-| ---------------- | -------- | ------------------------------------------------------------------ |
-| `application_id` | ✅       | The bot's application ID (same as its `user.id`)                  |
-| `command_name`   | ✅       | Name of a command already registered via the Application Commands API |
-| `type`           | —        | Interaction type (default: `2`, APPLICATION_COMMAND)               |
+| Field            | Required | Description                                                                                                 |
+| ---------------- | -------- | ----------------------------------------------------------------------------------------------------------- |
+| `application_id` | ✅       | The bot's application ID (same as its `user.id`)                                                            |
+| `command_name`   | ✅       | Name of a command already registered via the Application Commands API                                       |
+| `type`           | —        | Interaction type (default: `2`, APPLICATION_COMMAND)                                                        |
 | `guild_id`       | —        | Guild ID. When set, prefers a guild-scoped command match, falling back to a global command of the same name |
-| `channel_id`     | —        | Channel ID the interaction is bound to (needed for `type: 4` callback responses and followups) |
-| `user_id`        | —        | Invoking user ID (auto-generated if omitted)                       |
-| `options`        | —        | Command option values, passed through into the interaction's `data.options` |
+| `channel_id`     | —        | Channel ID the interaction is bound to (needed for `type: 4` callback responses and followups)              |
+| `user_id`        | —        | Invoking user ID (auto-generated if omitted)                                                                |
+| `options`        | —        | Command option values, passed through into the interaction's `data.options`                                 |
 
 **Response**: `201` with the created interaction object (matches the
 Discord `Interaction` shape). `404` (`{"message": "404: Not Found", "code": 0}`)
@@ -318,9 +416,9 @@ curl -X POST http://localhost:3000/_test/polls/1513052391153471489/votes \
 
 **Fields**
 
-| Field       | Required | Description                                                        |
-| ----------- | -------- | ------------------------------------------------------------------ |
-| `answer_id` | ✅       | ID of an existing poll answer (from the message's `poll.answers`). |
+| Field       | Required | Description                                                                           |
+| ----------- | -------- | ------------------------------------------------------------------------------------- |
+| `answer_id` | ✅       | ID of an existing poll answer (from the message's `poll.answers`).                    |
 | `user_id`   | ✅       | ID of a user already registered via `POST /_test/users` (or any other existing user). |
 
 **Response**: `204 No Content` on success. `404` (`{"message": "404: Not Found", "code": 0}`) when the message has no poll, or the answer ID does not exist on it. `400` (`{"message": "400: Bad Request", "code": 0}`) when `answer_id` or `user_id` is missing.

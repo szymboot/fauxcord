@@ -21,6 +21,12 @@ import { getChannelWebhooks } from '../services/webhooks'
 import { injectPollVote } from '../services/polls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { validateGuildMemberUpdate } from '../validators/guild'
+import { validateRestFault } from '../validators/rest-fault'
+import {
+  createRestFault,
+  getRestFault,
+  deleteRestFault,
+} from '../services/rest-faults'
 
 /**
  * Creates the test control API routes.
@@ -30,6 +36,31 @@ import { validateGuildMemberUpdate } from '../validators/guild'
  */
 export function createTestRoutes(db: Database, baseUrl: string): Hono {
   const app = new Hono()
+
+  app.post('/_test/rest-faults', async (c) => {
+    const parsed: unknown = await c.req.json().catch(() => undefined)
+    const payload = validateRestFault(parsed)
+    if (!payload) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    const result = createRestFault(db, payload)
+    if (result === 'UNKNOWN_SCOPE')
+      return c.json({ message: '404: Not Found', code: 0 }, 404)
+    return result === 'CONFLICT'
+      ? c.json({ message: '409: Conflict', code: 0 }, 409)
+      : c.json(result, 201)
+  })
+
+  app.get('/_test/rest-faults/:id', (c) => {
+    const fault = getRestFault(db, c.req.param('id'))
+    return fault
+      ? c.json(fault)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
+
+  app.delete('/_test/rest-faults/:id', (c) => {
+    return deleteRestFault(db, c.req.param('id'))
+      ? c.body(null, 204)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
 
   // POST /_test/setup — Set up Bot, Guild, and Channel
   app.post('/_test/setup', async (c) => {
@@ -198,22 +229,48 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
   // a pre-registered user (see POST /_test/users)
   app.post('/_test/channels/:channelId/messages', async (c) => {
     const { channelId } = c.req.param()
-    const payload = await c.req.json<{
+    const parsed: unknown = await c.req.json().catch(() => undefined)
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
+    const payload = parsed as {
+      id?: string
       content?: string
       author?: { id?: string }
-    }>()
+      remove_after_create?: boolean
+    }
 
-    if (!payload.content || !payload.author?.id) {
+    if (
+      typeof payload.content !== 'string' ||
+      payload.content.length === 0 ||
+      typeof payload.author?.id !== 'string' ||
+      payload.author.id.length === 0 ||
+      (payload.id !== undefined &&
+        (typeof payload.id !== 'string' || !/^\d{1,20}$/.test(payload.id))) ||
+      (payload.remove_after_create !== undefined &&
+        typeof payload.remove_after_create !== 'boolean')
+    ) {
       return c.json({ message: '400: Bad Request', code: 0 }, 400)
     }
 
     const result = injectTestMessage(
       db,
       channelId,
-      { content: payload.content, author: { id: payload.author.id } },
+      {
+        id: payload.id,
+        content: payload.content,
+        author: { id: payload.author.id },
+        remove_after_create: payload.remove_after_create,
+      },
       baseUrl
     )
 
+    if (result === 'CONFLICT')
+      return c.json({ message: '409: Conflict', code: 0 }, 409)
     return result === 'UNKNOWN_CHANNEL' || result === 'UNKNOWN_USER'
       ? c.json({ message: '404: Not Found', code: 0 }, 404)
       : c.json(result, 201)
