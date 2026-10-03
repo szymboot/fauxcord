@@ -10,6 +10,7 @@ import { generateSnowflake } from '../snowflake'
 import type {
   ApplicationCommandCreatePayload,
   ApplicationCommandOption,
+  ApplicationCommandOptionPayload,
 } from '../validators/application-command'
 
 /** Command object for API responses */
@@ -84,6 +85,22 @@ function toApplicationCommandObject(
  */
 export function normalizeName(name: string, type: number): string {
   return type === 1 ? name.toLowerCase() : name
+}
+
+/**
+ * Normalizes nullable request option lists into arrays for storage/responses.
+ * @param options - Validated request options, possibly omitted or null
+ * @returns Options with explicit null lists replaced by empty arrays
+ */
+function normalizeOptions(
+  options: ApplicationCommandOptionPayload[] | null | undefined
+): ApplicationCommandOption[] {
+  return (options ?? []).map((option) => {
+    const { options: nested, ...fields } = option
+    return nested === undefined
+      ? fields
+      : { ...fields, options: normalizeOptions(nested) }
+  })
 }
 
 /** Result of a command create/update attempt */
@@ -223,7 +240,7 @@ export function createCommand(
     type,
     name,
     description,
-    JSON.stringify(payload.options ?? []),
+    JSON.stringify(normalizeOptions(payload.options)),
     payload.default_member_permissions ?? null,
     payload.dm_permission === undefined || payload.dm_permission === null
       ? null
@@ -319,7 +336,10 @@ export function updateCommand(
     return { ok: false, reason: 'duplicate_name' }
   }
 
-  const options = payload.options ?? current.options
+  const options =
+    payload.options === undefined
+      ? current.options
+      : normalizeOptions(payload.options)
   const defaultMemberPermissions = (
     payload.default_member_permissions === undefined ? current : payload
   ).default_member_permissions
@@ -436,7 +456,7 @@ export function bulkOverwriteCommands(
             ? 1
             : 0
       const nsfw = payload.nsfw ? 1 : 0
-      const options = JSON.stringify(payload.options ?? [])
+      const options = JSON.stringify(normalizeOptions(payload.options))
 
       if (existing) {
         keepIds.add(existing.id)

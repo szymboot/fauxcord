@@ -1,10 +1,243 @@
 import { Hono } from 'hono'
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createApplicationCommandRoutes } from './application-commands'
 import { initializeDatabase } from '../db'
 import type { Database } from '../db'
-import type { AppEnv } from '../middleware/auth'
-import { seedBot } from '../test-helpers'
+import { createAuthMiddleware, type AppEnv } from '../middleware/auth'
+import { seedBot, seedGuild } from '../test-helpers'
+
+describe.each(['global', 'guild'])(
+  'Application command option lists (%s)',
+  (scope) => {
+    let db: Database
+    let app: Hono<AppEnv>
+    let url: string
+    const token = 'Bot options-test'
+    const headers = {
+      Authorization: token,
+      'Content-Type': 'application/json',
+    }
+    const command = { name: 'me', description: 'Shows your profile' }
+    const options = [{ type: 3, name: 'user', description: 'User to show' }]
+
+    beforeEach(() => {
+      db = initializeDatabase(':memory:')
+      const applicationId = '111111111111111111'
+      seedBot(db, token, applicationId)
+      const guildId = seedGuild(db, token)
+      app = new Hono<AppEnv>()
+      app.use('*', createAuthMiddleware(db, false))
+      app.route('/', createApplicationCommandRoutes(db))
+      url = `/applications/${applicationId}${scope === 'guild' ? `/guilds/${guildId}` : ''}/commands`
+    })
+
+    afterEach(() => db.close())
+
+    it.each(['POST', 'PUT'])('accepts options:null with %s', async (method) => {
+      const payload = { ...command, options: null }
+      const response = await app.request(url, {
+        method,
+        headers,
+        body: JSON.stringify(method === 'PUT' ? [payload] : payload),
+      })
+      expect(response.status).toBe(method === 'POST' ? 201 : 200)
+      const expected = { ...command, options: [] }
+      await expect(response.json()).resolves.toMatchObject(
+        method === 'PUT' ? [expected] : expected
+      )
+      const listed = await app.request(url, { headers })
+      await expect(listed.json()).resolves.toMatchObject([expected])
+    })
+
+    it.each(['POST', 'PUT', 'PATCH'])(
+      'clears existing options with null using %s and keeps the command ID',
+      async (method) => {
+        const created = await app.request(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ ...command, options }),
+        })
+        const original = (await created.json()) as { id: string }
+        const payload = { ...command, options: null }
+        const response = await app.request(
+          method === 'PATCH' ? `${url}/${original.id}` : url,
+          {
+            method,
+            headers,
+            body: JSON.stringify(method === 'PUT' ? [payload] : payload),
+          }
+        )
+        expect(response.status).toBe(200)
+        const expected = { id: original.id, ...command, options: [] }
+        await expect(response.json()).resolves.toMatchObject(
+          method === 'PUT' ? [expected] : expected
+        )
+        const listed = await app.request(url, { headers })
+        await expect(listed.json()).resolves.toMatchObject([expected])
+      }
+    )
+
+    it('preserves options when PATCH omits them', async () => {
+      const created = await app.request(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ ...command, options }),
+      })
+      const original = (await created.json()) as { id: string }
+      const response = await app.request(`${url}/${original.id}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ description: 'Updated profile description' }),
+      })
+      expect(response.status).toBe(200)
+      await expect(response.json()).resolves.toMatchObject({
+        id: original.id,
+        description: 'Updated profile description',
+        options,
+      })
+    })
+
+    it.each(['POST', 'PUT', 'PATCH'])(
+      'normalizes nested null option lists using %s',
+      async (method) => {
+        const created = await app.request(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(command),
+        })
+        const original = (await created.json()) as { id: string }
+        const subcommand = {
+          type: 1,
+          name: 'profile',
+          description: 'Shows a profile',
+          options: null,
+        }
+        const group = {
+          type: 2,
+          name: 'profiles',
+          description: 'Profile commands',
+          options: [subcommand],
+        }
+        const payload = {
+          ...command,
+          options: [group, { ...group, name: 'empty', options: null }],
+        }
+        const response = await app.request(
+          method === 'PATCH' ? `${url}/${original.id}` : url,
+          {
+            method,
+            headers,
+            body: JSON.stringify(method === 'PUT' ? [payload] : payload),
+          }
+        )
+        expect(response.status).toBe(200)
+        const expected = {
+          options: [
+            { ...group, options: [{ ...subcommand, options: [] }] },
+            { ...group, name: 'empty', options: [] },
+          ],
+        }
+        await expect(response.json()).resolves.toMatchObject(
+          method === 'PUT' ? [expected] : expected
+        )
+        const listed = await app.request(url, { headers })
+        await expect(listed.json()).resolves.toMatchObject([expected])
+      }
+    )
+
+    describe.each(['POST', 'PUT', 'PATCH'])('%s validation', (method) => {
+      it('rejects excessive nesting through scalar options', async () => {
+        const created = await app.request(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ ...command, options }),
+        })
+        const original = (await created.json()) as { id: string }
+        const scalar = { type: 3, name: 'user', description: 'User' }
+        const payload = {
+          ...command,
+          options: [
+            {
+              ...scalar,
+              options: [
+                { ...scalar, options: [{ ...scalar, options: [scalar] }] },
+              ],
+            },
+          ],
+        }
+        const response = await app.request(
+          method === 'PATCH' ? `${url}/${original.id}` : url,
+          {
+            method,
+            headers,
+            body: JSON.stringify(method === 'PUT' ? [payload] : payload),
+          }
+        )
+        expect(response.status).toBe(400)
+        await expect(response.json()).resolves.toMatchObject({
+          code: 50_035,
+          errors: {
+            options: {
+              _errors: [{ code: 'APPLICATION_COMMAND_OPTIONS_TOO_DEEP' }],
+            },
+          },
+        })
+        const listed = await app.request(url, { headers })
+        await expect(listed.json()).resolves.toMatchObject([
+          { id: original.id, ...command, options },
+        ])
+      })
+
+      it.each([
+        false,
+        0,
+        '',
+        'invalid',
+        {},
+        [null],
+        [{ type: 99, name: 'bad', description: 'Invalid type' }],
+        ...[false, 0, '', {}].map((nested) => [
+          { type: 1, name: 'profile', description: 'Profile', options: nested },
+        ]),
+        [{ type: 3, name: 'user', description: 'User', options: {} }],
+      ])(
+        'rejects malformed options %j without changing commands',
+        async (bad) => {
+          const created = await app.request(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ ...command, options }),
+          })
+          const original = (await created.json()) as { id: string }
+          const payload = { ...command, options: bad }
+          const response = await app.request(
+            method === 'PATCH' ? `${url}/${original.id}` : url,
+            {
+              method,
+              headers,
+              body: JSON.stringify(
+                method === 'PUT'
+                  ? [{ name: 'other', description: 'Valid command' }, payload]
+                  : payload
+              ),
+            }
+          )
+          expect(response.status).toBe(400)
+          await expect(response.json()).resolves.toMatchObject({
+            code: 50_035,
+            errors: {
+              options: { _errors: [{ code: 'BASE_TYPE_BAD_TYPE' }] },
+            },
+          })
+          const listed = await app.request(url, { headers })
+          await expect(listed.json()).resolves.toMatchObject([
+            { id: original.id, ...command, options },
+          ])
+        }
+      )
+    })
+  }
+)
 
 describe('Application Commands routes (global)', () => {
   let db: Database

@@ -24,12 +24,20 @@ export interface ApplicationCommandOption {
   options?: ApplicationCommandOption[]
 }
 
+/** Request option with nullable sub-options, as serialized by DiscordGo. */
+export interface ApplicationCommandOptionPayload extends Omit<
+  ApplicationCommandOption,
+  'options'
+> {
+  options?: ApplicationCommandOptionPayload[] | null
+}
+
 /** Payload accepted by command create/bulk-overwrite endpoints */
 export interface ApplicationCommandCreatePayload {
   name: string
   description?: string
   type?: number
-  options?: ApplicationCommandOption[]
+  options?: ApplicationCommandOptionPayload[] | null
   default_member_permissions?: string | null
   dm_permission?: boolean | null
   nsfw?: boolean
@@ -42,6 +50,13 @@ export interface ApplicationCommandCreatePayload {
  */
 const NAME_PATTERN = /^[-_\p{Ll}\p{N}]{1,32}$/u
 
+/** Shared error for option trees exceeding Discord's nesting limit. */
+const OPTIONS_TOO_DEEP_ERROR: FieldError = {
+  code: 'APPLICATION_COMMAND_OPTIONS_TOO_DEEP',
+  message:
+    'Command options may nest at most 2 levels (SUB_COMMAND_GROUP > SUB_COMMAND).',
+}
+
 /**
  * Recursively validates a command's `options` array.
  * @param options - Raw options value from the request payload
@@ -50,13 +65,23 @@ const NAME_PATTERN = /^[-_\p{Ll}\p{N}]{1,32}$/u
  */
 function validateOptions(options: unknown, depth: number): FieldError[] {
   const errors: FieldError[] = []
+  if (options === undefined || options === null) return errors
   if (!Array.isArray(options)) {
     errors.push(typeError('array'))
     return errors
   }
+  if (depth > 2 && options.length > 0) {
+    errors.push(OPTIONS_TOO_DEEP_ERROR)
+    return errors
+  }
 
   let sawOptional = false
-  for (const raw of options as Partial<ApplicationCommandOption>[]) {
+  for (const entry of options as unknown[]) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      errors.push(typeError('object'))
+      continue
+    }
+    const raw = entry as Partial<ApplicationCommandOptionPayload>
     if (
       typeof raw.type !== 'number' ||
       raw.type < 1 ||
@@ -73,12 +98,8 @@ function validateOptions(options: unknown, depth: number): FieldError[] {
     const isGroupOrSubCommand = raw.type === 1 || raw.type === 2
     if (isGroupOrSubCommand) {
       if (depth >= 2) {
-        errors.push({
-          code: 'APPLICATION_COMMAND_OPTIONS_TOO_DEEP',
-          message:
-            'Command options may nest at most 2 levels (SUB_COMMAND_GROUP > SUB_COMMAND).',
-        })
-      } else if (raw.options) {
+        errors.push(OPTIONS_TOO_DEEP_ERROR)
+      } else if (raw.options !== undefined) {
         errors.push(...validateOptions(raw.options, depth + 1))
       }
       continue
@@ -94,8 +115,23 @@ function validateOptions(options: unknown, depth: number): FieldError[] {
     } else {
       sawOptional = true
     }
+    if (raw.options !== undefined) {
+      errors.push(...validateOptions(raw.options, depth + 1))
+    }
   }
   return errors
+}
+
+/**
+ * Validates a nullable command option list for create and partial updates.
+ * @param options - Raw options value, or undefined when omitted
+ * @returns Validation errors keyed by options (empty object = valid)
+ */
+export function validateApplicationCommandOptions(
+  options: unknown
+): ValidationErrors {
+  const errors = validateOptions(options, 0)
+  return errors.length > 0 ? { options: { _errors: errors } } : {}
 }
 
 /**
@@ -137,10 +173,5 @@ export function validateApplicationCommandCreate(
     }
   }
 
-  if (payload.options !== undefined) {
-    const optionErrors = validateOptions(payload.options, 0)
-    if (optionErrors.length > 0) errors.options = { _errors: optionErrors }
-  }
-
-  return errors
+  return { ...errors, ...validateApplicationCommandOptions(payload.options) }
 }
