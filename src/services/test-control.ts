@@ -16,6 +16,8 @@ import { resetRestFaults } from './rest-faults'
 import {
   createMessage,
   deleteMessage,
+  getMessage,
+  updateMessage,
   getGuildIdForChannel,
   type MessageObject,
 } from './messages'
@@ -530,6 +532,32 @@ export function injectTestMessage(
   // is needed for the client to observe an actually missing message on DELETE.
   if (request.remove_after_create) deleteMessage(db, message.id, channelId)
   return message
+}
+
+/**
+ * Edits only the content of an existing message authored by a registered human.
+ * The channel and author checks run before any mutation. The ordinary message
+ * service persists the edit and emits the native message.update Gateway event.
+ * @param db - Database
+ * @param channelId - Channel the message must belong to
+ * @param messageId - Existing message ID
+ * @param content - Validated replacement content, including an empty string
+ * @param baseUrl - Base URL for attachment URLs in the returned message
+ * @returns Updated message, or a target/author error without mutations or events
+ */
+export function editTestMessage(
+  db: Database,
+  channelId: string,
+  messageId: string,
+  content: string,
+  baseUrl: string
+): MessageObject | 'UNKNOWN_CHANNEL' | 'UNKNOWN_MESSAGE' | 'BOT_AUTHOR' {
+  if (!getChannel(db, channelId)) return 'UNKNOWN_CHANNEL'
+  const message = getMessage(db, messageId, baseUrl)
+  if (message?.channel_id !== channelId) return 'UNKNOWN_MESSAGE'
+  return message.author.bot || message.webhook_id
+    ? 'BOT_AUTHOR'
+    : (updateMessage(db, messageId, { content }, baseUrl) ?? 'UNKNOWN_MESSAGE')
 }
 
 /** Request body accepted by POST /_test/interactions */
