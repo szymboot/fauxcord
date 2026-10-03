@@ -36,6 +36,8 @@ export interface SetupRequest {
 export interface SetupGuildRequest {
   id?: string
   name: string
+  /** Registered non-bot owner; defaults to the setup bot when omitted. */
+  owner_id?: string
   channels?: SetupChannelRequest[]
 }
 
@@ -62,7 +64,8 @@ export interface SetupResponse {
  * @param db - Database
  * @param request - Setup request
  * @returns Setup result
- * @throws Error if the token is already registered
+ * @throws Error with CONFLICT for duplicate tokens, INVALID_OWNER_ID for
+ * malformed owner IDs, UNKNOWN_USER for missing owners, or BOT_OWNER for bots
  */
 export function setupTestEnvironment(
   db: Database,
@@ -88,6 +91,36 @@ export function setupTestEnvironment(
   // Run inside a transaction so that a partial setup state
   // (e.g. only the Bot registered) is not left behind if an error occurs midway
   const setup = db.transaction((): SetupResponse => {
+    const guildRequests = request.guilds ?? []
+    // Validate before registering the bot so a human owner cannot be promoted
+    // to a bot when its ID is also used as the setup account.
+    for (const guildReq of guildRequests) {
+      if (guildReq.owner_id === undefined) continue
+      if (
+        typeof guildReq.owner_id !== 'string' ||
+        guildReq.owner_id.trim().length === 0 ||
+        guildReq.owner_id.trim() !== guildReq.owner_id
+      ) {
+        throw new Error('INVALID_OWNER_ID')
+      }
+      const owner = db
+        .prepare('SELECT bot FROM users WHERE id = ?')
+        .get(guildReq.owner_id) as { bot: number } | undefined
+      if (!owner) throw new Error('UNKNOWN_USER')
+      if (owner.bot === 1 || guildReq.owner_id === userId) {
+        throw new Error('BOT_OWNER')
+      }
+    }
+
+    // An existing human owner must keep its identity across separate setups.
+    const humanOwner = db
+      .prepare(
+        `SELECT users.id FROM users JOIN guilds ON guilds.owner_id = users.id
+         WHERE users.id = ? AND users.bot = 0 LIMIT 1`
+      )
+      .get(userId)
+    if (humanOwner) throw new Error('BOT_OWNER')
+
     // Create the user. ON CONFLICT forces bot=1 rather than leaving the
     // existing row untouched -- POST /_test/users can register this same id
     // beforehand as a non-bot user (bot=0), and this row is now the bot's
@@ -112,9 +145,9 @@ export function setupTestEnvironment(
 
     const guildsResponse: SetupResponse['guilds'] = []
 
-    const guildRequests = request.guilds ?? []
     for (const guildReq of guildRequests) {
       const guildId = guildReq.id ?? generateSnowflake()
+      const ownerId = guildReq.owner_id ?? userId
 
       // Create the guild (if the same ID still exists, overwrite its contents and reuse it = idempotent)
       db.prepare(
@@ -123,7 +156,7 @@ export function setupTestEnvironment(
            name = excluded.name,
            owner_id = excluded.owner_id,
            bot_token = excluded.bot_token`
-      ).run(guildId, guildReq.name, userId, request.token)
+      ).run(guildId, guildReq.name, ownerId, request.token)
 
       pendingEvents.push(() => {
         // The guild row was just inserted/updated above within this same
@@ -145,7 +178,7 @@ export function setupTestEnvironment(
          VALUES (?, ?, '@everyone', '1071698660929', 0, 0, 0, 0)`
       ).run(guildId, guildId)
 
-      // Register the bot as a member of the guild it owns. On real Discord, a
+      // Register the bot as a member of the guild. On real Discord, a
       // bot present in a guild always shows up in that guild's member list;
       // without this row, GET/PATCH/PUT/DELETE /guilds/{id}/members/{bot_id}*
       // 404 for the bot itself, breaking any client library flow that
@@ -163,6 +196,21 @@ export function setupTestEnvironment(
           >,
         })
       })
+
+      if (ownerId !== userId) {
+        db.prepare(
+          'INSERT OR IGNORE INTO guild_members (guild_id, user_id) VALUES (?, ?)'
+        ).run(guildId, ownerId)
+        pendingEvents.push(() => {
+          gatewayBus.emit('guild.member.add', {
+            guildId,
+            member: getGuildMember(db, guildId, ownerId) as unknown as Record<
+              string,
+              unknown
+            >,
+          })
+        })
+      }
 
       const channelsResponse: { id: string; name: string; type: number }[] = []
 

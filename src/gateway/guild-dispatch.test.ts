@@ -235,9 +235,101 @@ describe('CHANNEL_CREATE dispatch (integration)', () => {
 
 describe('GUILD_CREATE dispatch after READY (integration)', () => {
   let close: (() => Promise<void>) | undefined
+  let ownerSocket: WebSocket | undefined
   afterEach(async () => {
+    ownerSocket?.terminate()
+    ownerSocket = undefined
     await close?.()
     close = undefined
+  })
+
+  it('dispatches explicit human owners and default bot owners with their own member identities', async () => {
+    const server = await createTestGatewayServer()
+    close = server.close
+    const httpUrl = server.url.replace('ws://', 'http://')
+    const ownerId = '555555555555555555'
+    const botId = '111111111111111111'
+    const humanGuildId = '222222222222222222'
+    const defaultGuildId = '333333333333333333'
+    const registration = await fetch(`${httpUrl}/_test/users`, {
+      method: 'POST',
+      body: JSON.stringify({
+        id: ownerId,
+        username: 'HumanOwner',
+        discriminator: '1234',
+        global_name: 'Owner Display Name',
+      }),
+    })
+    expect(registration.status).toBe(201)
+    const setup = await fetch(`${httpUrl}/_test/setup`, {
+      method: 'POST',
+      body: JSON.stringify({
+        token: 'Bot human-owner',
+        user: { id: botId, username: 'FixtureBot' },
+        guilds: [
+          { id: humanGuildId, name: 'Human Guild', owner_id: ownerId },
+          { id: defaultGuildId, name: 'Default Guild' },
+        ],
+      }),
+    })
+    expect(setup.status).toBe(201)
+    ownerSocket = new WebSocket(server.url)
+    const nextMessage = createMessageReader(ownerSocket)
+    await nextMessage() // HELLO
+    ownerSocket.send(
+      JSON.stringify({
+        op: GatewayOp.Identify,
+        d: {
+          token: 'human-owner',
+          intents: GatewayIntentBits.Guilds | GatewayIntentBits.GuildMembers,
+        },
+      })
+    )
+    const ready = await nextMessage()
+    expect(ready.t).toBe('READY')
+    expect(ready.d).toMatchObject({ user: { id: botId, bot: true } })
+    const dispatches = [await nextMessage(), await nextMessage()]
+    for (const dispatch of dispatches) expect(dispatch.t).toBe('GUILD_CREATE')
+    const humanGuild = dispatches.find(
+      (dispatch) => (dispatch.d as { id: string }).id === humanGuildId
+    )
+    const memberResponse = await fetch(
+      `${httpUrl}/api/v10/guilds/${humanGuildId}/members/${ownerId}`,
+      { headers: { Authorization: 'Bot human-owner' } }
+    )
+    expect(memberResponse.status).toBe(200)
+    const ownerMember = await memberResponse.json()
+    expect(ownerMember).toMatchObject({
+      user: {
+        id: ownerId,
+        username: 'HumanOwner',
+        discriminator: '1234',
+        global_name: 'Owner Display Name',
+        bot: false,
+      },
+    })
+    expect(humanGuild?.d).toMatchObject({
+      owner_id: ownerId,
+      member_count: 2,
+      members: expect.arrayContaining([
+        ownerMember,
+        expect.objectContaining({
+          user: expect.objectContaining({ id: botId, bot: true }),
+        }),
+      ]),
+    })
+    const defaultGuild = dispatches.find(
+      (dispatch) => (dispatch.d as { id: string }).id === defaultGuildId
+    )
+    expect(defaultGuild?.d).toMatchObject({
+      owner_id: botId,
+      member_count: 1,
+      members: [
+        expect.objectContaining({
+          user: expect.objectContaining({ id: botId, bot: true }),
+        }),
+      ],
+    })
   })
 
   it('dispatches GUILD_CREATE for guilds the bot already belongs to, when the Guilds intent is set', async () => {
