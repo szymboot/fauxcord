@@ -64,7 +64,8 @@ export function validateInteractionLocale(locale: unknown): ValidationErrors {
 }
 
 /**
- * Validates callback structure and the flags accepted by a deferred response.
+ * Validates callback structure, modeled direct-message field types, and the
+ * flags accepted by a deferred response.
  * Other callback data retains the mock's existing scope.
  * @param payload - Untrusted callback JSON
  * @returns Discord-shaped validation errors
@@ -102,6 +103,40 @@ export function validateInteractionCallback(
     Array.isArray(callback.data)
   ) {
     return { data: { _errors: [typeError('object')] } }
+  }
+  if (callback.type === 4) {
+    const data = callback.data as Record<string, unknown>
+    const errors: ValidationErrors = {
+      ...(data.content != null &&
+        typeof data.content !== 'string' && {
+          'data.content': { _errors: [typeError('string')] },
+        }),
+      ...(data.tts != null &&
+        typeof data.tts !== 'boolean' && {
+          'data.tts': { _errors: [typeError('boolean')] },
+        }),
+      ...(data.flags != null &&
+        (typeof data.flags !== 'number' ||
+          !Number.isSafeInteger(data.flags)) && {
+          'data.flags': { _errors: [typeError('integer')] },
+        }),
+    }
+    if (data.embeds != null) {
+      if (Array.isArray(data.embeds)) {
+        for (const [index, embed] of data.embeds.entries()) {
+          if (
+            typeof embed !== 'object' ||
+            embed === null ||
+            Array.isArray(embed)
+          ) {
+            errors[`data.embeds.${index}`] = { _errors: [typeError('object')] }
+          }
+        }
+      } else {
+        errors['data.embeds'] = { _errors: [typeError('array')] }
+      }
+    }
+    return errors
   }
   if (callback.type !== 5) return {}
   const { flags } = callback.data as { flags?: unknown }

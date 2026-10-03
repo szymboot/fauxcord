@@ -517,6 +517,73 @@ component rendering, and uploaded response attachments are not modeled here.
 
 ---
 
+## `GET /_test/interactions/:interactionId/callback` — Observe the initial callback
+
+Read-only observation of the bot's accepted initial REST callback, correlated to
+one exact interaction. Use the `id`, `application_id`, and `token` returned by
+`POST /_test/interactions` (also delivered in native `INTERACTION_CREATE`). Supply
+`application_id` as a query parameter and the token in the `X-Interaction-Token`
+header. No Bot authorization header is needed, like other test-control routes.
+The interaction token is required for this lookup; a Bot token is not a substitute.
+
+```http
+GET /_test/interactions/123456789/callback?application_id=111111111111111111
+X-Interaction-Token: <interaction token>
+```
+
+A known matching interaction returns `200`, with `Cache-Control: no-store`:
+
+```json
+{
+  "interaction_id": "123456789",
+  "application_id": "111111111111111111",
+  "responded": true,
+  "initial_callback_type": 5
+}
+```
+
+| State                                                    | `responded` | `initial_callback_type`          |
+| -------------------------------------------------------- | ----------- | -------------------------------- |
+| Pending: no callback accepted yet                        | `false`     | `null`                           |
+| Direct `CHANNEL_MESSAGE_WITH_SOURCE` accepted            | `true`      | `4`                              |
+| Deferred `DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE` accepted | `true`      | `5`                              |
+| Other accepted callback                                  | `true`      | Accepted callback type number    |
+| Acknowledged before callback recording was introduced    | `true`      | `null` (unknown historical mode) |
+
+`initial_callback_type` is the **response callback type**, not the incoming
+interaction's `type` (normally `2` for a slash command). The mock currently accepts
+callback types `1`, `4`, `5`, `6`, `7`, `8`, `9`, `10`, `12`, and `13`; only `4` and
+`5` create originals when a channel is supplied. Recording other accepted types
+does not extend their existing acknowledgement-only behavior.
+
+A harness can poll while `responded` is `false`, then distinguish direct `4` from
+deferred `5`. Any other type, or `true` with `null`, must be handled as a separate
+or unknown mode. Read the original message separately for completed output:
+`PATCH .../messages/@original` clears `LOADING` but never changes the recorded
+initial type. Even if PATCH finishes before the first poll, observation still
+reports `5`. Deleting the original also preserves the observation.
+
+Acceptance and original-response state are recorded atomically in SQLite. Reads
+do not acknowledge, create messages, emit Gateway events, or retry callbacks.
+Malformed/rejected callbacks, wrong callback tokens, and retries rejected with
+`40060` do not change the observation. It survives database reopen and is removed
+with its interaction by test reset or setup deletion. Migrated acknowledged rows
+remain unknown; Fauxcord never infers their mode from message flags or timing.
+Type-4 callbacks validate the modeled message field types before acknowledgement:
+`content` is a string, `tts` is a boolean, `flags` is an integer, and `embeds` is an
+array of objects. These fields also accept `null` as an empty/default value.
+This does not add validation or rendering for unmodeled callback features.
+
+Missing/empty `application_id` or `X-Interaction-Token` returns `400`
+(`{"message":"400: Bad Request","code":0}`). Unknown interaction IDs and any
+mismatch of interaction ID, application ID, or token return the same `404`
+(`{"message":"404: Not Found","code":0}`). No token is returned in success or
+error bodies. Keep the token out of URLs, diagnostic output, and logs, including
+HTTP header dumps. Tokens follow the existing interaction lifetime (expiry is
+not modeled). This Fauxcord-specific route has no Discord OpenAPI manifest entry.
+
+---
+
 ## `POST /_test/polls/:messageId/votes` — Inject a poll vote
 
 Registers a vote from a pre-registered user (typically one created via
