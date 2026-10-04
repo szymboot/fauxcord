@@ -115,7 +115,7 @@ export function getGuildBans(
  * @param db - Database
  * @param guildId - Guild ID
  * @param userId - User ID to ban
- * @param reason - Ban reason (from the X-Audit-Log-Reason header), or null
+ * @param reason - Ban reason from the audit header or legacy query, or null
  * @param deleteMessageSeconds - Age window (seconds) of the user's messages to delete
  */
 export function createGuildBan(

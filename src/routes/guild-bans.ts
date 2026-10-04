@@ -89,19 +89,37 @@ export function createGuildBanRoutes(db: Database): Hono {
         ? parsed
         : {}
 
-    const errors = validateBanCreate(payload)
+    // Legacy clients send days in the query string. Require a single decimal
+    // integer; Number alone would also accept empty strings, hex, or exponents.
+    const queryDays = c.req.queries('delete_message_days')
+    const queryDeleteMessageDays =
+      queryDays === undefined
+        ? undefined
+        : queryDays.length === 1 &&
+            queryDays[0] !== '' &&
+            !/\D/.test(queryDays[0])
+          ? Number(queryDays[0])
+          : NaN
+    // Validate all supplied fields, including values overridden by precedence.
+    const errors = {
+      ...validateBanCreate({ delete_message_days: queryDeleteMessageDays }),
+      ...validateBanCreate(payload),
+    }
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
     }
 
-    const reason = c.req.header('X-Audit-Log-Reason') ?? null
+    // The audit header wins, retaining its existing verbatim behavior. Hono
+    // already decodes query values (including '+' spaces) exactly once.
+    const reason =
+      c.req.header('X-Audit-Log-Reason') ?? c.req.query('reason') ?? null
     // Discord accepts either delete_message_seconds or the deprecated
     // delete_message_days; normalize both to a seconds window.
+    // Non-null JSON values take precedence over legacy query days, including 0.
+    const deleteMessageDays =
+      payload.delete_message_days ?? queryDeleteMessageDays ?? 0
     const deleteMessageSeconds =
-      payload.delete_message_seconds ??
-      (payload.delete_message_days == null
-        ? 0
-        : payload.delete_message_days * 86_400)
+      payload.delete_message_seconds ?? deleteMessageDays * 86_400
     createGuildBan(db, guildId, userId, reason, deleteMessageSeconds)
     return c.body(null, 204)
   })

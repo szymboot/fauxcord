@@ -173,6 +173,15 @@ func main() {
 **Notes**:
 
 - `discordgo.ChannelMessageSend()` sends requests containing `embeds: null` (Fauxcord supports this)
+- `GuildBanCreateWithReason()` can send a bodyless `PUT /guilds/{guildId}/bans/{userId}?reason=...&delete_message_days=7`.
+  Fauxcord decodes the query reason once (URL-escaped characters and `+` spaces).
+  `X-Audit-Log-Reason`, when present, takes precedence and keeps its existing verbatim behavior.
+  The message deletion window uses non-null JSON `delete_message_seconds`, then
+  non-null JSON `delete_message_days`, then query `delete_message_days`, defaulting
+  to zero. Explicit zero takes precedence; JSON null falls through to the next source.
+  Query days must be a single decimal integer from 0 to 7. All supplied deletion
+  fields are validated even when another source takes precedence; malformed or
+  repeated query days return HTTP 400 with Discord error code 50035.
 
 **Supported versions**: verified with discordgo v0.29.0
 
