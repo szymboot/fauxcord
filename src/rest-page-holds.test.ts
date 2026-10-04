@@ -8,6 +8,8 @@ import {
 import { createTestUser, joinTestGuildMember } from './services/test-control'
 import { createGuildBan } from './services/guild-bans'
 import type { RestPageHold } from './services/rest-page-holds'
+import type { RestFault } from './services/rest-faults'
+import type { RestFaultQuery } from './validators/rest-fault'
 
 const TOKEN = 'Bot page-hold'
 const OTHER_TOKEN = 'Bot other'
@@ -50,6 +52,38 @@ async function arm(
   })
   expect(response.status).toBe(201)
   return response.json() as Promise<RestPageHold>
+}
+
+/** Arms the existing page fault API without duplicating its selector logic. */
+async function armFault(
+  path: string,
+  query: RestFaultQuery
+): Promise<RestFault> {
+  const response = await request('/_test/rest-faults', {
+    method: 'POST',
+    body: JSON.stringify({
+      method: 'GET',
+      path,
+      query,
+      times: 1,
+      status: 500,
+      code: 0,
+      message: 'Page failed',
+    }),
+  })
+  expect(response.status).toBe(201)
+  return response.json() as Promise<RestFault>
+}
+
+/** Observes the existing fault's counters using its public control endpoint. */
+async function faultCounters(
+  id: string,
+  remaining: number,
+  consumed: number
+): Promise<void> {
+  const response = await request(`/_test/rest-faults/${id}`)
+  expect(response.status).toBe(200)
+  await expect(response.json()).resolves.toMatchObject({ remaining, consumed })
 }
 
 /** Reads server-side arrival evidence; polling never infers importer persistence. */
@@ -495,4 +529,144 @@ describe('one-shot REST page holds over actual HTTP', () => {
       ).toBe(404)
     }
   })
+})
+
+describe('page holds combined with existing page-specific REST faults', () => {
+  it.each([
+    {
+      route: 'members',
+      prefix: '/api/v10',
+      direction: 'after',
+      cursor: CURSOR,
+    },
+    { route: 'members', prefix: '/api', direction: 'after', cursor: CURSOR },
+    { route: 'bans', prefix: '', direction: 'after', cursor: CURSOR },
+    {
+      route: 'bans',
+      prefix: '/api/v10',
+      direction: 'before',
+      cursor: '100000000000000004',
+    },
+  ])(
+    'defers the $route $direction fault under $prefix until release',
+    async ({ route, prefix, direction, cursor }) => {
+      const path = `/guilds/${GUILD}/${route}`
+      const url = `${prefix}${path}?${direction}=${cursor}&limit=1`
+      const headers = { Authorization: TOKEN }
+      const baseline = await request(url, { headers })
+      const nativeBody = await baseline.text()
+      const hold = await arm(
+        route,
+        direction === 'before'
+          ? { after: null, before: cursor }
+          : { after: cursor }
+      )
+      const fault = await armFault(path, { limit: 1, [direction]: cursor })
+      let settled = false
+      const pending = request(url, { headers }).then((response) => {
+        settled = true
+        return response
+      })
+      await waitFor(hold.id, 'holding')
+      await faultCounters(fault.id, 1, 0)
+      for (const other of [
+        `${prefix}${path}?limit=1`,
+        `${prefix}${path}?${direction}=${cursor}&limit=2`,
+        `${prefix}/guilds/${OTHER_GUILD}/${route}?${direction}=${cursor}&limit=1`,
+        `${prefix}/guilds/${GUILD}/${route === 'members' ? 'bans' : 'members'}?after=${CURSOR}&limit=1`,
+        '/_mock/health',
+      ]) {
+        const response = await request(other, { headers })
+        expect(response.status).toBe(200)
+        await response.arrayBuffer()
+      }
+      const otherBot = await request(url, {
+        headers: { Authorization: OTHER_TOKEN },
+      })
+      expect(otherBot.status).toBe(200)
+      await otherBot.arrayBuffer()
+      await faultCounters(fault.id, 1, 0)
+      expect(settled).toBe(false)
+      await request(`/_test/rest-page-holds/${hold.id}/release`, {
+        method: 'POST',
+      })
+      const failed = await pending
+      expect(failed.status).toBe(500)
+      await expect(failed.json()).resolves.toEqual({
+        message: 'Page failed',
+        code: 0,
+      })
+      await faultCounters(fault.id, 0, 1)
+      const recovered = await request(url, { headers })
+      expect(recovered.status).toBe(200)
+      expect(await recovered.text()).toBe(nativeBody)
+      const released = await status(hold.id)
+      expect(released.state).toBe('released')
+    }
+  )
+
+  it.each(['remove', 'reset', 'disconnect', 'shutdown'])(
+    'does not strand a faulted page during $0 cleanup',
+    async (action) => {
+      const hold = await arm()
+      const fault = await armFault(hold.path, { limit: 1, after: CURSOR })
+      const url = `${hold.path}?after=${CURSOR}&limit=1`
+      const headers = { Authorization: TOKEN }
+      const controller = new AbortController()
+      const pending = request(url, {
+        headers,
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(2000)]),
+      })
+      const rejected =
+        action === 'disconnect' ? expect(pending).rejects.toThrow() : undefined
+      await waitFor(hold.id, 'holding')
+      await faultCounters(fault.id, 1, 0)
+      let closing: Promise<void> | undefined
+      switch (action) {
+        case 'remove': {
+          await request(`/_test/rest-page-holds/${hold.id}`, {
+            method: 'DELETE',
+          })
+          break
+        }
+        case 'reset': {
+          await request('/_test/reset', {
+            method: 'POST',
+            body: JSON.stringify({ token: TOKEN }),
+          })
+          break
+        }
+        case 'disconnect': {
+          controller.abort()
+          await rejected
+          await waitFor(hold.id, 'disconnected')
+          await faultCounters(fault.id, 1, 0)
+          break
+        }
+        default: {
+          closing = server.close()
+        }
+      }
+      if (action === 'disconnect') {
+        const retry = await request(url, { headers })
+        expect(retry.status).toBe(500)
+        await retry.arrayBuffer()
+      } else {
+        const response = await pending
+        expect(response.status).toBe(action === 'reset' ? 200 : 500)
+        await response.arrayBuffer()
+      }
+      await closing
+      if (action === 'shutdown') return
+      if (action === 'reset') {
+        const removed = await request(`/_test/rest-faults/${fault.id}`)
+        expect(removed.status).toBe(404)
+      } else {
+        await faultCounters(fault.id, 0, 1)
+      }
+      const recovered = await request(url, { headers })
+      expect(recovered.status).toBe(200)
+      await recovered.arrayBuffer()
+    }
+  )
 })

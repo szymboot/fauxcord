@@ -1357,9 +1357,14 @@ until explicit deletion, reset, scope deletion, or server shutdown.
 - `DELETE /_test/rest-page-holds/{id}` removes configuration and evidence,
   resuming a held request; returns `204` (`404` for unknown IDs).
 
-After release/removal or timeout, the original native endpoint handler runs
-with the original request and produces its normal status, body, and headers.
-It reads current fixture data at that time; the hold does not snapshot a page.
+After release/removal or timeout, the original request proceeds through normal
+REST-fault middleware and native route handling. With no matching fault, the
+native handler produces its normal status, body, and headers. It reads current
+fixture data at that time; the hold does not snapshot a page.
+Page holds run before REST-fault matching. If the released request also matches
+an armed page-specific REST fault, it receives that fault and consumes its
+attempt then; holding or disconnecting the request alone consumes no fault.
+Fault query normalization and exhaustion behavior remain unchanged.
 A client disconnect ends the wait and disarms the control as `disconnected`;
 reconnecting or restarting that bot cannot reuse a claimed hold. Token-scoped
 `POST /_test/reset`, bot setup deletion, and guild deletion remove the affected
