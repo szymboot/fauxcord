@@ -255,7 +255,12 @@ function handleIdentify(
   }
 
   const previousSessionId = sessionIdByWs.get(ws)
-  if (previousSessionId) sessionManager.remove(previousSessionId)
+  if (
+    previousSessionId &&
+    sessionManager.get(previousSessionId)?.ws === ws.raw
+  ) {
+    sessionManager.remove(previousSessionId)
+  }
   const session = sessionManager.create({
     botId: bot.userId,
     token: data.token,
@@ -384,7 +389,11 @@ function handleResume(
     return
   }
   const previousSessionId = sessionIdByWs.get(ws)
-  if (previousSessionId && previousSessionId !== session.sessionId) {
+  if (
+    previousSessionId &&
+    previousSessionId !== session.sessionId &&
+    sessionManager.get(previousSessionId)?.ws === ws.raw
+  ) {
     sessionManager.remove(previousSessionId)
   }
   sessionManager.invalidateEventControls?.(session.sessionId)

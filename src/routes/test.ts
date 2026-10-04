@@ -35,6 +35,10 @@ import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { validateGuildMemberUpdate } from '../validators/guild'
 import { validateRestFault } from '../validators/rest-fault'
 import { validateMessageCreate } from '../validators/message'
+import {
+  validateMessageStickers,
+  unusableMessageStickersError,
+} from '../validators/message-stickers'
 import { requiredError, typeError } from '../validators/common'
 import { parseJsonBody } from '../lib/route-helpers'
 import {
@@ -298,13 +302,14 @@ export function createTestRoutes(
     const payload = parsed as {
       id?: string
       content?: string
+      sticker_ids?: string[] | null
+      sticker_items?: unknown
       author?: { id?: string }
       remove_after_create?: boolean
     }
 
     if (
-      typeof payload.content !== 'string' ||
-      payload.content.length === 0 ||
+      (payload.content !== undefined && typeof payload.content !== 'string') ||
       typeof payload.author?.id !== 'string' ||
       payload.author.id.length === 0 ||
       (payload.id !== undefined &&
@@ -315,12 +320,25 @@ export function createTestRoutes(
       return c.json({ message: '400: Bad Request', code: 0 }, 400)
     }
 
+    const errors = {
+      ...validateMessageCreate({ content: payload.content }),
+      ...validateMessageStickers({
+        sticker_ids: payload.sticker_ids,
+        sticker_items: payload.sticker_items,
+      }),
+    }
+    if (Object.keys(errors).length > 0)
+      return c.json(validationError(errors).body, 400)
+    if (!payload.content && !payload.sticker_ids?.length)
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+
     const result = injectTestMessage(
       db,
       channelId,
       {
         id: payload.id,
         content: payload.content,
+        sticker_ids: payload.sticker_ids,
         author: { id: payload.author.id },
         remove_after_create: payload.remove_after_create,
       },
@@ -329,6 +347,8 @@ export function createTestRoutes(
 
     if (result === 'CONFLICT')
       return c.json({ message: '409: Conflict', code: 0 }, 409)
+    if (result === 'INVALID_STICKERS')
+      return c.json(validationError(unusableMessageStickersError()).body, 400)
     return result === 'UNKNOWN_CHANNEL' || result === 'UNKNOWN_USER'
       ? c.json({ message: '404: Not Found', code: 0 }, 404)
       : c.json(result, 201)

@@ -852,4 +852,83 @@ describe('scoped Gateway event controls over real WebSockets', () => {
     })
     expect(oldControl.status).toBe(404)
   })
+  it.each(['identify', 'resume'])(
+    'preserves a resumed owner and its held events when the old socket sends %s',
+    async (action) => {
+      const session = server.sessionManager.get(client.sessionId)
+      assert.ok(session)
+      const ws = new WebSocket(server.url)
+      const frames: Client['frames'] = []
+      ws.on('message', (raw: Buffer) => {
+        frames.push(JSON.parse(raw.toString()) as Client['frames'][number])
+      })
+      await once(ws, 'message')
+      const resumed = once(ws, 'message')
+      ws.send(
+        JSON.stringify({
+          op: 6,
+          d: { token: TOKEN, session_id: session.sessionId, seq: session.seq },
+        })
+      )
+      await resumed
+      const currentSocket = session.ws
+      const current = { ws, frames, sessionId: session.sessionId }
+      clients.push(current)
+      await fence(current)
+      expect(frames.some((frame) => frame.t === 'RESUMED')).toBe(true)
+      const armed = await externalControl()
+      expect(armed.status).toBe(201)
+      const policy = (await armed.json()) as { id: string; session_id: string }
+      expect(policy.session_id).toBe(current.sessionId)
+      const mid = message()
+      await request(`/channels/${channel}/messages/${mid}`, 'DELETE')
+      const captured = await observe(policy.id)
+      expect(captured.events_captured).toHaveLength(1)
+      if (action === 'identify') {
+        client.ws.send(
+          JSON.stringify({
+            op: 2,
+            d: { token: TOKEN, intents: GatewayIntentBits.GuildMessages },
+          })
+        )
+      } else {
+        const target = await connect()
+        const targetSession = server.sessionManager.get(target.sessionId)
+        assert.ok(targetSession)
+        client.ws.send(
+          JSON.stringify({
+            op: 6,
+            d: {
+              token: TOKEN,
+              session_id: targetSession.sessionId,
+              seq: targetSession.seq,
+            },
+          })
+        )
+      }
+      await fence()
+      expect(server.sessionManager.get(current.sessionId)).toBe(session)
+      expect(session.ws).toBe(currentSocket)
+      const retained = await observe(policy.id)
+      expect(retained.events_captured[0]?.state).toBe('held')
+      const released = await request(`${ROOT}/${policy.id}/release`, 'POST', {
+        event_ids: captured.events_captured.map((event) => event.id),
+      })
+      expect(released.status).toBe(200)
+      const created = await request(`/channels/${channel}/messages`, 'POST', {
+        content: 'still connected after old-socket replacement',
+      })
+      expect(created.status).toBe(200)
+      await fence(current)
+      expect(
+        frames.filter((frame) => frame.t === 'MESSAGE_DELETE')
+      ).toHaveLength(1)
+      expect(frames.find((frame) => frame.t === 'MESSAGE_DELETE')?.d?.id).toBe(
+        mid
+      )
+      expect(
+        frames.filter((frame) => frame.t === 'MESSAGE_CREATE')
+      ).toHaveLength(1)
+    }
+  )
 })

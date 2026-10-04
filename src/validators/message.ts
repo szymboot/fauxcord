@@ -16,6 +16,7 @@ export interface MessageCreatePayload {
   components?: unknown[]
   flags?: number
   attachments?: unknown[]
+  sticker_ids?: string[] | null
   poll?: PollCreatePayloadField
 }
 
@@ -133,15 +134,17 @@ export function validateMessageCreate(
  * Checks whether a message is empty.
  * @param payload - Payload to check
  * @param hasAttachments - Whether attachments are present
+ * @param hasStickers - Whether validated stickers are present
  * @returns true if empty
  */
 export function isEmptyMessage(
   payload: MessageCreatePayload,
-  hasAttachments: boolean
+  hasAttachments: boolean,
+  hasStickers = false
 ): boolean {
   const hasContent = payload.content && payload.content.length > 0
   const hasEmbeds = Array.isArray(payload.embeds) && payload.embeds.length > 0
-  return !hasContent && !hasEmbeds && !hasAttachments
+  return !hasContent && !hasEmbeds && !hasAttachments && !hasStickers
 }
 
 /** Poll answer payload (a single option in a poll) */

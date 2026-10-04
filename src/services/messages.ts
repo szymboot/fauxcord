@@ -11,10 +11,11 @@ import { toDiscordTimestamp } from '../timestamp'
 import { gatewayBus } from '../gateway/bus'
 import { getGuildMember } from './guild-members'
 import { getUser, type UserObject } from './users'
+import { getMessageStickerItems } from './message-stickers'
 // Used for compile-time type drift detection.
 // When Renovate bumps discord-api-types, `pnpm lint:tsc` will fail if the
 // safe-field subset of MessageResponse is renamed or retyped upstream.
-import type { APIMessage } from 'discord-api-types/v10'
+import type { APIMessage, APIStickerItem } from 'discord-api-types/v10'
 
 /**
  * Compile-time guard: ensures the safe-field subset of MessageObject is
@@ -157,6 +158,8 @@ export interface MessageObject {
   mention_roles: never[]
   attachments: AttachmentObject[]
   embeds: unknown[]
+  /** Catalog-derived sticker snapshots, omitted when the message has none. */
+  sticker_items?: APIStickerItem[]
   /** Message components (slash command components, always empty in the mock) */
   components: never[]
   /** Reaction list (the field itself is omitted when there are no reactions) */
@@ -327,6 +330,8 @@ export function hydrateMessageRow(
     reactions,
     baseUrl
   )
+  const stickers = getMessageStickerItems(db, row.id)
+  if (stickers.length > 0) message.sticker_items = stickers
   if (row.author_token === 'interaction') {
     const interaction = db
       .prepare(
@@ -465,6 +470,8 @@ export interface MessageCreateParams {
   content?: string
   tts?: boolean
   embeds?: unknown[]
+  /** Validated snapshots resolved from existing sticker catalog identities. */
+  stickerItems?: APIStickerItem[]
   messageReference?: { message_id?: string }
   flags?: number
 }
@@ -542,6 +549,20 @@ export function createMessage(
         'INSERT INTO embeds (message_id, data, position) VALUES (?, ?, ?)'
       ).run(params.messageId, JSON.stringify(params.embeds[i]), i)
     }
+  }
+
+  // Snapshot validated catalog metadata before hydrating or dispatching.
+  const stickerItems = params.stickerItems ?? []
+  for (const [position, sticker] of stickerItems.entries()) {
+    db.prepare(
+      'INSERT INTO message_stickers (message_id, position, id, name, format_type) VALUES (?, ?, ?, ?, ?)'
+    ).run(
+      params.messageId,
+      position,
+      sticker.id,
+      sticker.name,
+      sticker.format_type
+    )
   }
 
   // Ephemeral responses are accessible through their interaction token only.
