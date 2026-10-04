@@ -176,13 +176,17 @@ export function createTestRoutes(
       username?: string
       discriminator?: string
       global_name?: string | null
+      avatar?: string | null
     }>()
 
     if (
       !payload.username ||
       (payload.global_name !== undefined &&
         payload.global_name !== null &&
-        typeof payload.global_name !== 'string')
+        typeof payload.global_name !== 'string') ||
+      (payload.avatar !== undefined &&
+        payload.avatar !== null &&
+        typeof payload.avatar !== 'string')
     ) {
       return c.json({ message: '400: Bad Request', code: 0 }, 400)
     }
@@ -193,6 +197,7 @@ export function createTestRoutes(
         username: payload.username,
         discriminator: payload.discriminator,
         global_name: payload.global_name,
+        avatar: payload.avatar,
       })
       return c.json(result, 201)
     } catch (err) {

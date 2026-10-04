@@ -24,12 +24,10 @@ describe('Test guild member join contract', () => {
         id: userId,
         username: 'Human',
         discriminator: '1234',
+        avatar: 'human-avatar',
       }),
     })
     expect(response.status).toBe(201)
-    context.db
-      .prepare('UPDATE users SET avatar = ? WHERE id = ?')
-      .run('human-avatar', userId)
   })
 
   afterEach(() => {
