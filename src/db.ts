@@ -94,6 +94,19 @@ function migrateMemberTimeout(db: Database): void {
 }
 
 /**
+ * Adds nullable boost dates to existing guild memberships.
+ * @param db - Database instance
+ */
+function migrateMemberPremiumSince(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(guild_members)').all() as {
+    name: string
+  }[]
+  if (columns.every((column) => column.name !== 'premium_since')) {
+    db.exec('ALTER TABLE guild_members ADD COLUMN premium_since TEXT')
+  }
+}
+
+/**
  * Adds the invoking user's locale to existing interactions, including a
  * default for rows and callers created before locale support.
  * @param db - Database instance
@@ -315,6 +328,7 @@ export function initializeDatabase(dbPath: string): Database {
       mute       INTEGER NOT NULL DEFAULT 0,
       flags      INTEGER NOT NULL DEFAULT 0,
       communication_disabled_until TEXT,
+      premium_since TEXT,
       PRIMARY KEY (guild_id, user_id)
     );
 
@@ -916,6 +930,7 @@ export function initializeDatabase(dbPath: string): Database {
 
   migrateUserGlobalName(db)
   migrateMemberTimeout(db)
+  migrateMemberPremiumSince(db)
   migrateChannelsThreadColumns(db)
   migrateChannelsFeatureColumns(db)
   migrateInteractionLocale(db)

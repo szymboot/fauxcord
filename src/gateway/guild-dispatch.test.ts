@@ -184,6 +184,74 @@ describe('guild member timeout Gateway state (integration)', () => {
   })
 })
 
+describe('member boost date Gateway fixtures (integration)', () => {
+  let close: (() => Promise<void>) | undefined
+  let ws: WebSocket | undefined
+  afterEach(async () => {
+    ws?.terminate()
+    ws = undefined
+    await close?.()
+    close = undefined
+  })
+
+  it.each(['2020-02-29T14:00:00.123+02:00', null, undefined])(
+    'prepares premium_since=%s before IDENTIFY and returns the same member in GUILD_CREATE',
+    async (premiumSince) => {
+      const server = await createTestGatewayServer()
+      close = server.close
+      const httpUrl = server.url.replace('ws://', 'http://')
+      const token = seedBot(server.db)
+      const guildId = seedGuild(server.db, token)
+      const userId = seedMember(server.db, guildId)
+      const fixture = await fetch(
+        `${httpUrl}/_test/guilds/${guildId}/members/${userId}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ premium_since: premiumSince }),
+        }
+      )
+      expect(fixture.status).toBe(200)
+      const member = await fixture.json()
+      expect(member).toMatchObject({
+        premium_since:
+          premiumSince == null ? null : '2020-02-29T12:00:00.123000+00:00',
+      })
+      ws = new WebSocket(server.url)
+      const nextMessage = createMessageReader(ws)
+      const hello = await nextMessage()
+      expect(hello.op).toBe(GatewayOp.Hello)
+      ws.send(
+        JSON.stringify({
+          op: GatewayOp.Identify,
+          d: {
+            token,
+            intents: GatewayIntentBits.Guilds | GatewayIntentBits.GuildMembers,
+          },
+        })
+      )
+      const ready = await nextMessage()
+      expect(ready.t).toBe('READY')
+      const initial = await nextMessage()
+      expect(initial.t).toBe('GUILD_CREATE')
+      expect((initial.d as { members: unknown[] }).members).toContainEqual(
+        member
+      )
+      for (const suffix of [`/${userId}`, '?limit=100']) {
+        const response = await fetch(
+          `${httpUrl}/api/v10/guilds/${guildId}/members${suffix}`,
+          {
+            headers: { Authorization: token },
+          }
+        )
+        expect(response.status).toBe(200)
+        const result = await response.json()
+        if (suffix === `/${userId}`) expect(result).toEqual(member)
+        else expect(result).toContainEqual(member)
+      }
+    }
+  )
+})
+
 describe('CHANNEL_CREATE dispatch (integration)', () => {
   let close: (() => Promise<void>) | undefined
   afterEach(async () => {

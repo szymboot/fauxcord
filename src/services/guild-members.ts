@@ -24,6 +24,7 @@ type _MemberCompatGuard =
     | 'nick'
     | 'roles'
     | 'joined_at'
+    | 'premium_since'
     | 'deaf'
     | 'mute'
     | 'communication_disabled_until'
@@ -32,6 +33,7 @@ type _MemberCompatGuard =
     | 'nick'
     | 'roles'
     | 'joined_at'
+    | 'premium_since'
     | 'deaf'
     | 'mute'
     | 'communication_disabled_until'
@@ -62,6 +64,7 @@ interface MemberRow {
   user_id: string
   nick: string | null
   joined_at: string
+  premium_since: string | null
   deaf: number
   mute: number
   flags: number
@@ -98,7 +101,7 @@ export interface GuildMemberObject {
   nick: string | null
   /** Whether the member has not yet passed the guild's membership screening (always false in the mock) */
   pending: boolean
-  /** Timestamp when the member started boosting the guild (always null in the mock) */
+  /** Stored timestamp when the member started boosting the guild, or null */
   premium_since: string | null
   roles: string[]
   user: MemberUserObject
@@ -165,7 +168,7 @@ export function getGuildMember(
         joined_at: toDiscordTimestamp(new Date(memberRow.joined_at)),
         nick: memberRow.nick,
         pending: false,
-        premium_since: null,
+        premium_since: memberRow.premium_since,
         roles: getMemberRoleIds(db, guildId, userId),
         user: {
           id: userRow.id,
@@ -256,7 +259,7 @@ export function getGuildMembers(
             joined_at: toDiscordTimestamp(new Date(memberRow.joined_at)),
             nick: memberRow.nick,
             pending: false,
-            premium_since: null,
+            premium_since: memberRow.premium_since,
             roles: rolesByUser.get(memberRow.user_id) ?? [],
             user: {
               id: userRow.id,
