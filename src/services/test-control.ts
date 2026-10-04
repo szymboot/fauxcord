@@ -464,41 +464,64 @@ export function createTestUser(
 export type JoinTestGuildMemberResult =
   GuildMemberObject | 'UNKNOWN_GUILD' | 'UNKNOWN_USER' | 'BOT_USER' | 'CONFLICT'
 
-/** Validated boost-date fixture input for an existing membership. */
-export interface MemberPremiumFixtureRequest {
+/** Validated member-date fixture input for an existing membership. */
+export interface MemberDateFixtureRequest {
+  joined_at?: string
   premium_since?: string | null
 }
 
 /**
- * Prepares an existing member's boost date without emitting Gateway events.
+ * Atomically prepares existing member dates without emitting Gateway events.
  * @param db - Database
  * @param guildId - Existing guild ID
  * @param userId - Existing member's user ID
- * @param request - Validated fixture; omission preserves, null clears
+ * @param request - Validated fixture; omission preserves, premium_since null clears
  * @returns Stored member or an error reason, without creating resources
  */
-export function prepareMemberPremiumFixture(
+export function prepareMemberDateFixture(
   db: Database,
   guildId: string,
   userId: string,
-  request: MemberPremiumFixtureRequest
+  request: MemberDateFixtureRequest
 ): GuildMemberObject | 'UNKNOWN_GUILD' | 'UNKNOWN_MEMBER' {
-  if (!db.prepare('SELECT id FROM guilds WHERE id = ?').get(guildId)) {
-    return 'UNKNOWN_GUILD'
-  }
-  const member = getGuildMember(db, guildId, userId)
-  if (!member) return 'UNKNOWN_MEMBER'
-  if (request.premium_since !== undefined) {
-    const timestamp =
-      request.premium_since === null
-        ? null
-        : toDiscordTimestamp(new Date(request.premium_since))
-    db.prepare(
-      'UPDATE guild_members SET premium_since = ? WHERE guild_id = ? AND user_id = ?'
-    ).run(timestamp, guildId, userId)
-    member.premium_since = timestamp
-  }
-  return member
+  // Normalize every supplied date before starting any write.
+  const joinedAt =
+    request.joined_at === undefined
+      ? null
+      : toDiscordTimestamp(new Date(request.joined_at))
+  const premiumSince =
+    request.premium_since == null
+      ? null
+      : toDiscordTimestamp(new Date(request.premium_since))
+  return db.transaction(
+    (): GuildMemberObject | 'UNKNOWN_GUILD' | 'UNKNOWN_MEMBER' => {
+      if (!db.prepare('SELECT id FROM guilds WHERE id = ?').get(guildId)) {
+        return 'UNKNOWN_GUILD'
+      }
+      const member = getGuildMember(db, guildId, userId)
+      if (!member) return 'UNKNOWN_MEMBER'
+      if (
+        request.joined_at === undefined &&
+        request.premium_since === undefined
+      ) {
+        return member
+      }
+      db.prepare(
+        `UPDATE guild_members SET joined_at = COALESCE(?, joined_at),
+       premium_since = CASE WHEN ? THEN ? ELSE premium_since END
+       WHERE guild_id = ? AND user_id = ?`
+      ).run(
+        joinedAt,
+        request.premium_since === undefined ? 0 : 1,
+        premiumSince,
+        guildId,
+        userId
+      )
+      const prepared = getGuildMember(db, guildId, userId)
+      if (!prepared) throw new Error('Prepared member could not be retrieved')
+      return prepared
+    }
+  )()
 }
 
 /**

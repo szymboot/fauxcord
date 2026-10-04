@@ -509,44 +509,62 @@ continues to contain only `id`, `username` and `discriminator`.
 
 ---
 
-## `PATCH /_test/guilds/:guildId/members/:userId` — Prepare a member boost date
+## `PATCH /_test/guilds/:guildId/members/:userId` — Prepare member dates
 
-Sets `premium_since` on an **existing** Guild membership, including Bot members.
-No Authorization header is required. Run this after setup or joining a test user,
+Silently sets `joined_at` and/or `premium_since` on an **existing** Guild
+membership, including Bot members. No Authorization header is required. Run
+this after `/_test/setup` (for the bot or human owner) or joining a test user,
 before starting the Bot or connecting it to the Gateway:
 
 ```bash
 curl -X PATCH http://localhost:3000/_test/guilds/222222222222222222/members/555555555555555555 \
   -H "Content-Type: application/json" \
-  -d '{"premium_since":"2020-02-29T14:00:00.123+02:00"}'
+  -d '{"joined_at":"2019-01-02T03:04:05Z","premium_since":"2020-02-29T14:00:00.123+02:00"}'
 ```
 
-The body must be a JSON object. Its only supported field is `premium_since`:
+The body must be a JSON object. These are its only supported fields:
 
-| Input            | Result                                                                                                                                                           |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Omitted (`{}`)   | Preserve the stored date; new and upgraded memberships default to `null`.                                                                                        |
-| `null`           | Clear the stored date.                                                                                                                                           |
-| Timestamp string | Set the stored date. Use a valid calendar date and `YYYY-MM-DDTHH:mm:ss`, optionally followed by 1–6 fractional digits, then `Z` or a numeric `±HH:mm` timezone. |
+| Field           | Omitted                                              | `null`                       | Timestamp string           |
+| --------------- | ---------------------------------------------------- | ---------------------------- | -------------------------- |
+| `joined_at`     | Preserve the stored join date.                       | Rejected.                    | Set the stored join date.  |
+| `premium_since` | Preserve the stored boost date (defaults to `null`). | Clear the stored boost date. | Set the stored boost date. |
 
-Timestamps are normalized to UTC with six fractional digits and `+00:00`;
-precision beyond milliseconds is truncated. The example returns
-`2020-02-29T12:00:00.123000+00:00`. There is no constraint relative to the current
-time, allowing deterministic historical or future fixtures.
+`{}` preserves both dates. Either field can be supplied alone, or both in one
+atomic request. Use a valid calendar date and `YYYY-MM-DDTHH:mm:ss`, optionally
+followed by fractional seconds, then `Z` or a numeric `±HH:mm` timezone.
+`premium_since` accepts 1–6 fractional digits. Dates normalize to UTC with six
+fractional digits and `+00:00`; precision beyond milliseconds is truncated. The
+example returns `2019-01-02T03:04:05.000000+00:00` and
+`2020-02-29T12:00:00.123000+00:00`, respectively. Input calendar dates and
+normalized UTC years must be valid four-digit years. There is no constraint
+relative to the current time, allowing historical or future fixtures.
 
-**Response**: `200 OK` with the stored Guild member object. The same
-`premium_since` appears in individual member GETs, paginated member lists and
-the next `GUILD_CREATE`. Dates persist across server restarts. The operation
-changes only that Guild/user pair's boost date, preserving profile, nickname,
-join time, Roles and other member state. It does not create a user or membership,
-alter Guild boost counts/tier, or emit Gateway events. Ordinary member updates
-preserve the fixture date.
+**Response**: `200 OK` with the stored Guild member object. The same dates
+appear in individual member GETs, paginated member lists, the scoped OAuth
+`GET /users/@me/guilds/:guildId/member`, and the next `GUILD_CREATE.members`.
+Dates persist across server restarts. The operation changes only the requested
+dates for that Guild/user pair, preserving profile, nickname, Roles and all
+other member state. It does not create a user or membership, alter Guild boost
+counts/tier, or emit Gateway events or event-bus activity. Ordinary member
+updates preserve fixture dates. Connected clients receive no cache update;
+fetch the member again or reconnect to read the prepared state.
+
+Member reads interpret legacy SQLite `YYYY-MM-DD HH:mm:ss` timestamps as UTC
+on every host timezone, while respecting explicitly zoned fixture timestamps.
 
 **Errors** (no state changes or events): `404` / `10004` for an unknown Guild;
 `404` / `10007` for an unknown membership (including unknown users or users only
 in another Guild); `400` / `0` for malformed JSON, a missing body or a non-object
 body; `400` / `50035` with field errors for unsupported fields, invalid types,
-invalid calendar dates, or timestamps without a timezone.
+invalid calendar dates, timestamps without a timezone, UTC year overflow, or
+`joined_at: null`. **All fields are validated before any writes**, so an invalid
+field leaves both dates and all other state unchanged.
+
+The member POST keeps its generated current join date and live add event;
+ordinary authenticated member PATCH does not accept `joined_at`. Deleting and
+rejoining a prepared member generates a fresh join date through the existing
+live path. The top-level `GUILD_CREATE.joined_at` remains the mock's guild
+availability timestamp; this control prepares `GUILD_CREATE.members`.
 
 ---
 
@@ -632,12 +650,12 @@ Returns the created message object (same shape as
 
 | Field                 | Required | Description                                                                                                                       |
 | --------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `content`             | —        | Message content, up to 2,000 characters. Optional when valid stickers or attachments are supplied.                                               |
-| `attachments`         | —        | Up to 10 byte-preserving base64 file fixtures; see below.                                                                          |
+| `content`             | —        | Message content, up to 2,000 characters. Optional when valid stickers or attachments are supplied.                                |
+| `attachments`         | —        | Up to 10 byte-preserving base64 file fixtures; see below.                                                                         |
 | `sticker_ids`         | —        | Up to three distinct existing sticker IDs as snowflake strings. Omitted, `null`, or `[]` means no stickers.                       |
 | `author.id`           | ✅       | ID of a user already registered via `POST /_test/users` (or any other existing user). Returns `404` if unregistered.              |
 | `id`                  | —        | Explicit numeric Message ID (1–20 digits), otherwise generated. An existing Message ID returns `409` without mutations or events. |
-| `remove_after_create` | —        | Boolean, default `false`. Atomically remove after capturing its create snapshot; queue create then delete after commit.                              |
+| `remove_after_create` | —        | Boolean, default `false`. Atomically remove after capturing its create snapshot; queue create then delete after commit.           |
 
 **File fixtures**
 
@@ -656,8 +674,16 @@ preserved. Multiple files may share a filename; their returned URLs are unique.
   "author": { "id": "555555555555555555" },
   "content": "Original evidence",
   "attachments": [
-    { "filename": "proof.txt", "content_type": "text/plain", "data": "aGVsbG8=" },
-    { "filename": "raw.bin", "content_type": "application/octet-stream", "data": "AP8=" }
+    {
+      "filename": "proof.txt",
+      "content_type": "text/plain",
+      "data": "aGVsbG8="
+    },
+    {
+      "filename": "raw.bin",
+      "content_type": "application/octet-stream",
+      "data": "AP8="
+    }
   ]
 }
 ```

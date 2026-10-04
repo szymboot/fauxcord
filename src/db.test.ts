@@ -7,7 +7,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { getGuildMember, updateGuildMember } from './services/guild-members'
-import { prepareMemberPremiumFixture } from './services/test-control'
+import { prepareMemberDateFixture } from './services/test-control'
 import {
   createInteraction,
   getInteractionCallbackObservation,
@@ -468,7 +468,7 @@ describe('initializeDatabase', () => {
         '2021-01-01T00:00:00.123000+00:00',
         null,
       ]) {
-        prepareMemberPremiumFixture(db, guildId, userId, {
+        prepareMemberDateFixture(db, guildId, userId, {
           premium_since: date,
         })
         closeDatabase(db)
