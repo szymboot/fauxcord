@@ -1,7 +1,9 @@
 /** Exact request selector and Discord-shaped failure configured by tests. */
 export interface RestFaultRequest {
-  method: 'DELETE' | 'PUT' | 'PATCH' | 'POST'
+  method: 'DELETE' | 'PUT' | 'PATCH' | 'POST' | 'GET'
   path: string
+  /** Cleanup scope and owning bot selector; required only for global user GETs. */
+  guild_id?: string
   status: number
   code: number
   message: string
@@ -36,7 +38,24 @@ export function validateRestFault(
   )
     return undefined
 
+  const userRead =
+    body.method === 'GET' && /^\/users\/\d{1,20}$/.test(body.path)
+  const guildRead =
+    body.method === 'GET' &&
+    /^\/guilds\/\d{1,20}\/(?:audit-logs|members\/\d{1,20})$/.test(body.path)
+  if (
+    (userRead && body.guild_id === undefined) ||
+    (body.method === 'GET' &&
+      body.guild_id !== undefined &&
+      (typeof body.guild_id !== 'string' ||
+        !/^\d{1,20}$/.test(body.guild_id) ||
+        (guildRead && body.guild_id !== body.path.split('/', 3)[2])))
+  )
+    return undefined
+
   const supported =
+    userRead ||
+    guildRead ||
     (body.method === 'POST' &&
       /^\/channels\/\d{1,20}\/messages$/.test(body.path)) ||
     (body.method === 'DELETE' &&
@@ -51,6 +70,7 @@ export function validateRestFault(
     ? {
         method: body.method as RestFaultRequest['method'],
         path: body.path,
+        ...(userRead && { guild_id: body.guild_id as string }),
         status: body.status,
         code: body.code,
         message: body.message,
