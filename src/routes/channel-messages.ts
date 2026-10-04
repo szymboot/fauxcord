@@ -15,6 +15,7 @@ import {
   createMessage,
   updateMessage,
   deleteMessage,
+  bulkDeleteMessages,
   isTooOldForBulkDelete,
   MESSAGE_FLAGS,
 } from '../services/messages'
@@ -25,6 +26,7 @@ import {
   type MessageCreatePayload,
   type PollCreatePayloadField,
 } from '../validators/message'
+import { parseBulkDeleteMessages } from '../validators/bulk-delete'
 import { createPoll, getPollForMessage } from '../services/polls'
 import type { AppEnv, BotRecord } from '../middleware/auth'
 import {
@@ -316,15 +318,40 @@ export function createChannelMessageRoutes(
   // POST /channels/:channelId/messages/bulk-delete — Bulk delete messages
   app.post('/channels/:channelId/messages/bulk-delete', async (c) => {
     const { channelId } = c.req.param()
-    // JSON.parse converts 19-digit Snowflake integers to floating point and
-    // loses precision (JavaScript number behavior). Libraries like discord.py
-    // send Snowflakes as raw numbers, so extract them from the raw text with
-    // a regex to preserve precision.
-    const rawBody = await c.req.text()
-    const messagesMatch = /"messages"\s*:\s*\[([^\]]*)\]/.exec(rawBody)
-    const messages: string[] = messagesMatch
-      ? (messagesMatch[1].match(/\d+/g) ?? [])
-      : []
+    const channel = requireEntity(
+      c,
+      getChannel(db, channelId),
+      DiscordErrorCode.UNKNOWN_CHANNEL,
+      'Unknown Channel'
+    )
+    if (channel instanceof Response) return channel
+    if (!channel.guild_id) {
+      return c.json(
+        discordError(
+          DiscordErrorCode.CANNOT_EXECUTE_ON_THIS_CHANNEL_TYPE,
+          'Cannot execute action on this channel type',
+          400
+        ).body,
+        400
+      )
+    }
+    const messages = parseBulkDeleteMessages(await c.req.text())
+    const uniqueMessages = new Set(messages)
+    if (uniqueMessages.size !== messages?.length) {
+      return c.json(
+        validationError({
+          messages: {
+            _errors: [
+              {
+                code: 'BASE_TYPE_BAD_TYPE',
+                message: 'Must be an array of unique Snowflake IDs.',
+              },
+            ],
+          },
+        }).body,
+        400
+      )
+    }
 
     if (messages.length < 2 || messages.length > 100) {
       const err = discordError(
@@ -346,11 +373,7 @@ export function createChannelMessageRoutes(
       }
     }
 
-    for (const msgId of messages) {
-      // Scope deletion to this channel so IDs belonging to other channels are
-      // not removed by a bulk-delete targeting a different channel.
-      deleteMessage(db, msgId, channelId)
-    }
+    bulkDeleteMessages(db, channelId, messages)
 
     return c.body(null, 204)
   })

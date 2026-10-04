@@ -694,6 +694,52 @@ export function deleteMessage(
   return result.changes > 0
 }
 
+/**
+ * Deletes existing non-ephemeral targets in this channel in one transaction.
+ * Foreign/missing IDs are harmless no-ops. Cascading rows are removed by SQLite;
+ * attachment files retain the same lifecycle as ordinary single deletion.
+ * Publishes one native bulk event containing only IDs actually removed, after
+ * commit. Callers must validate the request and must not wrap this in another
+ * transaction: events must never escape a transaction that can still roll back.
+ * @param db - Database
+ * @param channelId - Target guild channel
+ * @param messageIds - Validated unique recent Snowflakes
+ * @returns IDs actually deleted, in request order
+ */
+export function bulkDeleteMessages(
+  db: Database,
+  channelId: string,
+  messageIds: string[]
+): string[] {
+  if (db.inTransaction) {
+    throw new Error('Bulk deletion requires its own transaction')
+  }
+  const deleted = db.transaction(() => {
+    const remove = db.prepare(
+      'DELETE FROM messages WHERE id = ? AND channel_id = ? AND (flags & 64) = 0'
+    )
+    return messageIds.filter((id) => remove.run(id, channelId).changes > 0)
+  })()
+  if (deleted.length > 0) {
+    const guildId = getGuildIdForChannel(db, channelId)
+    const owner = db
+      .prepare(
+        'SELECT bots.user_id FROM guilds JOIN bots ON bots.token = guilds.bot_token WHERE guilds.id = ?'
+      )
+      .get(guildId) as { user_id: string } | undefined
+    if (guildId && owner) {
+      gatewayBus.emit('message.delete.bulk', {
+        guildId,
+        channelId,
+        messageIds: deleted,
+        botId: owner.user_id,
+        db,
+      })
+    }
+  }
+  return deleted
+}
+
 /** Two-week timestamp (milliseconds) */
 const TWO_WEEKS_MS = 14 * 24 * 60 * 60 * 1000
 

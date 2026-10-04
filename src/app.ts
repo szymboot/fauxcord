@@ -122,7 +122,8 @@ export function buildApp(
   })
   // Forward resource-change events from gatewayBus to connected Gateway sessions
   const unsubscribeGateway = registerGatewaySubscriptions(
-    gatewayHandler.sessionManager
+    gatewayHandler.sessionManager,
+    db
   )
   app.get(
     '/',

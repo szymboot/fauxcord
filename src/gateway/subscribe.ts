@@ -1,3 +1,4 @@
+import type { Database } from '../db'
 import { GatewayIntentBits } from 'discord-api-types/v10'
 import { gatewayBus } from './bus'
 import { broadcastToAll, broadcastToBot } from './dispatch'
@@ -7,11 +8,13 @@ import type { SessionManager } from './session'
  * Subscribes to resource-change events on gatewayBus and registers listeners
  * that forward them as Dispatch events to connected Gateway sessions.
  * @param manager - Session manager
+ * @param db - Database for scoping bulk events to this app
  * @returns A function that unregisters all registered listeners (mainly for
  * tests)
  */
 export function registerGatewaySubscriptions(
-  manager: SessionManager
+  manager: SessionManager,
+  db?: Database
 ): () => void {
   const onMessageCreate: Parameters<
     typeof gatewayBus.on<'message.create'>
@@ -53,6 +56,22 @@ export function registerGatewaySubscriptions(
       'MESSAGE_DELETE',
       {
         id: payload.messageId,
+        channel_id: payload.channelId,
+        guild_id: payload.guildId,
+      },
+      GatewayIntentBits.GuildMessages
+    )
+  }
+  const onMessageDeleteBulk: Parameters<
+    typeof gatewayBus.on<'message.delete.bulk'>
+  >[1] = (payload) => {
+    if (payload.db !== db) return
+    broadcastToBot(
+      manager,
+      payload.botId,
+      'MESSAGE_DELETE_BULK',
+      {
+        ids: payload.messageIds,
         channel_id: payload.channelId,
         guild_id: payload.guildId,
       },
@@ -207,6 +226,7 @@ export function registerGatewaySubscriptions(
   gatewayBus.on('message.create', onMessageCreate)
   gatewayBus.on('message.update', onMessageUpdate)
   gatewayBus.on('message.delete', onMessageDelete)
+  gatewayBus.on('message.delete.bulk', onMessageDeleteBulk)
   gatewayBus.on('message.reaction.add', onReactionAdd)
   gatewayBus.on('message.reaction.remove', onReactionRemove)
   gatewayBus.on('guild.create', onGuildCreate)
@@ -225,6 +245,7 @@ export function registerGatewaySubscriptions(
     gatewayBus.off('message.create', onMessageCreate)
     gatewayBus.off('message.update', onMessageUpdate)
     gatewayBus.off('message.delete', onMessageDelete)
+    gatewayBus.off('message.delete.bulk', onMessageDeleteBulk)
     gatewayBus.off('message.reaction.add', onReactionAdd)
     gatewayBus.off('message.reaction.remove', onReactionRemove)
     gatewayBus.off('guild.create', onGuildCreate)

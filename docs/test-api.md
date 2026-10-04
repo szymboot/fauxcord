@@ -745,3 +745,37 @@ it('sends a message', async () => {
   expect(messages.some((m) => m.content === 'hello')).toBe(true)
 })
 ```
+
+## Bulk-delete injected messages through Discord REST
+
+Use `POST /api/v10/channels/:channelId/messages/bulk-delete` with the bot's
+`Authorization` header and `{"messages":["MESSAGE_ID_1","MESSAGE_ID_2"]}` to
+remove retained human or bot messages. Connect the owning application bot with
+`GUILD_MESSAGES` and wait for READY first. Successful deletion queues one native
+`MESSAGE_DELETE_BULK` payload with `ids`, `channel_id`, and `guild_id`; it queues
+no per-message `MESSAGE_DELETE` events. Ordinary single DELETE still queues
+`MESSAGE_DELETE`.
+
+Following the [Discord bulk-delete documentation](https://docs.discord.com/developers/resources/message#bulk-delete-messages),
+the endpoint accepts 2–100 unique Snowflake IDs in a guild channel. IDs may be
+quoted strings or raw JSON integers (preserved without floating-point rounding).
+Malformed bodies/IDs and duplicates return `400` / `50035`; invalid counts return
+`400` / `50016`; any ID older than two weeks returns `400` / `50034`, even when
+missing or belonging to another channel. Unknown channels return `404` / `10003`,
+DM channels return `400` / `50024`, and normal bot authentication is required.
+Invalid requests change no data and queue no deletion events.
+
+Missing IDs count toward the limit and are ignored during deletion. IDs in other
+channels and ephemeral interaction responses are also ignored; they are never
+removed through this channel endpoint. Deletion and database cleanup of embeds,
+attachment metadata, reactions, pins, polls, answers, and votes commit together
+before dispatch. Attachment files on disk retain the same lifecycle as ordinary
+single-message deletion.
+
+Emulator limitations: Fauxcord does not enforce `MANAGE_MESSAGES` permissions.
+Its guild model has one owning bot; bulk dispatch goes only to that bot's
+sessions in this database with the Guild Messages intent. For partial requests,
+`ids` contains only messages actually removed, in request order (possibly one
+ID); all-missing requests return `204` without an event. Discord documents
+missing-ID acceptance but does not specify its event contents for these cases;
+this deterministic behavior lets tests distinguish actual deletions from no-ops.
