@@ -1282,3 +1282,110 @@ sessions in this database with the Guild Messages intent. For partial requests,
 ID); all-missing requests return `204` without an event. Discord documents
 missing-ID acceptance but does not specify its event contents for these cases;
 this deterministic behavior lets tests distinguish actual deletions from no-ops.
+
+## REST pagination page holds
+
+Use these controls to pause the **next matching authenticated GET** for a
+member or ban page while a harness inspects the importer's previously persisted
+page and stops its bot. These controls are separate from `LATENCY_MS`, Gateway
+replay, and REST faults. They never change member/ban fixtures or the importer's
+checkpoints.
+
+### `POST /_test/rest-page-holds`
+
+```bash
+curl -X POST http://localhost:3000/_test/rest-page-holds \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "path": "/guilds/222222222222222222/members",
+    "after": "100000000000000001",
+    "timeout_ms": 30000
+  }'
+```
+
+| Field        | Required | Meaning                                                                                                                                              |
+| ------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`       | yes      | Bare `/guilds/{id}/members` or `/guilds/{id}/bans`, without query parameters. Guild must exist; its owning bot is captured at creation.              |
+| `after`      | yes      | Exact decimal string cursor, or `null` to require absence of `after`. `null` and `"0"` are distinct.                                                 |
+| `before`     | no       | Ban page's exact decimal string cursor; default `null` requires absence. A non-null `before` requires `after: null`; members cannot select `before`. |
+| `timeout_ms` | yes      | Integer from 1 to 60000. Deadline starts at **arming**, so an unused hold also expires.                                                              |
+
+The selector matches GETs through bare, `/api`, and `/api/v10` paths. It requires
+the guild's owning Bot token and exact decoded cursor values; duplicate cursor
+parameters do not match. `limit` and other query parameters do not select a
+hold. Different bots, guilds, routes, and earlier/different cursors proceed
+normally, as do test-control and health endpoints. The first matching request
+claims the hold atomically. Further matching requests proceed normally, even
+while the first is held: this is a one-shot control, not a gate on retries.
+
+Returns `201` with the configuration and status below; invalid selectors return
+`400`, an unknown guild returns `404`, and an already armed/holding identical
+selector returns `409`. The API does not expose bot credentials.
+
+### `GET /_test/rest-page-holds/{id}`
+
+Returns current status with `Cache-Control: no-store`, or `404` after removal:
+
+```json
+{
+  "id": "100000000000000099",
+  "guild_id": "222222222222222222",
+  "path": "/guilds/222222222222222222/members",
+  "after": "100000000000000001",
+  "before": null,
+  "timeout_ms": 30000,
+  "state": "holding",
+  "arrived": 1,
+  "arrived_at": "2026-10-04T12:00:01.000Z",
+  "expires_at": "2026-10-04T12:00:30.000Z",
+  "finished_at": null
+}
+```
+
+`state` is `armed`, `holding`, `released`, `timed_out`, or `disconnected`.
+`arrived` is 0 or 1 and `arrived_at` records the first matching request reaching
+the hold middleware. This proves **request arrival only**. It does not prove
+that the importer persisted an earlier page or committed its checkpoint.
+`finished_at` is populated when the control disarms. Terminal status is retained
+until explicit deletion, reset, scope deletion, or server shutdown.
+
+### Release and removal
+
+- `POST /_test/rest-page-holds/{id}/release` disarms an armed control or resumes a
+  held request; returns `200` with retained status (`404` for unknown IDs).
+  Repeated release is idempotent and keeps an existing terminal state.
+- `DELETE /_test/rest-page-holds/{id}` removes configuration and evidence,
+  resuming a held request; returns `204` (`404` for unknown IDs).
+
+After release/removal or timeout, the original request proceeds through normal
+REST-fault middleware and native route handling. With no matching fault, the
+native handler produces its normal status, body, and headers. It reads current
+fixture data at that time; the hold does not snapshot a page.
+Page holds run before REST-fault matching. If the released request also matches
+an armed page-specific REST fault, it receives that fault and consumes its
+attempt then; holding or disconnecting the request alone consumes no fault.
+Fault query normalization and exhaustion behavior remain unchanged.
+A client disconnect ends the wait and disarms the control as `disconnected`;
+reconnecting or restarting that bot cannot reuse a claimed hold. Token-scoped
+`POST /_test/reset`, bot setup deletion, and guild deletion remove the affected
+controls and unblock requests. A global reset removes all controls. Shutdown
+unblocks requests before draining the HTTP server. Controls live only in memory
+and cannot survive a Fauxcord restart.
+
+For an import harness such as DSC-837:
+
+1. Arm the exact **next page cursor** before starting the importer.
+2. Poll status until `holding` with `arrived: 1`, failing if the bounded deadline
+   expires first.
+3. Independently inspect the bot application's persisted earlier page and
+   checkpoint using the harness's own database observation.
+4. Stop that bot and wait for process exit/disconnection. Poll for
+   `disconnected`, or explicitly remove the control if the client leaves an
+   in-flight connection open.
+5. Always delete the control in harness cleanup **before restarting the bot**,
+   including if it never reached the selected page. Use a fresh control ID for
+   another run. If continuing without stopping, explicitly release instead.
+
+When embedding `buildApp`, call its `shutdownRestPageHolds()` before closing the
+HTTP server, then close the database after HTTP requests drain. The production
+entry point and `createRealServer()` already use this order.

@@ -4,6 +4,7 @@
  * Uses better-sqlite3 and runs in WAL mode.
  */
 
+import { getRestPageHolds } from './services/rest-page-holds'
 import BetterSqlite3 from 'better-sqlite3'
 import type { Database } from 'better-sqlite3'
 
@@ -995,6 +996,7 @@ export function runInTransaction<T>(
  * @param db - Database instance to close
  */
 export function closeDatabase(db: Database): void {
+  getRestPageHolds(db).shutdown()
   if (db.open) {
     db.close()
   }
