@@ -159,7 +159,7 @@ message, and count. For example, a representative server failure is
 `"status": 500, "code": 0, "message": "Internal Server Error"`.
 
 Returns `201` with `id`, the supplied configuration, `guild_id`, `channel_id`
-(`null` for Guild routes), `remaining`, and `consumed`. Initially `remaining`
+(`null` for Guild and User routes), `remaining`, and `consumed`. Initially `remaining`
 equals `times` and `consumed` is zero.
 
 Supported selectors (replace **every** ID with a concrete numeric string):
@@ -171,18 +171,49 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `PUT`    | `/guilds/{guildId}/bans/{userId}`                   | Ban creation                |
 | `PATCH`  | `/guilds/{guildId}/members/{userId}`                | Member update / mute        |
 | `PUT`    | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role assignment        |
+| `GET`    | `/guilds/{guildId}/audit-logs`                      | Deletion audit-log reads    |
+| `GET`    | `/guilds/{guildId}/members/{userId}`                | Member reads                |
+| `GET`    | `/users/{userId}`                                   | Global user reads           |
 
 `path` must be a bare path with no query, version prefix, wildcard, or trailing
 slash. It selects the exact Channel, Channel/Message, or Guild/User/Role IDs, so
 unrelated requests cannot consume the fault. The Channel must belong to an existing Guild,
 or the Guild must exist (`404` otherwise). The target Message/User/Role does not
-need to exist yet, allowing prearming before message injection. Faults apply to
-any authenticated caller issuing that exact request, regardless of token or body.
+need to exist yet, allowing prearming before message injection. Existing
+`POST`/`DELETE`/`PUT`/`PATCH` faults apply to any authenticated caller issuing that
+exact request, regardless of token or body.
+
+`GET` faults apply only to the registered Bot that owns the scope's Guild
+(`guilds.bot_token`). Nonowner Bots and Bearer callers run the ordinary route
+without consuming the control. Guild GETs derive their scope from the path; an
+optional `guild_id` must equal that path's Guild ID. Global `/users/{userId}` GETs
+**require** an explicit numeric `guild_id` of an existing Guild:
+
+```json
+{
+  "method": "GET",
+  "path": "/users/555555555555555555",
+  "guild_id": "222222222222222222",
+  "status": 404,
+  "code": 10013,
+  "message": "Unknown User",
+  "times": 1
+}
+```
+
+This Guild selects the owning Bot and ties the control to Guild deletion and
+scoped reset, even though the REST user lookup is global. Separate Bots may arm
+independent faults for the same User. A global user request carries no Guild ID,
+so a fault applies to that Bot's exact User lookup across its Guild scenarios.
+Use separate Bot tokens (or separate databases) for concurrent scenarios sharing
+the same User target; otherwise serialize them. An active GET control for the
+same method/path and owning Bot returns `409`, including when another Guild of
+that Bot is supplied. No all-GET or wildcard selector is supported.
 
 `status` is an integer from `400` through `599`; `code` is a nonnegative safe
 integer; `message` is a nonempty string of at most 1000 characters. `times` is an
 integer from `1` through `100`, defaulting to `1`. Invalid/malformed input returns
-`400`. An already active fault for the same method/path returns `409`.
+`400`. An already active legacy fault for the same method/path returns `409`.
 
 On a matching authenticated request, Fauxcord atomically decrements `remaining`
 and increments `consumed`, then returns the chosen status with exactly
@@ -195,7 +226,13 @@ Automatic library retries count as separate attempts. The control provides the
 two-field Discord error body; specialized rate-limit retry fields are not modeled.
 
 All three request prefixes (`/api/v10`, `/api`, and bare) match the same control.
-Request query parameters are ignored. Controls and counters are isolated per
+Request query parameters are ignored. In particular, an audit-log fault selects the exact Guild's GET route
+regardless of `action_type`, `limit`, `user_id`, `before`, `after`, parameter
+ordering, or omitted parameters. These queries neither create separate targets
+nor expand the path selector to other Guilds or routes. Queries in the configured
+`path` are rejected with `400`.
+
+Controls and counters are isolated per
 database. `/_test/reset` clears them, and environment/Guild deletion cascades
 them; Channel deletion also removes message-send and message-delete controls for
 that Channel. Exhausted records remain inspectable until cleared, and a fresh control may then

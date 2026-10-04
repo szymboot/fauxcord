@@ -122,6 +122,21 @@ function migrateInteractionCallbackType(db: Database): void {
   }
 }
 
+/** Preserves legacy controls while allowing separate bots to fault one GET path. */
+function migrateRestFaultSelectors(db: Database): void {
+  db.transaction(() => {
+    db.exec(`
+      DROP INDEX IF EXISTS idx_active_rest_fault;
+      CREATE UNIQUE INDEX idx_active_rest_fault
+        ON test_rest_faults(method, path)
+        WHERE remaining > 0 AND method != 'GET';
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_active_rest_get_fault
+        ON test_rest_faults(method, path, guild_id)
+        WHERE remaining > 0 AND method = 'GET';
+    `)
+  })()
+}
+
 /**
  * Initializes the database and creates tables.
  * @param dbPath - SQLite file path (":memory:" for an in-memory DB)
@@ -207,9 +222,6 @@ export function initializeDatabase(dbPath: string): Database {
       remaining INTEGER NOT NULL,
       consumed INTEGER NOT NULL DEFAULT 0
     );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_active_rest_fault
-      ON test_rest_faults(method, path) WHERE remaining > 0;
 
     CREATE TABLE IF NOT EXISTS channel_recipients (
       channel_id TEXT NOT NULL,
@@ -886,6 +898,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateChannelsFeatureColumns(db)
   migrateInteractionLocale(db)
   migrateInteractionCallbackType(db)
+  migrateRestFaultSelectors(db)
 
   return db
 }
