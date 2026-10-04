@@ -1,6 +1,6 @@
 /** Exact request selector and Discord-shaped failure configured by tests. */
 export interface RestFaultRequest {
-  method: 'DELETE' | 'PUT' | 'PATCH'
+  method: 'DELETE' | 'PUT' | 'PATCH' | 'POST'
   path: string
   status: number
   code: number
@@ -37,6 +37,8 @@ export function validateRestFault(
     return undefined
 
   const supported =
+    (body.method === 'POST' &&
+      /^\/channels\/\d{1,20}\/messages$/.test(body.path)) ||
     (body.method === 'DELETE' &&
       /^\/channels\/\d{1,20}\/messages\/\d{1,20}$/.test(body.path)) ||
     (body.method === 'PUT' &&
