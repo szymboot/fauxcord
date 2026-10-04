@@ -9,6 +9,7 @@ import {
   seedMessage,
   seedMember,
   seedBan,
+  createFullTestApp,
 } from '../test-helpers'
 import type { Database } from '../db'
 
@@ -32,6 +33,220 @@ describe('Guild Bans API', () => {
   })
 
   describe('PUT /guilds/:guildId/bans/:userId', () => {
+    it('accepts the bodyless DiscordGo ban request and purges only recent target-guild messages', async () => {
+      const userId = seedMember(db, guildId, '444444444444444444')
+      const channelId = seedChannel(db, guildId)
+      const otherChannelId = seedChannel(db, guildId, '333333333333333334')
+      const otherGuildId = seedGuild(db, token, '222222222222222223')
+      const foreignChannelId = seedChannel(
+        db,
+        otherGuildId,
+        '333333333333333335'
+      )
+      const recentId = seedMessage(db, channelId, userId, token)
+      const sixDaysId = seedMessage(db, otherChannelId, userId, token)
+      const oldId = seedMessage(db, channelId, userId, token)
+      const otherAuthorId = seedMessage(
+        db,
+        channelId,
+        '111111111111111111',
+        token
+      )
+      const foreignId = seedMessage(db, foreignChannelId, userId, token)
+      db.prepare(
+        "UPDATE messages SET created_at = datetime('now', '-6 days') WHERE id = ?"
+      ).run(sixDaysId)
+      db.prepare(
+        "UPDATE messages SET created_at = datetime('now', '-8 days') WHERE id = ?"
+      ).run(oldId)
+      const reason = 'honeypot: café + & = / ? # 100% literal %2F'
+      const query = new URLSearchParams({ reason, delete_message_days: '7' })
+
+      const res = await app.request(
+        `/guilds/${guildId}/bans/${userId}?${query}`,
+        { method: 'PUT', headers: { Authorization: token } }
+      )
+      expect(res.status).toBe(204)
+
+      const ban = await app.request(`/guilds/${guildId}/bans/${userId}`)
+      expect(ban.status).toBe(200)
+      expect(await ban.json()).toMatchObject({ user: { id: userId }, reason })
+      const bans = await app.request(`/guilds/${guildId}/bans`)
+      expect(bans.status).toBe(200)
+      expect(await bans.json()).toEqual([
+        expect.objectContaining({
+          user: expect.objectContaining({ id: userId }),
+          reason,
+        }),
+      ])
+      for (const id of [recentId, sixDaysId]) {
+        expect(
+          db.prepare('SELECT id FROM messages WHERE id = ?').get(id)
+        ).toBeUndefined()
+      }
+      for (const id of [oldId, otherAuthorId, foreignId]) {
+        expect(
+          db.prepare('SELECT id FROM messages WHERE id = ?').get(id)
+        ).toEqual({ id })
+      }
+      expect(
+        db
+          .prepare(
+            'SELECT user_id FROM guild_members WHERE guild_id = ? AND user_id = ?'
+          )
+          .get(guildId, userId)
+      ).toBeUndefined()
+    })
+
+    it.each(['', 'spamming', 'literal %2F + space'])(
+      'stores query reason %j exactly once',
+      async (reason) => {
+        const query = new URLSearchParams({ reason })
+        const res = await app.request(
+          `/guilds/${guildId}/bans/444444444444444444?${query}`,
+          { method: 'PUT' }
+        )
+        expect(res.status).toBe(204)
+        const ban = await app.request(
+          `/guilds/${guildId}/bans/444444444444444444`
+        )
+        expect(await ban.json()).toMatchObject({ reason })
+      }
+    )
+
+    it.each(['header reason', '', 'literal %2F'])(
+      'prefers the audit header %j over the query reason without changing header decoding',
+      async (reason) => {
+        const res = await app.request(
+          `/guilds/${guildId}/bans/444444444444444444?reason=query+reason`,
+          {
+            method: 'PUT',
+            headers: { 'X-Audit-Log-Reason': reason },
+          }
+        )
+        expect(res.status).toBe(204)
+        const ban = await app.request(
+          `/guilds/${guildId}/bans/444444444444444444`
+        )
+        expect(await ban.json()).toMatchObject({ reason })
+      }
+    )
+
+    it.each([
+      { payload: {}, queryDays: '0', purged: false },
+      { payload: { delete_message_days: 0 }, queryDays: '7', purged: false },
+      { payload: { delete_message_days: 1 }, queryDays: '0', purged: true },
+      {
+        payload: { delete_message_seconds: 0, delete_message_days: 7 },
+        queryDays: '7',
+        purged: false,
+      },
+      {
+        payload: { delete_message_seconds: 3600 },
+        queryDays: '0',
+        purged: true,
+      },
+      {
+        payload: { delete_message_seconds: null, delete_message_days: null },
+        queryDays: '7',
+        purged: true,
+      },
+    ])(
+      'uses seconds, then JSON days, then query days: %j',
+      async ({ payload, queryDays, purged }) => {
+        const userId = seedMember(db, guildId)
+        const channelId = seedChannel(db, guildId)
+        const messageId = seedMessage(db, channelId, userId, token)
+        const res = await app.request(
+          `/guilds/${guildId}/bans/${userId}?delete_message_days=${queryDays}`,
+          {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }
+        )
+        expect(res.status).toBe(204)
+        const message = db
+          .prepare('SELECT id FROM messages WHERE id = ?')
+          .get(messageId)
+        expect(message).toEqual(purged ? undefined : { id: messageId })
+      }
+    )
+
+    it.each([
+      '',
+      '-1',
+      '8',
+      '1.5',
+      '1abc',
+      'NaN',
+      'Infinity',
+      '1e0',
+      '0x1',
+      ' ',
+      '1%0A',
+      '1%20',
+      '%2B1',
+      '9007199254740993',
+      '1&delete_message_days=7',
+    ])(
+      'rejects malformed query days %j without banning or purging',
+      async (days) => {
+        const userId = seedMember(db, guildId)
+        const channelId = seedChannel(db, guildId)
+        const messageId = seedMessage(db, channelId, userId, token)
+        const res = await app.request(
+          `/guilds/${guildId}/bans/${userId}?delete_message_days=${days}`,
+          { method: 'PUT' }
+        )
+        expect(res.status).toBe(400)
+        expect(await res.json()).toMatchObject({
+          code: 50_035,
+          errors: {
+            delete_message_days: {
+              _errors: [expect.objectContaining({ code: 'NUMBER_TYPE_MAX' })],
+            },
+          },
+        })
+        expect(
+          db
+            .prepare(
+              'SELECT user_id FROM guild_bans WHERE guild_id = ? AND user_id = ?'
+            )
+            .get(guildId, userId)
+        ).toBeUndefined()
+        expect(
+          db.prepare('SELECT id FROM messages WHERE id = ?').get(messageId)
+        ).toEqual({ id: messageId })
+        expect(
+          db
+            .prepare(
+              'SELECT user_id FROM guild_members WHERE guild_id = ? AND user_id = ?'
+            )
+            .get(guildId, userId)
+        ).toEqual({ user_id: userId })
+      }
+    )
+
+    it.each([
+      { queryDays: 'bad', payload: { delete_message_seconds: 0 } },
+      { queryDays: 'bad', payload: { delete_message_days: 0 } },
+      { queryDays: '7', payload: { delete_message_days: 'bad' } },
+    ])(
+      'validates supplied deletion fields even when overridden: %j',
+      async ({ queryDays, payload }) => {
+        const res = await app.request(
+          `/guilds/${guildId}/bans/444444444444444444?delete_message_days=${queryDays}`,
+          {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }
+        )
+        expect(res.status).toBe(400)
+      }
+    )
+
     it('bans a user and returns 204', async () => {
       const userId = '444444444444444444'
       const res = await app.request(`/guilds/${guildId}/bans/${userId}`, {
@@ -353,4 +568,34 @@ describe('Guild Bans API', () => {
       expect(body.code).toBe(10_004)
     })
   })
+})
+
+describe('DiscordGo bans through the authenticated app', () => {
+  it.each(['/api/v10', '/api', ''])(
+    'accepts query parameters under %j and requires authentication',
+    async (prefix) => {
+      const { db, app, cleanup } = createFullTestApp()
+      try {
+        const token = seedBot(db)
+        const guildId = seedGuild(db, token)
+        const userId = seedMember(db, guildId)
+        const path = `${prefix}/guilds/${guildId}/bans/${userId}?reason=honeypot+ban&delete_message_days=7`
+        const unauthorized = await app.request(path, { method: 'PUT' })
+        expect(unauthorized.status).toBe(401)
+        const res = await app.request(path, {
+          method: 'PUT',
+          headers: { Authorization: token },
+        })
+        expect(res.status).toBe(204)
+        const ban = await app.request(
+          `${prefix}/guilds/${guildId}/bans/${userId}`,
+          { headers: { Authorization: token } }
+        )
+        expect(ban.status).toBe(200)
+        expect(await ban.json()).toMatchObject({ reason: 'honeypot ban' })
+      } finally {
+        cleanup()
+      }
+    }
+  )
 })
