@@ -164,20 +164,20 @@ export function cleanupAttachmentFiles(
   const records = db
     .prepare(
       `SELECT * FROM attachment_files${
-        scope.setupToken
-          ? ` WHERE channel_id IN (SELECT c.id FROM channels c
-              JOIN guilds g ON g.id = c.guild_id WHERE g.bot_token = ?)`
-          : scope.token
+        scope.setupToken === undefined
+          ? scope.token
             ? ' WHERE author_token = ?'
             : ''
+          : ` WHERE channel_id IN (SELECT c.id FROM channels c
+              JOIN guilds g ON g.id = c.guild_id WHERE g.bot_token = ?)`
       }`
     )
     .all(
-      ...(scope.setupToken
-        ? [scope.setupToken]
-        : scope.token
+      ...(scope.setupToken === undefined
+        ? scope.token
           ? [scope.token]
-          : [])
+          : []
+        : [scope.setupToken])
     ) as RetainedAttachment[]
   for (const file of records) {
     const absolute = path.resolve(uploadPath, file.file_path)

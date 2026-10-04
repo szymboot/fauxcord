@@ -916,6 +916,191 @@ it('sends a message', async () => {
 })
 ```
 
+---
+
+## Scoped Gateway capture, hold, release and replay
+
+These unauthenticated test controls operate on native Gateway dispatches addressed
+to one existing, connected session. An external HTTP test controller can use
+only the registered bot user ID and its guild ID, without a bot token or access
+to the bot process's READY callback. Omit `session_id` to resolve exactly one
+open session belonging to that guild's registered bot setup. Connect the bot
+before arming; a controller may retry `404` while waiting for its session to open.
+Explicit `session_id` from `READY.d.session_id` remains supported when available.
+There is no arbitrary dispatch/payload injection endpoint. These Fauxcord-only routes do
+not have Discord OpenAPI manifest entries.
+
+### `POST /_test/gateway-event-controls` — Arm a capture
+
+```json
+{
+  "guild_id": "222222222222222222",
+  "bot_id": "111111111111111111",
+  "events": [
+    "MESSAGE_DELETE",
+    "MESSAGE_REACTION_ADD",
+    "MESSAGE_REACTION_REMOVE"
+  ],
+  "hold": true,
+  "limit": 20,
+  "ttl_ms": 30000,
+  "allow_original_sequence": false
+}
+```
+
+Returns `201` with `id`, the resolved `session_id`, and the normalized policy.
+`guild_id` and `bot_id` must be positive numeric strings of 1–20 digits. When
+provided, `session_id` must be the 32-character hexadecimal ID returned by READY;
+explicit null, empty, or malformed IDs return `400`.
+
+The guild must belong to that registered bot, and the session must belong to
+that bot, use the same setup token, and be open. Missing/mismatched scope,
+no open owning session, or a stale explicit session returns `404`. Omitting
+`session_id` with multiple open owning sessions returns `409` with
+`{"message":"AMBIGUOUS_SESSION","code":0}`; choose an explicit session instead.
+No candidate list, token, or credentials are returned. Sessions for another
+setup sharing the same bot user ID do not qualify. Closed sessions retained for
+normal resume are excluded. Resolution happens once when arming: every control
+is pinned to the resolved session and socket and never follows a replacement.
+After disconnect/replacement, create a fresh control; the returned ID identifies
+the newly resolved session.
+
+`events` is a nonempty, unique subset of `MESSAGE_DELETE`,
+`MESSAGE_DELETE_BULK`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
+`MESSAGE_REACTION_REMOVE_ALL`, and `MESSAGE_REACTION_REMOVE_EMOJI`. Only events
+that the native producer actually emits are captured. Single deletion, native
+bulk deletion through the REST endpoint below, reaction addition, and single
+reaction removal have producers. Reaction-clear selectors are ready for
+separately implemented native events; this feature adds no reaction-clear producer.
+
+Capture runs after native intent filtering: missing Guild Messages / Guild
+Message Reactions intent means no corresponding capture or delivery. Unrelated
+event types, guilds, bots and other sessions keep their existing delivery
+behavior. `hold` defaults to `false`: observe while delivering normally. With
+`hold: true`, matching events are retained without sending or entering the
+normal resume buffer. The database operation still completes immediately.
+Payloads are copied at capture time, so message removal cannot invalidate a
+late reaction payload, and duplicate deletion does not require a second DELETE.
+
+`limit` is an integer from 1–100 (default 20); `ttl_ms` is an integer from
+1–60000 (default 30000). Each control also has a fixed 256 KiB serialized payload
+budget and a maximum of 100 total release/replay deliveries. There are at most
+32 controls per assembled Gateway. Global capacity returns `429`. Overlapping
+event selectors for the same guild/session return `409`. Invalid policy,
+malformed JSON and explicit null policy values return `400`.
+
+When count/byte capacity is reached, subsequent matching events **pass through
+normally** and increment `skipped`; no entries are evicted and no more events
+are held. Assertions should check `skipped === 0` when complete capture matters.
+Expiry does not extend when a control is inspected or used.
+
+### `GET /_test/gateway-event-controls/:id` — Inspect capture state
+
+Returns `200` with the policy, `expires_at` (epoch milliseconds), `bytes`,
+`skipped`, `operations`, and `events_captured` in native observation order:
+
+```json
+{
+  "events_captured": [
+    {
+      "id": "CAPTURED_EVENT_UUID",
+      "envelope": {
+        "op": 0,
+        "t": "MESSAGE_DELETE",
+        "s": 2,
+        "d": {
+          "id": "123",
+          "channel_id": "333333333333333333",
+          "guild_id": "222222222222222222"
+        }
+      },
+      "state": "held",
+      "deliveries": 0,
+      "last_sequence": null
+    }
+  ]
+}
+```
+
+Each captured event has its own UUID. `state` is `held`, `delivered` (ordinary
+native delivery), or `released`. `deliveries` counts server delivery attempts,
+not client acknowledgements or completed callbacks. `last_sequence` is the last
+attempted sequence. Inspection has no delivery side effects and exposes no bot
+token. An unknown, expired, canceled or invalidated control returns `404`.
+
+### `POST /_test/gateway-event-controls/:id/release` — Send held events
+
+```json
+{
+  "event_ids": ["SECOND_CAPTURED_UUID", "FIRST_CAPTURED_UUID"],
+  "sequence": "new"
+}
+```
+
+`event_ids` must contain 1–100 unique captured event UUIDs, all still held by
+this control. Events are sent synchronously in the requested order. Omitting an
+event leaves it held. Returns `200` with updated observation. Unknown/cross-control
+IDs return `404`; already delivered/released events return `409`. The complete
+selection is validated before any send, so an invalid selection sends nothing.
+
+### `POST /_test/gateway-event-controls/:id/replay` — Duplicate a delivered event
+
+```json
+{ "event_ids": ["RELEASED_OR_DELIVERED_UUID"], "sequence": "new" }
+```
+
+Replay accepts exactly one event from this control that was delivered normally
+or released. A still-held event returns `409`; release it first. Replay keeps
+its state and increments `deliveries`. It sends the captured payload directly:
+no REST call, database mutation, or resource lookup is repeated. This includes
+`MESSAGE_DELETE` after the message has already disappeared. Exhausting the
+100-delivery budget returns `429` without sending.
+
+For release and replay, `sequence` defaults to `new`: each send gets a fresh
+monotonically increasing session sequence and is added to normal resume history.
+Native capture itself consumes its original sequence even when held; consequently
+holding/discarding can leave sequence gaps. Held originals never enter resume
+history. Such intentionally omitted sequences may make resume from an older
+sequence invalid under the ordinary bounded-buffer rules; these controls are
+intended for a connected test session, not a resumable lossless queue.
+
+`sequence: "original"` requires `allow_original_sequence: true` when arming the
+control (`409` otherwise). It resends the exact captured envelope, including the
+original sequence, without advancing the session sequence or adding to resume
+history. Release order may deliberately decrease sequences, and replay may
+repeat an old one; clients that reject these frames may not invoke callbacks.
+Subsequent ordinary dispatches still advance from the session's high-water
+sequence. Use `new` when testing duplicate callbacks rather than client sequence
+handling. Malformed action JSON, duplicate IDs or invalid sequence mode returns
+`400`; each successful action returns updated observation.
+
+### `DELETE /_test/gateway-event-controls/:id` — Cancel and discard
+
+Returns `204` for a known control and `404` otherwise. Cancellation drops all
+held payloads and observation history without flushing them; already sent
+frames remain sent. Expiry, socket disconnect, session removal/replacement,
+resume onto a different socket, setup deletion, and `/_test/reset` do the same.
+A nonempty-token reset clears only that setup's controls; an omitted/empty-token reset and
+Gateway shutdown clear all. Controls are in memory and do not survive restart.
+Deleted guild/bot scope is also invalidated before further capture or actions.
+
+What is deterministic: native payload capture, bounded observation, explicit
+release selection, and frame send order on one connected WebSocket. Poll
+observation until the expected events appear, then select their UUIDs. A useful
+scenario is to hold reaction ADD/REMOVE and DELETE, perform the real operations,
+then release DELETE before the captured reactions. REST can confirm the message
+is absent before release.
+
+TCP frame ordering does **not** reproduce or control application handler
+scheduling. Libraries may drop original-sequence frames, update caches before
+callbacks, or run handlers concurrently. To prove one callback finished before
+another starts, the consuming test harness needs its own application-level
+barrier/acknowledgement; a release HTTP response alone proves only server queueing.
+No artificial TCP packet reordering, sleeps, handler acknowledgements, arbitrary
+forged dispatches, or general network chaos are modeled by these controls.
+
+---
+
 ## Bulk-delete injected messages through Discord REST
 
 Use `POST /api/v10/channels/:channelId/messages/bulk-delete` with the bot's

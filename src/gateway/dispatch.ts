@@ -1,7 +1,25 @@
+import type { GatewayPayload } from './protocol'
 import { GatewayOp } from './opcodes'
 import { encodePayload } from './protocol'
 import { hasIntent } from './intents'
 import type { Session, SessionManager } from './session'
+
+/** Delivers a sequenced envelope without invoking test capture again. */
+export function deliverDispatch(
+  manager: SessionManager,
+  session: Session,
+  payload: GatewayPayload<unknown>
+): void {
+  manager.pushToReplayBuffer(session, payload)
+  try {
+    session.ws.send(encodePayload(payload))
+  } catch {
+    // `ws.send` can throw synchronously when the socket is not OPEN (e.g. a
+    // transient disconnect). The event is already in the replay buffer, so it
+    // will be delivered on RESUME; swallow the error so delivery to the other
+    // sessions is not interrupted.
+  }
+}
 
 /**
  * Sends a Dispatch (op0) event to a single session, updating its seq and
@@ -24,15 +42,8 @@ export function sendDispatch(
     s: seq,
     d: data,
   }
-  manager.pushToReplayBuffer(session, payload)
-  try {
-    session.ws.send(encodePayload(payload))
-  } catch {
-    // `ws.send` can throw synchronously when the socket is not OPEN (e.g. a
-    // transient disconnect). The event is already in the replay buffer, so it
-    // will be delivered on RESUME; swallow the error so delivery to the other
-    // sessions is not interrupted.
-  }
+  if (manager.captureDispatch?.(session, payload)) return
+  deliverDispatch(manager, session, payload)
 }
 
 /**

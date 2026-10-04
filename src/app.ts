@@ -41,6 +41,8 @@ import {
   createGuildAdvancedPublicRoutes,
   createGuildAdvancedRoutes,
 } from './routes/guild-advanced'
+import { GatewayEventControls } from './gateway/event-controls'
+import { createGatewayEventControlRoutes } from './routes/gateway-event-controls'
 import { createTestRoutes } from './routes/test'
 import { createMockRoutes } from './routes/mock'
 import { createGatewayWebSocketHandler } from './gateway/server'
@@ -94,8 +96,20 @@ export function buildApp(
   // Infrastructure APIs require no authentication (registered first)
   app.route('/', createMockRoutes(db, config.uploadPath ?? '/data/uploads'))
 
+  const gatewayHandler = createGatewayWebSocketHandler(db, {
+    baseUrl: config.baseUrl,
+    disableAuth: config.disableAuth,
+  })
+  const eventControls = new GatewayEventControls(
+    db,
+    gatewayHandler.sessionManager
+  )
   // Test control APIs require no authentication
-  app.route('/', createTestRoutes(db, config.baseUrl, config.uploadPath))
+  app.route('/', createGatewayEventControlRoutes(eventControls))
+  app.route(
+    '/',
+    createTestRoutes(db, config.baseUrl, config.uploadPath, eventControls)
+  )
 
   // OAuth2 is partially exempt from authentication (its endpoints validate
   // their own Bearer/client-credential auth internally), so it is mounted
@@ -116,15 +130,16 @@ export function buildApp(
   // happens inside the IDENTIFY message after the WebSocket connection is
   // established (as with real Discord), so this is mounted before the
   // HTTP-level Bot token auth middleware and requires no authentication.
-  const gatewayHandler = createGatewayWebSocketHandler(db, {
-    baseUrl: config.baseUrl,
-    disableAuth: config.disableAuth,
-  })
   // Forward resource-change events from gatewayBus to connected Gateway sessions
-  const unsubscribeGateway = registerGatewaySubscriptions(
+  const unsubscribe = registerGatewaySubscriptions(
     gatewayHandler.sessionManager,
     db
   )
+  /** Removes subscriptions and all pending test captures on shutdown. */
+  const unsubscribeGateway = (): void => {
+    eventControls.reset()
+    unsubscribe()
+  }
   app.get(
     '/',
     upgradeWebSocket(() => gatewayHandler.upgrade)
