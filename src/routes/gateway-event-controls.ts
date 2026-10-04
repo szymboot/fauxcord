@@ -19,10 +19,10 @@ function validateControl(value: unknown): EventControlRequest | undefined {
   if (
     typeof guildId !== 'string' ||
     typeof botId !== 'string' ||
-    typeof sessionId !== 'string' ||
     !/^[1-9]\d{0,19}$/.test(guildId) ||
     !/^[1-9]\d{0,19}$/.test(botId) ||
-    !/^[\da-f]{32}$/.test(sessionId) ||
+    (sessionId !== undefined &&
+      (typeof sessionId !== 'string' || !/^[\da-f]{32}$/.test(sessionId))) ||
     !Array.isArray(events) ||
     events.length === 0 ||
     events.length > CONTROL_EVENTS.length ||

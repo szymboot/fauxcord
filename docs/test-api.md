@@ -96,7 +96,7 @@ current seed file format registers only bots.
 ## `DELETE /_test/setup/:token` — Completely delete an environment
 
 Deletes the Bot and all of its related data (Guilds, Channels, Messages, Webhooks).
-Guild-scoped REST fault controls and their consumption history are also removed.
+Guild-scoped audit-log fixtures, REST fault controls, and their consumption history are also removed.
 
 ```bash
 curl -X DELETE "http://localhost:3000/_test/setup/Bot%20mytoken"
@@ -106,7 +106,7 @@ curl -X DELETE "http://localhost:3000/_test/setup/Bot%20mytoken"
 
 ---
 
-## `POST /_test/reset` — Reset posted data and REST faults
+## `POST /_test/reset` — Reset posted data, audit logs and REST faults
 
 Deletes only posted data, while keeping Guild, Channel, and Bot registrations intact.  
 Use this for initialization before and after each test case.
@@ -120,7 +120,7 @@ curl -X POST http://localhost:3000/_test/reset \
 ```
 
 What gets deleted: messages, webhooks, invites, reactions, pins, embeds, attachments,
-and all REST fault controls (including exhausted controls and consumption history).
+audit-log fixtures, and all REST fault controls (including exhausted controls and consumption history).
 
 ### Reset only a specific Bot's data
 
@@ -132,7 +132,68 @@ curl -X POST http://localhost:3000/_test/reset \
 
 Only messages sent by that Bot and Webhooks/Invites belonging to that Bot's Guilds are deleted.
 REST fault controls in that Bot's Guilds are also deleted, including controls targeting
-human-authored messages. Other Bots' Guilds keep their controls.
+human-authored messages. Audit-log fixtures are cleared by the target Guild's Bot token,
+regardless of their actor or target author. Other Bots' Guilds keep their controls and audit history.
+
+---
+
+## `POST /_test/guilds/:guildId/audit-logs` — Create a deletion audit fixture
+
+Create an audit entry independently of messages and Gateway events. This operation
+neither deletes a message nor emits an event. Register the actor and target author
+first with `/_test/setup` or `POST /_test/users`; the channel must belong to the
+specified Guild. Users need not still be Guild members.
+
+```bash
+curl -X POST http://localhost:3000/_test/guilds/222222222222222222/audit-logs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action_type": 72,
+    "user_id": "111111111111111111",
+    "target_id": "555555555555555555",
+    "options": { "channel_id": "333333333333333333", "count": "1" }
+  }'
+```
+
+Returns `201` with the Discord-shaped entry: `id`, `action_type`, `user_id`,
+`target_id`, and `options`. Only `MESSAGE_DELETE` (`72`) is supported. `user_id`
+is the actor; `target_id` is the deleted message's author. `options.channel_id`
+and a positive decimal **string** `options.count` are required. IDs must be
+canonical nonzero unsigned 64-bit decimal strings. Counts must fit a safe integer.
+Unsupported fields/actions, malformed JSON, and invalid values return `400`;
+unknown Guild/User or a channel outside the Guild returns `404`; duplicate entry
+IDs across any Guild return `409`. Rejected requests leave the database unchanged.
+
+Omit `id` and `timestamp` to generate a recent entry. For deterministic history,
+provide either an explicit unique `id` or `timestamp` in UTC ISO format, such as
+`"2026-01-01T00:00:00.000Z"`. The timestamp is encoded in the Snowflake's upper
+bits, with the lower 22 bits zero. Reusing a timestamp therefore returns `409`;
+use explicit distinct IDs for multiple entries in one millisecond. The timestamp
+must be after Discord's epoch and within the Snowflake range. There is no extra
+`timestamp` field in the Discord entry: clients derive its age from `id`.
+
+Read entries through authenticated `GET /api/v10/guilds/:guildId/audit-logs`
+(also `/api` and bare paths). Existing Guild access checks apply. It returns only
+that Guild's entries and deduplicated referenced actor/target users, plus empty
+arrays for other referenced entity types. History is empty until fixtures are
+created. Message deletion does not automatically create audit entries.
+
+Supported filters are `action_type`, actor `user_id`, `target_id` (also present in
+the committed OpenAPI spec), strict `before`/`after` Snowflake cursors, and `limit`
+(`1`–`100`, default `50`). Results are newest first by default and with `before`;
+`after` returns oldest first, as documented by
+[Discord](https://docs.discord.com/developers/resources/audit-log#get-guild-audit-log).
+If both cursors are supplied, both bounds apply and the order follows `after`.
+The default cursor includes the current millisecond and omits future-dated entries;
+explicit cursors can retrieve future fixtures. Invalid query values return `400`.
+
+To test recent attribution, seed a generated entry for the expected author. To
+test stale attribution, seed an older `timestamp` or Snowflake. To test a mismatch,
+choose another registered `target_id` or another channel in the same Guild. For
+empty history, create no fixture or call `/_test/reset`. Fixtures persist until
+reset or Guild/setup deletion; there is no automatic 45-day retention purge.
+Channel deletion leaves historical audit entries intact. Bot-scoped reset follows
+the fixture's Guild, even when its actor is another Bot or a human.
 
 ---
 
@@ -159,7 +220,7 @@ message, and count. For example, a representative server failure is
 `"status": 500, "code": 0, "message": "Internal Server Error"`.
 
 Returns `201` with `id`, the supplied configuration, `guild_id`, `channel_id`
-(`null` for Guild routes), `remaining`, and `consumed`. Initially `remaining`
+(`null` for Guild and User routes), `remaining`, and `consumed`. Initially `remaining`
 equals `times` and `consumed` is zero.
 
 Supported selectors (replace **every** ID with a concrete numeric string):
@@ -171,18 +232,49 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `PUT`    | `/guilds/{guildId}/bans/{userId}`                   | Ban creation                |
 | `PATCH`  | `/guilds/{guildId}/members/{userId}`                | Member update / mute        |
 | `PUT`    | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role assignment        |
+| `GET`    | `/guilds/{guildId}/audit-logs`                      | Deletion audit-log reads    |
+| `GET`    | `/guilds/{guildId}/members/{userId}`                | Member reads                |
+| `GET`    | `/users/{userId}`                                   | Global user reads           |
 
 `path` must be a bare path with no query, version prefix, wildcard, or trailing
 slash. It selects the exact Channel, Channel/Message, or Guild/User/Role IDs, so
 unrelated requests cannot consume the fault. The Channel must belong to an existing Guild,
 or the Guild must exist (`404` otherwise). The target Message/User/Role does not
-need to exist yet, allowing prearming before message injection. Faults apply to
-any authenticated caller issuing that exact request, regardless of token or body.
+need to exist yet, allowing prearming before message injection. Existing
+`POST`/`DELETE`/`PUT`/`PATCH` faults apply to any authenticated caller issuing that
+exact request, regardless of token or body.
+
+`GET` faults apply only to the registered Bot that owns the scope's Guild
+(`guilds.bot_token`). Nonowner Bots and Bearer callers run the ordinary route
+without consuming the control. Guild GETs derive their scope from the path; an
+optional `guild_id` must equal that path's Guild ID. Global `/users/{userId}` GETs
+**require** an explicit numeric `guild_id` of an existing Guild:
+
+```json
+{
+  "method": "GET",
+  "path": "/users/555555555555555555",
+  "guild_id": "222222222222222222",
+  "status": 404,
+  "code": 10013,
+  "message": "Unknown User",
+  "times": 1
+}
+```
+
+This Guild selects the owning Bot and ties the control to Guild deletion and
+scoped reset, even though the REST user lookup is global. Separate Bots may arm
+independent faults for the same User. A global user request carries no Guild ID,
+so a fault applies to that Bot's exact User lookup across its Guild scenarios.
+Use separate Bot tokens (or separate databases) for concurrent scenarios sharing
+the same User target; otherwise serialize them. An active GET control for the
+same method/path and owning Bot returns `409`, including when another Guild of
+that Bot is supplied. No all-GET or wildcard selector is supported.
 
 `status` is an integer from `400` through `599`; `code` is a nonnegative safe
 integer; `message` is a nonempty string of at most 1000 characters. `times` is an
 integer from `1` through `100`, defaulting to `1`. Invalid/malformed input returns
-`400`. An already active fault for the same method/path returns `409`.
+`400`. An already active legacy fault for the same method/path returns `409`.
 
 On a matching authenticated request, Fauxcord atomically decrements `remaining`
 and increments `consumed`, then returns the chosen status with exactly
@@ -195,7 +287,13 @@ Automatic library retries count as separate attempts. The control provides the
 two-field Discord error body; specialized rate-limit retry fields are not modeled.
 
 All three request prefixes (`/api/v10`, `/api`, and bare) match the same control.
-Request query parameters are ignored. Controls and counters are isolated per
+Request query parameters are ignored. In particular, an audit-log fault selects the exact Guild's GET route
+regardless of `action_type`, `limit`, `user_id`, `before`, `after`, parameter
+ordering, or omitted parameters. These queries neither create separate targets
+nor expand the path selector to other Guilds or routes. Queries in the configured
+`path` are rejected with `400`.
+
+Controls and counters are isolated per
 database. `/_test/reset` clears them, and environment/Guild deletion cascades
 them; Channel deletion also removes message-send and message-delete controls for
 that Channel. Exhausted records remain inspectable until cleared, and a fresh control may then
@@ -714,9 +812,13 @@ it('sends a message', async () => {
 ## Scoped Gateway capture, hold, release and replay
 
 These unauthenticated test controls operate on native Gateway dispatches addressed
-to one existing, connected session. Connect the bot and wait for `READY` first;
-use `READY.d.session_id`, the registered bot user ID, and its guild ID. There is
-no arbitrary dispatch/payload injection endpoint. These Fauxcord-only routes do
+to one existing, connected session. An external HTTP test controller can use
+only the registered bot user ID and its guild ID, without a bot token or access
+to the bot process's READY callback. Omit `session_id` to resolve exactly one
+open session belonging to that guild's registered bot setup. Connect the bot
+before arming; a controller may retry `404` while waiting for its session to open.
+Explicit `session_id` from `READY.d.session_id` remains supported when available.
+There is no arbitrary dispatch/payload injection endpoint. These Fauxcord-only routes do
 not have Discord OpenAPI manifest entries.
 
 ### `POST /_test/gateway-event-controls` — Arm a capture
@@ -725,7 +827,6 @@ not have Discord OpenAPI manifest entries.
 {
   "guild_id": "222222222222222222",
   "bot_id": "111111111111111111",
-  "session_id": "SESSION_ID_FROM_READY",
   "events": [
     "MESSAGE_DELETE",
     "MESSAGE_REACTION_ADD",
@@ -738,19 +839,30 @@ not have Discord OpenAPI manifest entries.
 }
 ```
 
-Returns `201` with `id` and the normalized policy. `guild_id` and `bot_id` must
-be positive numeric strings of 1–20 digits; `session_id` must be the 32-character
-hexadecimal ID returned by READY. The guild must belong to that registered bot,
-and the session must belong to that bot, use the same setup token, and be open. Missing/mismatched scope or
-a stale session returns `404`. A control never follows a bot onto a new session.
+Returns `201` with `id`, the resolved `session_id`, and the normalized policy.
+`guild_id` and `bot_id` must be positive numeric strings of 1–20 digits. When
+provided, `session_id` must be the 32-character hexadecimal ID returned by READY;
+explicit null, empty, or malformed IDs return `400`.
+
+The guild must belong to that registered bot, and the session must belong to
+that bot, use the same setup token, and be open. Missing/mismatched scope,
+no open owning session, or a stale explicit session returns `404`. Omitting
+`session_id` with multiple open owning sessions returns `409` with
+`{"message":"AMBIGUOUS_SESSION","code":0}`; choose an explicit session instead.
+No candidate list, token, or credentials are returned. Sessions for another
+setup sharing the same bot user ID do not qualify. Closed sessions retained for
+normal resume are excluded. Resolution happens once when arming: every control
+is pinned to the resolved session and socket and never follows a replacement.
+After disconnect/replacement, create a fresh control; the returned ID identifies
+the newly resolved session.
 
 `events` is a nonempty, unique subset of `MESSAGE_DELETE`,
 `MESSAGE_DELETE_BULK`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
 `MESSAGE_REACTION_REMOVE_ALL`, and `MESSAGE_REACTION_REMOVE_EMOJI`. Only events
-that the native producer actually emits are captured. This feature adds no bulk
-delete or reaction-clear producer. In this base version only single deletion,
-reaction addition, and single reaction removal have native producers; the other
-selectors are ready for separately implemented native events.
+that the native producer actually emits are captured. Single deletion, native
+bulk deletion through the REST endpoint below, reaction addition, and single
+reaction removal have producers. Reaction-clear selectors are ready for
+separately implemented native events; this feature adds no reaction-clear producer.
 
 Capture runs after native intent filtering: missing Guild Messages / Guild
 Message Reactions intent means no corresponding capture or delivery. Unrelated
@@ -877,3 +989,39 @@ another starts, the consuming test harness needs its own application-level
 barrier/acknowledgement; a release HTTP response alone proves only server queueing.
 No artificial TCP packet reordering, sleeps, handler acknowledgements, arbitrary
 forged dispatches, or general network chaos are modeled by these controls.
+
+---
+
+## Bulk-delete injected messages through Discord REST
+
+Use `POST /api/v10/channels/:channelId/messages/bulk-delete` with the bot's
+`Authorization` header and `{"messages":["MESSAGE_ID_1","MESSAGE_ID_2"]}` to
+remove retained human or bot messages. Connect the owning application bot with
+`GUILD_MESSAGES` and wait for READY first. Successful deletion queues one native
+`MESSAGE_DELETE_BULK` payload with `ids`, `channel_id`, and `guild_id`; it queues
+no per-message `MESSAGE_DELETE` events. Ordinary single DELETE still queues
+`MESSAGE_DELETE`.
+
+Following the [Discord bulk-delete documentation](https://docs.discord.com/developers/resources/message#bulk-delete-messages),
+the endpoint accepts 2–100 unique Snowflake IDs in a guild channel. IDs may be
+quoted strings or raw JSON integers (preserved without floating-point rounding).
+Malformed bodies/IDs and duplicates return `400` / `50035`; invalid counts return
+`400` / `50016`; any ID older than two weeks returns `400` / `50034`, even when
+missing or belonging to another channel. Unknown channels return `404` / `10003`,
+DM channels return `400` / `50024`, and normal bot authentication is required.
+Invalid requests change no data and queue no deletion events.
+
+Missing IDs count toward the limit and are ignored during deletion. IDs in other
+channels and ephemeral interaction responses are also ignored; they are never
+removed through this channel endpoint. Deletion and database cleanup of embeds,
+attachment metadata, reactions, pins, polls, answers, and votes commit together
+before dispatch. Attachment files on disk retain the same lifecycle as ordinary
+single-message deletion.
+
+Emulator limitations: Fauxcord does not enforce `MANAGE_MESSAGES` permissions.
+Its guild model has one owning bot; bulk dispatch goes only to that bot's
+sessions in this database with the Guild Messages intent. For partial requests,
+`ids` contains only messages actually removed, in request order (possibly one
+ID); all-missing requests return `204` without an event. Discord documents
+missing-ID acceptance but does not specify its event contents for these cases;
+this deterministic behavior lets tests distinguish actual deletions from no-ops.

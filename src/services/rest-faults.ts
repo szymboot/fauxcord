@@ -11,7 +11,7 @@ export interface RestFault extends RestFaultRequest {
   consumed: number
 }
 
-/** Arms an exact request within an existing guild, rejecting active duplicates. */
+/** Arms an exact request within a guild; GET duplicates are scoped to its bot. */
 export function createRestFault(
   db: Database,
   request: RestFaultRequest
@@ -20,17 +20,24 @@ export function createRestFault(
   const channelId = parts[1] === 'channels' ? parts[2] : null
   const guild = channelId
     ? (db
-        .prepare('SELECT guild_id AS id FROM channels WHERE id = ?')
-        .get(channelId) as { id: string | null } | undefined)
-    : (db.prepare('SELECT id FROM guilds WHERE id = ?').get(parts[2]) as
-        { id: string } | undefined)
+        .prepare(
+          `SELECT g.id, g.bot_token FROM channels c
+          JOIN guilds g ON g.id = c.guild_id WHERE c.id = ?`
+        )
+        .get(channelId) as { id: string; bot_token: string } | undefined)
+    : (db
+        .prepare('SELECT id, bot_token FROM guilds WHERE id = ?')
+        .get(parts[1] === 'users' ? request.guild_id : parts[2]) as
+        { id: string; bot_token: string } | undefined)
   if (!guild?.id) return 'UNKNOWN_SCOPE'
   if (
     db
       .prepare(
-        'SELECT id FROM test_rest_faults WHERE method = ? AND path = ? AND remaining > 0'
+        `SELECT f.id FROM test_rest_faults f JOIN guilds g ON g.id = f.guild_id
+         WHERE f.method = ? AND f.path = ? AND f.remaining > 0
+         AND (f.method != 'GET' OR g.bot_token = ?)`
       )
-      .get(request.method, request.path)
+      .get(request.method, request.path, guild.bot_token)
   )
     return 'CONFLICT'
   const id = generateSnowflake()
@@ -77,17 +84,23 @@ export function deleteRestFault(db: Database, id: string): boolean {
 export function consumeRestFault(
   db: Database,
   method: string,
-  path: string
+  path: string,
+  botToken?: string
 ): RestFault | undefined {
   // SQLite's single statement is atomic, including concurrent HTTP attempts.
   return db
     .prepare(
       `UPDATE test_rest_faults
     SET remaining = remaining - 1, consumed = consumed + 1
-    WHERE method = ? AND path = ? AND remaining > 0
+    WHERE id = (
+      SELECT f.id FROM test_rest_faults f JOIN guilds g ON g.id = f.guild_id
+      WHERE f.method = ? AND f.path = ? AND f.remaining > 0
+      AND (f.method != 'GET' OR g.bot_token = ?)
+      LIMIT 1
+    )
     RETURNING *`
     )
-    .get(method, path) as RestFault | undefined
+    .get(method, path, botToken ?? null) as RestFault | undefined
 }
 
 /** Clears controls and history globally or only in a bot's current guilds. */

@@ -9,6 +9,7 @@ import {
 } from '../test-helpers'
 import { createTestUser } from '../services/test-control'
 import type { MessageObject } from '../services/messages'
+import { generateSnowflake } from '../snowflake'
 
 const applicationId = '111111111111111111'
 
@@ -361,7 +362,9 @@ describe('original interaction response REST flow', () => {
             Authorization: botToken,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ messages: [original.id, original.id] }),
+          body: JSON.stringify({
+            messages: [original.id, generateSnowflake()],
+          }),
         }
       )
       expect(bulkDeleted.status).toBe(204)

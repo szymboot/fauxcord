@@ -129,7 +129,8 @@ export function buildApp(
   // HTTP-level Bot token auth middleware and requires no authentication.
   // Forward resource-change events from gatewayBus to connected Gateway sessions
   const unsubscribe = registerGatewaySubscriptions(
-    gatewayHandler.sessionManager
+    gatewayHandler.sessionManager,
+    db
   )
   /** Removes subscriptions and all pending test captures on shutdown. */
   const unsubscribeGateway = (): void => {

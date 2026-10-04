@@ -22,6 +22,7 @@ interface Client {
 
 /** Capture observation returned by the test API. */
 interface Observation {
+  session_id: string
   id: string
   skipped: number
   operations: number
@@ -122,6 +123,23 @@ describe('scoped Gateway event controls over real WebSockets', () => {
     return ((await response.json()) as { id: string }).id
   }
 
+  /** Arms via an external HTTP-only controller with no bot token or READY data. */
+  async function externalControl(
+    extra: Record<string, unknown> = {}
+  ): Promise<Response> {
+    return fetch(base + ROOT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        guild_id: guild,
+        bot_id: BOT_ID,
+        events: ['MESSAGE_DELETE'],
+        hold: true,
+        ...extra,
+      }),
+    })
+  }
+
   /** Reads a snapshot of captured native envelopes. */
   async function observe(id: string): Promise<Observation> {
     const response = await request(`${ROOT}/${id}`)
@@ -212,6 +230,88 @@ describe('scoped Gateway event controls over real WebSockets', () => {
     })
     expect(result7.status).toBe(409)
   })
+
+  it.each(['/api/v10', '/api', ''])(
+    'holds, releases and replays native bulk deletion through %s without single deletes',
+    async (prefix) => {
+      const otherSession = await connect()
+      const id = await arm({
+        events: ['MESSAGE_DELETE', 'MESSAGE_DELETE_BULK'],
+      })
+      const messageIds = [message(), message()]
+      const response = await request(
+        `${prefix}/channels/${channel}/messages/bulk-delete`,
+        'POST',
+        { messages: messageIds }
+      )
+      expect(response.status).toBe(204)
+      for (const mid of messageIds) {
+        expect(
+          server.db.prepare('SELECT 1 FROM messages WHERE id = ?').get(mid)
+        ).toBeUndefined()
+      }
+      await fence()
+      await fence(otherSession)
+      expect(
+        client.frames.filter((frame) => frame.t?.startsWith('MESSAGE_DELETE'))
+      ).toHaveLength(0)
+      const observation = await observe(id)
+      expect(observation.skipped).toBe(0)
+      expect(observation.events_captured).toHaveLength(1)
+      const event = observation.events_captured[0]
+      const payload = { ids: messageIds, channel_id: channel, guild_id: guild }
+      expect(event).toMatchObject({
+        state: 'held',
+        deliveries: 0,
+        envelope: { op: 0, t: 'MESSAGE_DELETE_BULK', d: payload },
+      })
+      const unaffected = otherSession.frames.filter((frame) =>
+        frame.t?.startsWith('MESSAGE_DELETE')
+      )
+      expect(unaffected).toHaveLength(1)
+      expect(unaffected[0]?.t).toBe('MESSAGE_DELETE_BULK')
+      expect(unaffected[0]?.d).toEqual(payload)
+      const eventIds = [event.id]
+      const release = await request(`${ROOT}/${id}/release`, 'POST', {
+        event_ids: eventIds,
+      })
+      expect(release.status).toBe(200)
+      const replay = await request(`${ROOT}/${id}/replay`, 'POST', {
+        event_ids: eventIds,
+      })
+      expect(replay.status).toBe(200)
+      await fence()
+      const delivered = client.frames.filter((frame) =>
+        frame.t?.startsWith('MESSAGE_DELETE')
+      )
+      expect(delivered).toHaveLength(2)
+      expect(delivered.map((frame) => frame.t)).toEqual([
+        'MESSAGE_DELETE_BULK',
+        'MESSAGE_DELETE_BULK',
+      ])
+      expect(delivered.map((frame) => frame.d)).toEqual([payload, payload])
+      expect(delivered[1]?.s).toBe((delivered[0]?.s ?? 0) + 1)
+      const completed = await observe(id)
+      expect(completed.events_captured[0]).toMatchObject({
+        state: 'released',
+        deliveries: 2,
+      })
+      // Repeating the REST operation after removal remains a native no-op.
+      const repeated = await request(
+        `${prefix}/channels/${channel}/messages/bulk-delete`,
+        'POST',
+        { messages: messageIds }
+      )
+      expect(repeated.status).toBe(204)
+      await fence()
+      const finalObservation = await observe(id)
+      expect(finalObservation.events_captured).toHaveLength(1)
+      expect(
+        client.frames.filter((frame) => frame.t?.startsWith('MESSAGE_DELETE'))
+      ).toHaveLength(2)
+      expect(server.db.prepare('SELECT 1 FROM messages').get()).toBeUndefined()
+    }
+  )
 
   it('reorders captured reactions after message removal with monotonic new sequences', async () => {
     const id = await arm()
@@ -422,7 +522,7 @@ describe('scoped Gateway event controls over real WebSockets', () => {
     })
     const session = server.sessionManager.get(client.sessionId)
     assert.ok(session)
-    // No bulk/clear producer is implemented by this feature; exercise the shared native dispatch boundary.
+    // Exercise the dispatch boundary directly for payload budgets and future reaction-clear producers.
     sendDispatch(server.sessionManager, session, 'MESSAGE_DELETE_BULK', {
       guild_id: guild,
       channel_id: channel,
@@ -632,5 +732,124 @@ describe('scoped Gateway event controls over real WebSockets', () => {
       const observation = await request(`${ROOT}/${id}`)
       expect(observation.status).toBe(200)
     }
+  })
+  it('lets an HTTP-only controller select the unique owner without reading READY or credentials', async () => {
+    const response = await externalControl()
+    expect(response.status).toBe(201)
+    const policy = (await response.json()) as { id: string; session_id: string }
+    expect(policy.session_id).toMatch(/^[\da-f]{32}$/)
+    expect(JSON.stringify(policy)).not.toContain(TOKEN)
+    expect(Object.keys(policy)).not.toContain('token')
+    const mid = message()
+    const removed = await request(
+      `/channels/${channel}/messages/${mid}`,
+      'DELETE'
+    )
+    expect(removed.status).toBe(204)
+    const observation = await observe(policy.id)
+    expect(observation.session_id).toBe(policy.session_id)
+    expect(observation.events_captured).toHaveLength(1)
+    expect(JSON.stringify(observation)).not.toContain(TOKEN)
+    const released = await request(`${ROOT}/${policy.id}/release`, 'POST', {
+      event_ids: observation.events_captured.map((event) => event.id),
+    })
+    expect(released.status).toBe(200)
+    await fence()
+    expect(
+      client.frames.filter((frame) => frame.t === 'MESSAGE_DELETE')
+    ).toHaveLength(1)
+  })
+
+  it('rejects unknown and nonowning implicit scopes including shared bot IDs', async () => {
+    seedBot(server.db, 'Bot alias', BOT_ID)
+    const aliasGuild = seedGuild(server.db, 'Bot alias', '777777777777777777')
+    seedBot(server.db, 'Bot other', '444444444444444444')
+    const otherGuild = seedGuild(server.db, 'Bot other', '555555555555555555')
+    for (const extra of [
+      { guild_id: '999999999999999999' },
+      { bot_id: '999999999999999999' },
+      { guild_id: otherGuild },
+      { bot_id: '444444444444444444' },
+      { guild_id: otherGuild, bot_id: '444444444444444444' },
+      { guild_id: aliasGuild },
+    ]) {
+      const response = await externalControl(extra)
+      expect(response.status).toBe(404)
+      expect(await response.json()).toEqual({
+        message: 'UNKNOWN_SCOPE',
+        code: 0,
+      })
+    }
+    // Another token sharing the bot user ID is not an ambiguous owning session.
+    await connect('alias')
+    const response = await externalControl()
+    expect(response.status).toBe(201)
+    for (const sessionId of [null, '', 'malformed']) {
+      const invalid = await externalControl({ session_id: sessionId })
+      expect(invalid.status).toBe(400)
+    }
+  })
+
+  it('rejects ambiguous owners without exposing candidates and preserves explicit selection', async () => {
+    const otherSession = await connect('controls')
+    const ambiguous = await externalControl()
+    expect(ambiguous.status).toBe(409)
+    expect(await ambiguous.json()).toEqual({
+      message: 'AMBIGUOUS_SESSION',
+      code: 0,
+    })
+    const selected = await externalControl({ session_id: client.sessionId })
+    expect(selected.status).toBe(201)
+    const policy = (await selected.json()) as { id: string; session_id: string }
+    expect(policy.session_id).toBe(client.sessionId)
+    await request(`${ROOT}/${policy.id}`, 'DELETE')
+    otherSession.ws.close()
+    await once(otherSession.ws, 'close')
+    const unique = await externalControl()
+    expect(unique.status).toBe(201)
+    const resolved = (await unique.json()) as { session_id: string }
+    expect(resolved.session_id).toBe(policy.session_id)
+  })
+
+  it('ignores closed sessions and pins implicitly resolved controls across replacement', async () => {
+    const response = await externalControl()
+    const old = (await response.json()) as { id: string; session_id: string }
+    client.ws.send(
+      JSON.stringify({
+        op: 2,
+        d: { token: 'controls', intents: GatewayIntentBits.GuildMessages },
+      })
+    )
+    await fence()
+    const stale = await request(`${ROOT}/${old.id}`)
+    expect(stale.status).toBe(404)
+    const oldSession = await externalControl({ session_id: old.session_id })
+    expect(oldSession.status).toBe(404)
+    const replacement = await externalControl()
+    expect(replacement.status).toBe(201)
+    const fresh = (await replacement.json()) as {
+      id: string
+      session_id: string
+    }
+    expect(fresh.session_id).not.toBe(old.session_id)
+    client.ws.close()
+    await once(client.ws, 'close')
+    const closed = await request(`${ROOT}/${fresh.id}`)
+    expect(closed.status).toBe(404)
+    const noOwner = await externalControl()
+    expect(noOwner.status).toBe(404)
+    const explicitClosed = await externalControl({
+      session_id: fresh.session_id,
+    })
+    expect(explicitClosed.status).toBe(404)
+    client = await connect('controls')
+    const next = await externalControl()
+    expect(next.status).toBe(201)
+    const nextPolicy = (await next.json()) as { id: string; session_id: string }
+    expect(nextPolicy.session_id).not.toBe(fresh.session_id)
+    const oldControl = await request(`${ROOT}/${fresh.id}/release`, 'POST', {
+      event_ids: ['a'.repeat(36)],
+    })
+    expect(oldControl.status).toBe(404)
   })
 })

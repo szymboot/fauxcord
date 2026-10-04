@@ -20,12 +20,18 @@ export const CONTROL_EVENTS = [
 export interface EventControlRequest {
   guild_id: string
   bot_id: string
-  session_id: string
+  /** Optional exact session; omission requires one unambiguous live owner. */
+  session_id?: string
   events: string[]
   hold: boolean
   allow_original_sequence: boolean
   limit: number
   ttl_ms: number
+}
+
+/** Validated policy pinned to one resolved session for its entire lifetime. */
+interface ResolvedEventControlRequest extends EventControlRequest {
+  session_id: string
 }
 
 /** Immutable native envelope plus its delivery observation. */
@@ -38,7 +44,7 @@ interface CapturedEvent {
 }
 
 /** One live-session capture, with a fixed lifetime and memory budget. */
-interface EventControl extends EventControlRequest {
+interface EventControl extends ResolvedEventControlRequest {
   id: string
   expires_at: number
   events_captured: CapturedEvent[]
@@ -100,9 +106,22 @@ export class GatewayEventControls {
   /** Creates a capture for one existing session; overlapping captures conflict. */
   create(
     request: EventControlRequest
-  ): string | (EventControlRequest & { id: string }) {
+  ): string | (ResolvedEventControlRequest & { id: string }) {
     this.prune()
-    const session = this.manager.get(request.session_id)
+    const candidates =
+      request.session_id === undefined
+        ? this.manager
+            .getByBotId(request.bot_id)
+            .filter(
+              (candidate) =>
+                candidate.ws.readyState === WebSocket.OPEN &&
+                this.hasScope(request, candidate)
+            )
+        : [this.manager.get(request.session_id)].filter(
+            (candidate): candidate is Session => candidate !== undefined
+          )
+    if (candidates.length > 1) return 'AMBIGUOUS_SESSION'
+    const session = candidates.at(0)
     if (
       session?.botId !== request.bot_id ||
       session.ws.readyState !== WebSocket.OPEN ||
@@ -115,7 +134,7 @@ export class GatewayEventControls {
         .values()
         .some(
           (control) =>
-            control.session_id === request.session_id &&
+            control.session_id === session.sessionId &&
             control.guild_id === request.guild_id &&
             control.events.some((event) => request.events.includes(event))
         )
@@ -137,6 +156,7 @@ export class GatewayEventControls {
     }
     this.controls.set(id, {
       ...request,
+      session_id: session.sessionId,
       id,
       expires_at: Date.now() + request.ttl_ms,
       events_captured: [],
@@ -147,7 +167,7 @@ export class GatewayEventControls {
       session,
       socket: session.ws,
     })
-    return { ...request, id }
+    return { ...request, session_id: session.sessionId, id }
   }
 
   /** Removes stale controls, discarding held events without delivering them. */
