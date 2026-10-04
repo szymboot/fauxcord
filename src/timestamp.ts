@@ -25,3 +25,18 @@ export function toDiscordTimestamp(date: Date): string {
   const milliseconds = fraction.slice(0, 3)
   return `${base}.${milliseconds}000+00:00`
 }
+
+/**
+ * Formats a stored timestamp, treating SQLite's zone-less datetimes as UTC.
+ * Explicit ISO 8601 offsets are preserved when parsing fixture timestamps.
+ * @param value - SQLite datetime or an explicitly zoned ISO 8601 timestamp
+ * @returns Discord timestamp with six fractional digits and a UTC offset
+ */
+export function formatStoredTimestamp(value: string): string {
+  const timestamp = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(
+    value
+  )
+    ? `${value.replace(' ', 'T')}Z`
+    : value
+  return toDiscordTimestamp(new Date(timestamp))
+}

@@ -23,6 +23,7 @@ import { requiredError } from '../validators/common'
 import { parseJsonBody } from '../lib/route-helpers'
 import type { AppEnv } from '../middleware/auth'
 import { listEntitlements } from '../services/applications'
+import { formatStoredTimestamp } from '../timestamp'
 
 const BROAD_OAUTH2_SCOPES = new Set([
   'activities.invites.write',
@@ -350,7 +351,7 @@ export function createUserRoutes(db: Database): Hono<AppEnv> {
           banner: null,
           communication_disabled_until: row.communication_disabled_until,
           flags: row.flags,
-          joined_at: new Date(`${row.joined_at}Z`).toISOString(),
+          joined_at: formatStoredTimestamp(row.joined_at),
           nick: row.nick,
           pending: false,
           premium_since: row.premium_since,

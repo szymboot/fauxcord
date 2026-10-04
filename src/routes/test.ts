@@ -28,7 +28,7 @@ import {
   getTestMessages,
   createTestUser,
   joinTestGuildMember,
-  prepareMemberPremiumFixture,
+  prepareMemberDateFixture,
   injectTestMessage,
   editTestMessage,
   createTestInteraction,
@@ -42,7 +42,7 @@ import { getInteractionCallbackObservation } from '../services/interactions'
 import { injectPollVote } from '../services/polls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { validateGuildMemberUpdate } from '../validators/guild'
-import { validateMemberPremiumFixture } from '../validators/member-premium'
+import { validateMemberDateFixture } from '../validators/member-dates'
 import { validateRestFault } from '../validators/rest-fault'
 import { validateMessageCreate } from '../validators/message'
 import {
@@ -319,7 +319,7 @@ export function createTestRoutes(
     }
   })
 
-  // PATCH /_test/guilds/:guildId/members/:userId — Prepare a boost date
+  // PATCH /_test/guilds/:guildId/members/:userId — Prepare member dates silently
   app.patch('/_test/guilds/:guildId/members/:userId', async (c) => {
     const parsed: unknown = await c.req.json().catch(() => undefined)
     if (
@@ -330,12 +330,13 @@ export function createTestRoutes(
       return c.json({ message: '400: Bad Request', code: 0 }, 400)
     }
     const payload = parsed as Record<string, unknown>
-    const errors = validateMemberPremiumFixture(payload)
+    const errors = validateMemberDateFixture(payload)
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
     }
     const { guildId, userId } = c.req.param()
-    const result = prepareMemberPremiumFixture(db, guildId, userId, {
+    const result = prepareMemberDateFixture(db, guildId, userId, {
+      joined_at: payload.joined_at as string | undefined,
       premium_since: payload.premium_since as string | null | undefined,
     })
     if (result === 'UNKNOWN_GUILD') {

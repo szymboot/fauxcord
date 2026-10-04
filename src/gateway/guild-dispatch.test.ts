@@ -355,6 +355,86 @@ describe('GUILD_CREATE dispatch after READY (integration)', () => {
     }
   )
 
+  it('loads silently prepared human and bot join dates in the initial native member list', async () => {
+    const server = await createTestGatewayServer()
+    close = server.close
+    const httpUrl = server.url.replace('ws://', 'http://')
+    const ownerId = '555555555555555555'
+    const botId = '111111111111111111'
+    const guildId = '222222222222222222'
+    const registration = await fetch(`${httpUrl}/_test/users`, {
+      method: 'POST',
+      body: JSON.stringify({ id: ownerId, username: 'HistoricalOwner' }),
+    })
+    expect(registration.status).toBe(201)
+    const setup = await fetch(`${httpUrl}/_test/setup`, {
+      method: 'POST',
+      body: JSON.stringify({
+        token: 'Bot historical-members',
+        user: { id: botId },
+        guilds: [{ id: guildId, name: 'Historical Guild', owner_id: ownerId }],
+      }),
+    })
+    expect(setup.status).toBe(201)
+    const expectedMembers: unknown[] = []
+    for (const id of [ownerId, botId]) {
+      const preparation = await fetch(
+        `${httpUrl}/_test/guilds/${guildId}/members/${id}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            joined_at: '2019-01-02T03:04:05.123456Z',
+            premium_since: '2020-01-02T03:04:05Z',
+          }),
+        }
+      )
+      expect(preparation.status).toBe(200)
+      const member: unknown = await preparation.json()
+      expect(member).toMatchObject({
+        joined_at: '2019-01-02T03:04:05.123000+00:00',
+        premium_since: '2020-01-02T03:04:05.000000+00:00',
+        user: { id, bot: id === botId },
+      })
+      const rest = await fetch(
+        `${httpUrl}/api/v10/guilds/${guildId}/members/${id}`,
+        { headers: { Authorization: 'Bot historical-members' } }
+      )
+      expect(rest.status).toBe(200)
+      expect(await rest.json()).toEqual(member)
+      expectedMembers.push(member)
+    }
+    const list = await fetch(
+      `${httpUrl}/api/v10/guilds/${guildId}/members?limit=100`,
+      { headers: { Authorization: 'Bot historical-members' } }
+    )
+    expect(list.status).toBe(200)
+    expect(await list.json()).toEqual(expect.arrayContaining(expectedMembers))
+
+    ownerSocket = new WebSocket(server.url)
+    const nextMessage = createMessageReader(ownerSocket)
+    const hello = await nextMessage()
+    expect(hello.op).toBe(GatewayOp.Hello)
+    ownerSocket.send(
+      JSON.stringify({
+        op: GatewayOp.Identify,
+        d: {
+          token: 'historical-members',
+          intents: GatewayIntentBits.Guilds | GatewayIntentBits.GuildMembers,
+        },
+      })
+    )
+    const ready = await nextMessage()
+    expect(ready.t).toBe('READY')
+    const initial = await nextMessage()
+    expect(initial.t).toBe('GUILD_CREATE')
+    expect(initial.d).toMatchObject({
+      id: guildId,
+      owner_id: ownerId,
+      member_count: 2,
+      members: expect.arrayContaining(expectedMembers),
+    })
+  })
+
   it('dispatches explicit human owners and default bot owners with their own member identities', async () => {
     const server = await createTestGatewayServer()
     close = server.close

@@ -9,7 +9,7 @@ import type { Database } from '../db'
 // Used for compile-time type drift detection.
 import type { APIGuildMember, APIUser } from 'discord-api-types/v10'
 import { gatewayBus } from '../gateway/bus'
-import { toDiscordTimestamp } from '../timestamp'
+import { toDiscordTimestamp, formatStoredTimestamp } from '../timestamp'
 import { getUser } from './users'
 
 /**
@@ -165,7 +165,7 @@ export function getGuildMember(
         banner: null,
         communication_disabled_until: memberRow.communication_disabled_until,
         flags: memberRow.flags,
-        joined_at: toDiscordTimestamp(new Date(memberRow.joined_at)),
+        joined_at: formatStoredTimestamp(memberRow.joined_at),
         nick: memberRow.nick,
         pending: false,
         premium_since: memberRow.premium_since,
@@ -256,7 +256,7 @@ export function getGuildMembers(
             communication_disabled_until:
               memberRow.communication_disabled_until,
             flags: memberRow.flags,
-            joined_at: toDiscordTimestamp(new Date(memberRow.joined_at)),
+            joined_at: formatStoredTimestamp(memberRow.joined_at),
             nick: memberRow.nick,
             pending: false,
             premium_since: memberRow.premium_since,

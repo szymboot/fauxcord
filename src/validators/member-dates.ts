@@ -1,4 +1,5 @@
 import { typeError, type ValidationErrors } from './common'
+import { normalizeMemberJoinDate } from './member-join-date'
 
 /** ISO 8601 datetimes with a timezone and a valid time of day. */
 const PREMIUM_TIMESTAMP =
@@ -7,19 +8,32 @@ const PREMIUM_TIMESTAMP =
 /**
  * Validates the narrow fixture input, rejecting unsupported fields.
  * @param payload - Parsed JSON object
- * @returns Field errors; omission and null are valid
+ * @returns Field errors; omission preserves and only premium_since accepts null
  */
-export function validateMemberPremiumFixture(
+export function validateMemberDateFixture(
   payload: Record<string, unknown>
 ): ValidationErrors {
   const errors = Object.create(null) as ValidationErrors
   for (const field of Object.keys(payload)) {
-    if (field !== 'premium_since') {
+    if (field !== 'premium_since' && field !== 'joined_at') {
       errors[field] = {
         _errors: [
           { code: 'UNKNOWN_FIELD', message: 'Unsupported fixture field.' },
         ],
       }
+    }
+  }
+  if (
+    payload.joined_at !== undefined &&
+    normalizeMemberJoinDate(payload.joined_at) === null
+  ) {
+    errors.joined_at = {
+      _errors: [
+        {
+          code: 'BASE_TYPE_BAD_FORMAT',
+          message: 'Must be a valid ISO8601 timestamp with a timezone.',
+        },
+      ],
     }
   }
   const value = payload.premium_since
@@ -28,13 +42,9 @@ export function validateMemberPremiumFixture(
     errors.premium_since = { _errors: [typeError('string')] }
     return errors
   }
-  const calendarDate = value.slice(0, 10)
-  const calendarTimestamp = Date.parse(`${calendarDate}T00:00:00Z`)
   if (
     !PREMIUM_TIMESTAMP.test(value) ||
-    !Number.isFinite(Date.parse(value)) ||
-    !Number.isFinite(calendarTimestamp) ||
-    new Date(calendarTimestamp).toISOString().slice(0, 10) !== calendarDate
+    normalizeMemberJoinDate(value) === null
   ) {
     errors.premium_since = {
       _errors: [
