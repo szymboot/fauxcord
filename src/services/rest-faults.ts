@@ -1,6 +1,10 @@
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
-import type { RestFaultRequest } from '../validators/rest-fault'
+import {
+  isRestFaultPagePath,
+  normalizeRestFaultQuery,
+  type RestFaultRequest,
+} from '../validators/rest-fault'
 
 /** Stored fault counters retained after exhaustion until cancellation or reset. */
 export interface RestFault extends RestFaultRequest {
@@ -11,11 +15,29 @@ export interface RestFault extends RestFaultRequest {
   consumed: number
 }
 
-/** Arms an exact request within a guild; GET duplicates are scoped to its bot. */
-export function createRestFault(
+/** SQLite representation; legacy selectors use an empty query key. */
+interface StoredRestFault extends Omit<RestFault, 'query'> {
+  query: string
+}
+
+/** Exposes canonical page queries without changing legacy response shapes. */
+function deserializeFault(
+  row: StoredRestFault | undefined
+): RestFault | undefined {
+  if (!row) return undefined
+  const { query, ...fault } = row
+  return {
+    ...fault,
+    ...(query && { query: JSON.parse(query) as RestFaultRequest['query'] }),
+  }
+}
+
+/** Resolves ownership and inserts a control inside the caller's transaction. */
+function insertRestFault(
   db: Database,
   request: RestFaultRequest
 ): RestFault | 'UNKNOWN_SCOPE' | 'CONFLICT' {
+  const query = request.query ? JSON.stringify(request.query) : ''
   const parts = request.path.split('/')
   const channelId = parts[1] === 'channels' ? parts[2] : null
   const guild = channelId
@@ -34,23 +56,24 @@ export function createRestFault(
     db
       .prepare(
         `SELECT f.id FROM test_rest_faults f JOIN guilds g ON g.id = f.guild_id
-         WHERE f.method = ? AND f.path = ? AND f.remaining > 0
+         WHERE f.method = ? AND f.path = ? AND f.query = ? AND f.remaining > 0
          AND (f.method != 'GET' OR g.bot_token = ?)`
       )
-      .get(request.method, request.path, guild.bot_token)
+      .get(request.method, request.path, query, guild.bot_token)
   )
     return 'CONFLICT'
   const id = generateSnowflake()
   db.prepare(
     `INSERT INTO test_rest_faults
-    (id, guild_id, channel_id, method, path, status, code, message, times, remaining)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    (id, guild_id, channel_id, method, path, query, status, code, message, times, remaining)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     guild.id,
     channelId,
     request.method,
     request.path,
+    query,
     request.status,
     request.code,
     request.message,
@@ -67,10 +90,21 @@ export function createRestFault(
   }
 }
 
+/** Arms an exact request within a guild; GET duplicates are scoped to its bot. */
+export function createRestFault(
+  db: Database,
+  request: RestFaultRequest
+): RestFault | 'UNKNOWN_SCOPE' | 'CONFLICT' {
+  // Serialize conflict checking and insertion across SQLite connections.
+  return db.transaction(() => insertRestFault(db, request)).immediate()
+}
+
 /** Retrieves one control's configuration and exact consumption counters. */
 export function getRestFault(db: Database, id: string): RestFault | undefined {
-  return db.prepare('SELECT * FROM test_rest_faults WHERE id = ?').get(id) as
-    RestFault | undefined
+  return deserializeFault(
+    db.prepare('SELECT * FROM test_rest_faults WHERE id = ?').get(id) as
+      StoredRestFault | undefined
+  )
 }
 
 /** Cancels a control and removes its retained consumption history. */
@@ -85,22 +119,38 @@ export function consumeRestFault(
   db: Database,
   method: string,
   path: string,
-  botToken?: string
+  botToken?: string,
+  search = new URLSearchParams()
 ): RestFault | undefined {
+  let query = ''
+  if (method === 'GET' && isRestFaultPagePath(path)) {
+    const values: Record<string, string> = {}
+    for (const key of ['limit', 'after', 'before', 'around']) {
+      const entries = search.getAll(key)
+      if (entries.length > 1) return undefined
+      const first = entries.at(0)
+      if (first !== undefined) values[key] = first
+    }
+    const normalized = normalizeRestFaultQuery(path, values)
+    if (!normalized) return undefined
+    query = JSON.stringify(normalized)
+  }
   // SQLite's single statement is atomic, including concurrent HTTP attempts.
-  return db
-    .prepare(
-      `UPDATE test_rest_faults
+  return deserializeFault(
+    db
+      .prepare(
+        `UPDATE test_rest_faults
     SET remaining = remaining - 1, consumed = consumed + 1
     WHERE id = (
       SELECT f.id FROM test_rest_faults f JOIN guilds g ON g.id = f.guild_id
-      WHERE f.method = ? AND f.path = ? AND f.remaining > 0
+      WHERE f.method = ? AND f.path = ? AND f.query = ? AND f.remaining > 0
       AND (f.method != 'GET' OR g.bot_token = ?)
       LIMIT 1
     )
     RETURNING *`
-    )
-    .get(method, path, botToken ?? null) as RestFault | undefined
+      )
+      .get(method, path, query, botToken ?? null) as StoredRestFault | undefined
+  )
 }
 
 /** Clears controls and history globally or only in a bot's current guilds. */
