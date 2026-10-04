@@ -8,6 +8,7 @@ import {
   seedGuild,
 } from '../test-helpers'
 import { createTestUser } from '../services/test-control'
+import { createGuildSticker } from '../services/guild-advanced'
 import type { MessageObject } from '../services/messages'
 import { GatewayOp } from './opcodes'
 
@@ -170,4 +171,158 @@ describe('complete attachment Gateway delivery', () => {
     ws.send(JSON.stringify({ op: GatewayOp.Heartbeat, d: sequence }))
     expect(await next()).toMatchObject({ op: GatewayOp.HeartbeatAck })
   })
+  it.each([true, false])(
+    'delivers combined snapshots and retains downloads after native single/bulk deletion (human=%s)',
+    async (human) => {
+      const server = await createRealServer()
+      close = server.close
+      const botId = '111111111111111111'
+      const token = seedBot(server.db, 'Bot combined-gateway', botId)
+      const guildId = seedGuild(server.db, token)
+      server.db
+        .prepare('INSERT INTO guild_members (guild_id, user_id) VALUES (?, ?)')
+        .run(guildId, botId)
+      const channelId = seedChannel(server.db, guildId)
+      const humanId = createTestUser(server.db, { username: 'Human' }).id
+      const sticker = createGuildSticker(server.db, guildId, humanId, {
+        name: 'Evidence sticker',
+        tags: 'wave',
+      })
+      const stickerItems = [
+        { id: sticker.id, name: 'Evidence sticker', format_type: 1 },
+      ]
+      const binary = Buffer.from([0, 255, 13, 10, 128])
+      ws = new WebSocket(server.baseUrl.replace('http://', 'ws://'))
+      const next = frameReader(ws)
+      expect(await next()).toMatchObject({ op: GatewayOp.Hello })
+      ws.send(
+        JSON.stringify({
+          op: GatewayOp.Identify,
+          d: {
+            token,
+            intents:
+              GatewayIntentBits.GuildMessages |
+              GatewayIntentBits.MessageContent,
+          },
+        })
+      )
+      expect(await next()).toMatchObject({ t: 'READY' })
+      let sequence = 0
+      const rest = `${server.baseUrl}/api/v10/channels/${channelId}/messages`
+
+      /** Sends a combined message and verifies the first native create frame. */
+      async function sendCombined(content?: string): Promise<MessageObject> {
+        const payload = { content, sticker_ids: [sticker.id] }
+        const form = new FormData()
+        form.set('payload_json', JSON.stringify(payload))
+        form.set(
+          'files[0]',
+          new File([binary], 'proof #?.bin', { type: 'image/png' })
+        )
+        const response = await fetch(
+          human
+            ? `${server.baseUrl}/_test/channels/${channelId}/messages`
+            : rest,
+          {
+            method: 'POST',
+            headers: human
+              ? { 'Content-Type': 'application/json' }
+              : { Authorization: token },
+            body: human
+              ? JSON.stringify({
+                  ...payload,
+                  author: { id: humanId },
+                  attachments: [
+                    {
+                      filename: 'proof #?.bin',
+                      content_type: 'image/png',
+                      data: binary.toString('base64'),
+                    },
+                  ],
+                })
+              : form,
+            signal: AbortSignal.timeout(2000),
+          }
+        )
+        expect(response.status).toBe(human ? 201 : 200)
+        const message = (await response.json()) as MessageObject
+        expect(message.sticker_items).toEqual(stickerItems)
+        expect(message.attachments).toHaveLength(1)
+        expect(message.author.bot).toBe(!human)
+        const created = await next()
+        if (sequence === 0) sequence = Number(created.s) - 1
+        expect(created).toMatchObject({
+          t: 'MESSAGE_CREATE',
+          s: ++sequence,
+          d: {
+            ...message,
+            guild_id: guildId,
+            sticker_items: stickerItems,
+            member: { user: message.author },
+          },
+        })
+        return message
+      }
+
+      /** Downloads the original bytes after the message and sticker rows disappear. */
+      async function verifyDeletedDownload(
+        message: MessageObject
+      ): Promise<void> {
+        const missing = await fetch(`${rest}/${message.id}`, {
+          headers: { Authorization: token },
+          signal: AbortSignal.timeout(2000),
+        })
+        expect(missing.status).toBe(404)
+        const download = await fetch(message.attachments[0].url, {
+          signal: AbortSignal.timeout(2000),
+        })
+        expect(download.status).toBe(200)
+        expect(download.headers.get('content-type')).toBe('image/png')
+        expect(Buffer.from(await download.arrayBuffer())).toEqual(binary)
+      }
+
+      const first = await sendCombined('Caption plus both')
+      const single = await fetch(`${rest}/${first.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: token },
+        signal: AbortSignal.timeout(2000),
+      })
+      expect(single.status).toBe(204)
+      expect(await next()).toEqual({
+        op: GatewayOp.Dispatch,
+        t: 'MESSAGE_DELETE',
+        s: ++sequence,
+        d: { id: first.id, channel_id: channelId, guild_id: guildId },
+      })
+      await verifyDeletedDownload(first)
+      const second = await sendCombined()
+      const third = await sendCombined('')
+      const bulk = await fetch(`${rest}/bulk-delete`, {
+        method: 'POST',
+        headers: { Authorization: token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [second.id, third.id] }),
+        signal: AbortSignal.timeout(2000),
+      })
+      expect(bulk.status).toBe(204)
+      expect(await next()).toEqual({
+        op: GatewayOp.Dispatch,
+        t: 'MESSAGE_DELETE_BULK',
+        s: ++sequence,
+        d: {
+          ids: [second.id, third.id],
+          channel_id: channelId,
+          guild_id: guildId,
+        },
+      })
+      await verifyDeletedDownload(second)
+      await verifyDeletedDownload(third)
+      expect(server.db.prepare('SELECT * FROM messages').all()).toEqual([])
+      expect(server.db.prepare('SELECT * FROM message_stickers').all()).toEqual(
+        []
+      )
+      expect(server.db.prepare('SELECT * FROM attachments').all()).toEqual([])
+      ws.send(JSON.stringify({ op: GatewayOp.Heartbeat, d: sequence }))
+      expect(await next()).toMatchObject({ op: GatewayOp.HeartbeatAck })
+    }
+  )
 })

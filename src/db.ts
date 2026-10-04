@@ -122,6 +122,21 @@ function migrateInteractionCallbackType(db: Database): void {
   }
 }
 
+/** Preserves legacy controls while allowing separate bots to fault one GET path. */
+function migrateRestFaultSelectors(db: Database): void {
+  db.transaction(() => {
+    db.exec(`
+      DROP INDEX IF EXISTS idx_active_rest_fault;
+      CREATE UNIQUE INDEX idx_active_rest_fault
+        ON test_rest_faults(method, path)
+        WHERE remaining > 0 AND method != 'GET';
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_active_rest_get_fault
+        ON test_rest_faults(method, path, guild_id)
+        WHERE remaining > 0 AND method = 'GET';
+    `)
+  })()
+}
+
 /**
  * Initializes the database and creates tables.
  * @param dbPath - SQLite file path (":memory:" for an in-memory DB)
@@ -170,6 +185,17 @@ export function initializeDatabase(dbPath: string): Database {
       created_at                      TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS guild_audit_log_entries (
+      id         TEXT PRIMARY KEY,
+      guild_id   TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+      user_id    TEXT NOT NULL,
+      target_id  TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      count      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS guild_audit_log_entries_guild
+      ON guild_audit_log_entries(guild_id);
+
     CREATE TABLE IF NOT EXISTS channels (
       id                    TEXT PRIMARY KEY,
       guild_id              TEXT REFERENCES guilds(id) ON DELETE CASCADE,
@@ -207,9 +233,6 @@ export function initializeDatabase(dbPath: string): Database {
       remaining INTEGER NOT NULL,
       consumed INTEGER NOT NULL DEFAULT 0
     );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_active_rest_fault
-      ON test_rest_faults(method, path) WHERE remaining > 0;
 
     CREATE TABLE IF NOT EXISTS channel_recipients (
       channel_id TEXT NOT NULL,
@@ -349,6 +372,17 @@ export function initializeDatabase(dbPath: string): Database {
     );
 
     CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, id);
+
+    -- Retain sent sticker metadata even when its catalog entry is deleted.
+    CREATE TABLE IF NOT EXISTS message_stickers (
+      message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      position INTEGER NOT NULL,
+      id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      format_type INTEGER NOT NULL,
+      PRIMARY KEY (message_id, position),
+      UNIQUE (message_id, id)
+    );
 
     CREATE TABLE IF NOT EXISTS embeds (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -904,6 +938,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateChannelsFeatureColumns(db)
   migrateInteractionLocale(db)
   migrateInteractionCallbackType(db)
+  migrateRestFaultSelectors(db)
 
   return db
 }

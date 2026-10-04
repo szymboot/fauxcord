@@ -11,10 +11,11 @@ import { toDiscordTimestamp } from '../timestamp'
 import { gatewayBus } from '../gateway/bus'
 import { getGuildMember } from './guild-members'
 import { getUser, type UserObject } from './users'
+import { getMessageStickerItems } from './message-stickers'
 // Used for compile-time type drift detection.
 // When Renovate bumps discord-api-types, `pnpm lint:tsc` will fail if the
 // safe-field subset of MessageResponse is renamed or retyped upstream.
-import type { APIMessage } from 'discord-api-types/v10'
+import type { APIMessage, APIStickerItem } from 'discord-api-types/v10'
 
 /**
  * Compile-time guard: ensures the safe-field subset of MessageObject is
@@ -157,6 +158,8 @@ export interface MessageObject {
   mention_roles: never[]
   attachments: AttachmentObject[]
   embeds: unknown[]
+  /** Catalog-derived sticker snapshots, omitted when the message has none. */
+  sticker_items?: APIStickerItem[]
   /** Message components (slash command components, always empty in the mock) */
   components: never[]
   /** Reaction list (the field itself is omitted when there are no reactions) */
@@ -333,6 +336,8 @@ export function hydrateMessageRow(
     reactions,
     baseUrl
   )
+  const stickers = getMessageStickerItems(db, row.id)
+  if (stickers.length > 0) message.sticker_items = stickers
   if (row.author_token === 'interaction') {
     const interaction = db
       .prepare(
@@ -471,6 +476,8 @@ export interface MessageCreateParams {
   content?: string
   tts?: boolean
   embeds?: unknown[]
+  /** Validated snapshots resolved from existing sticker catalog identities. */
+  stickerItems?: APIStickerItem[]
   messageReference?: { message_id?: string }
   flags?: number
 }
@@ -553,6 +560,20 @@ export function createMessage(
           'INSERT INTO embeds (message_id, data, position) VALUES (?, ?, ?)'
         ).run(params.messageId, JSON.stringify(params.embeds[i]), i)
       }
+    }
+
+    // Snapshot validated catalog metadata inside the creation transaction.
+    const stickerItems = params.stickerItems ?? []
+    for (const [position, sticker] of stickerItems.entries()) {
+      db.prepare(
+        'INSERT INTO message_stickers (message_id, position, id, name, format_type) VALUES (?, ?, ?, ?, ?)'
+      ).run(
+        params.messageId,
+        position,
+        sticker.id,
+        sticker.name,
+        sticker.format_type
+      )
     }
 
     // Ephemeral responses are accessible through their interaction token only.
@@ -720,6 +741,52 @@ export function deleteMessage(
   }
 
   return result.changes > 0
+}
+
+/**
+ * Deletes existing non-ephemeral targets in this channel in one transaction.
+ * Foreign/missing IDs are harmless no-ops. Cascading rows are removed by SQLite;
+ * attachment files retain the same lifecycle as ordinary single deletion.
+ * Publishes one native bulk event containing only IDs actually removed, after
+ * commit. Callers must validate the request and must not wrap this in another
+ * transaction: events must never escape a transaction that can still roll back.
+ * @param db - Database
+ * @param channelId - Target guild channel
+ * @param messageIds - Validated unique recent Snowflakes
+ * @returns IDs actually deleted, in request order
+ */
+export function bulkDeleteMessages(
+  db: Database,
+  channelId: string,
+  messageIds: string[]
+): string[] {
+  if (db.inTransaction) {
+    throw new Error('Bulk deletion requires its own transaction')
+  }
+  const deleted = db.transaction(() => {
+    const remove = db.prepare(
+      'DELETE FROM messages WHERE id = ? AND channel_id = ? AND (flags & 64) = 0'
+    )
+    return messageIds.filter((id) => remove.run(id, channelId).changes > 0)
+  })()
+  if (deleted.length > 0) {
+    const guildId = getGuildIdForChannel(db, channelId)
+    const owner = db
+      .prepare(
+        'SELECT bots.user_id FROM guilds JOIN bots ON bots.token = guilds.bot_token WHERE guilds.id = ?'
+      )
+      .get(guildId) as { user_id: string } | undefined
+    if (guildId && owner) {
+      gatewayBus.emit('message.delete.bulk', {
+        guildId,
+        channelId,
+        messageIds: deleted,
+        botId: owner.user_id,
+        db,
+      })
+    }
+  }
+  return deleted
 }
 
 /** Two-week timestamp (milliseconds) */

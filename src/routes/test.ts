@@ -11,6 +11,11 @@ import {
   withMessageAttachments,
   cleanupAttachmentFiles,
 } from '../services/attachments'
+import { createAuditLogEntry } from '../services/audit-logs'
+import {
+  isAuditSnowflake,
+  validateAuditLogFixture,
+} from '../validators/audit-log'
 import type { Database } from '../db'
 import { validateInteractionLocale } from '../validators/interaction'
 import {
@@ -35,6 +40,10 @@ import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { validateGuildMemberUpdate } from '../validators/guild'
 import { validateRestFault } from '../validators/rest-fault'
 import { validateMessageCreate } from '../validators/message'
+import {
+  validateMessageStickers,
+  unusableMessageStickersError,
+} from '../validators/message-stickers'
 import { requiredError, typeError } from '../validators/common'
 import { parseJsonBody } from '../lib/route-helpers'
 import {
@@ -56,6 +65,38 @@ export function createTestRoutes(
   uploadPath = '/data/uploads'
 ): Hono {
   const app = new Hono()
+
+  app.post('/_test/guilds/:guildId/audit-logs', async (c) => {
+    const guildId = c.req.param('guildId')
+    const payload = validateAuditLogFixture(
+      await c.req.json<unknown>().catch(() => undefined)
+    )
+    if (!payload || guildId === '0' || !isAuditSnowflake(guildId)) {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
+    const result = createAuditLogEntry(db, guildId, payload)
+    if (result === 'INVALID_INPUT')
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    if (result === 'CONFLICT')
+      return c.json({ message: '409: Conflict', code: 0 }, 409)
+    if (result === 'UNKNOWN_GUILD')
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild', 404).body,
+        404
+      )
+    if (result === 'UNKNOWN_USER')
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404).body,
+        404
+      )
+    return result === 'UNKNOWN_CHANNEL'
+      ? c.json(
+          discordError(DiscordErrorCode.UNKNOWN_CHANNEL, 'Unknown Channel', 404)
+            .body,
+          404
+        )
+      : c.json(result, 201)
+  })
 
   app.post('/_test/rest-faults', async (c) => {
     const parsed: unknown = await c.req.json().catch(() => undefined)
@@ -267,6 +308,8 @@ export function createTestRoutes(
     const payload = parsed as {
       id?: string
       content?: string
+      sticker_ids?: string[] | null
+      sticker_items?: unknown
       author?: { id?: string }
       remove_after_create?: boolean
       attachments?: unknown
@@ -276,8 +319,6 @@ export function createTestRoutes(
     if (
       files === null ||
       (payload.content !== undefined && typeof payload.content !== 'string') ||
-      (!payload.content && files.length === 0) ||
-      (payload.content?.length ?? 0) > 2000 ||
       typeof payload.author?.id !== 'string' ||
       payload.author.id.length === 0 ||
       (payload.id !== undefined &&
@@ -287,6 +328,18 @@ export function createTestRoutes(
     ) {
       return c.json({ message: '400: Bad Request', code: 0 }, 400)
     }
+
+    const errors = {
+      ...validateMessageCreate({ content: payload.content }),
+      ...validateMessageStickers({
+        sticker_ids: payload.sticker_ids,
+        sticker_items: payload.sticker_items,
+      }),
+    }
+    if (Object.keys(errors).length > 0)
+      return c.json(validationError(errors).body, 400)
+    if (!payload.content && files.length === 0 && !payload.sticker_ids?.length)
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
 
     const authorId = payload.author.id
     const messageId = payload.id ?? generateSnowflake()
@@ -304,6 +357,7 @@ export function createTestRoutes(
           {
             id: messageId,
             content: payload.content,
+            sticker_ids: payload.sticker_ids,
             author: { id: authorId },
             remove_after_create: payload.remove_after_create,
           },
@@ -314,6 +368,8 @@ export function createTestRoutes(
 
     if (result === 'CONFLICT')
       return c.json({ message: '409: Conflict', code: 0 }, 409)
+    if (result === 'INVALID_STICKERS')
+      return c.json(validationError(unusableMessageStickersError()).body, 400)
     return result === 'UNKNOWN_CHANNEL' || result === 'UNKNOWN_USER'
       ? c.json({ message: '404: Not Found', code: 0 }, 404)
       : c.json(result, 201)
