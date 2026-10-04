@@ -32,6 +32,14 @@ export interface Session {
  * sessions.
  */
 export class SessionManager {
+  /** Test-only interception after native sequencing; true holds the envelope. */
+  captureDispatch?: (
+    session: Session,
+    payload: GatewayPayload<unknown>
+  ) => boolean
+  /** Clears captures when a session is removed or its connection is replaced. */
+  invalidateEventControls?: (sessionId: string) => void
+
   private readonly sessionsById = new Map<string, Session>()
   private readonly sessionIdsByBotId = new Map<string, Set<string>>()
 
@@ -102,6 +110,7 @@ export class SessionManager {
   remove(sessionId: string): void {
     const session = this.sessionsById.get(sessionId)
     if (!session) return
+    this.invalidateEventControls?.(sessionId)
     if (session.heartbeatTimer) clearTimeout(session.heartbeatTimer)
     this.sessionsById.delete(sessionId)
     this.sessionIdsByBotId.get(session.botId)?.delete(sessionId)

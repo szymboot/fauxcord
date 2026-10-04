@@ -254,6 +254,13 @@ function handleIdentify(
     return
   }
 
+  const previousSessionId = sessionIdByWs.get(ws)
+  if (
+    previousSessionId &&
+    sessionManager.get(previousSessionId)?.ws === ws.raw
+  ) {
+    sessionManager.remove(previousSessionId)
+  }
   const session = sessionManager.create({
     botId: bot.userId,
     token: data.token,
@@ -381,6 +388,15 @@ function handleResume(
     ws.send(encodePayload({ op: GatewayOp.InvalidSession, d: false }))
     return
   }
+  const previousSessionId = sessionIdByWs.get(ws)
+  if (
+    previousSessionId &&
+    previousSessionId !== session.sessionId &&
+    sessionManager.get(previousSessionId)?.ws === ws.raw
+  ) {
+    sessionManager.remove(previousSessionId)
+  }
+  sessionManager.invalidateEventControls?.(session.sessionId)
   session.ws = ws.raw as never
   sessionIdByWs.set(ws, session.sessionId)
   armHeartbeatTimeout(sessionManager, ws, session.sessionId)

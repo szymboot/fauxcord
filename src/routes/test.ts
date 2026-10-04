@@ -4,6 +4,7 @@
  * Implements the /_test/* test-only endpoints.
  */
 
+import type { GatewayEventControls } from '../gateway/event-controls'
 import { Hono } from 'hono'
 import { createAuditLogEntry } from '../services/audit-logs'
 import {
@@ -52,7 +53,11 @@ import {
  * @param baseUrl - Base URL (used for injected message attachment URL generation)
  * @returns Hono router instance
  */
-export function createTestRoutes(db: Database, baseUrl: string): Hono {
+export function createTestRoutes(
+  db: Database,
+  baseUrl: string,
+  eventControls?: GatewayEventControls
+): Hono {
   const app = new Hono()
 
   app.post('/_test/guilds/:guildId/audit-logs', async (c) => {
@@ -158,6 +163,7 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
     // Decode the path parameter manually (Bot tokens may contain spaces)
     const token = decodeURIComponent(c.req.path.replace('/_test/setup/', ''))
     const deleted = deleteTestSetup(db, token)
+    if (deleted && token) eventControls?.reset(token)
     return deleted
       ? c.body(null, 204)
       : c.json({ message: '404: Not Found', code: 0 }, 404)
@@ -262,6 +268,7 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
       // Reset everything when no body is provided
     }
 
+    eventControls?.reset(token)
     resetTestData(db, token)
     return c.body(null, 204)
   })
