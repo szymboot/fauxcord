@@ -147,6 +147,12 @@ export function createTestRoutes(
       if (err instanceof Error && err.message === 'CONFLICT') {
         return c.json({ message: '409: Conflict', code: 0 }, 409)
       }
+      if (err instanceof Error && err.message === 'INVALID_GUILD_ICON') {
+        return c.json(
+          { message: 'icon must be a non-empty hash string or null', code: 0 },
+          400
+        )
+      }
       if (err instanceof Error && err.message === 'INVALID_OWNER_ID') {
         return c.json(
           { message: 'owner_id must be a non-empty user ID', code: 0 },
