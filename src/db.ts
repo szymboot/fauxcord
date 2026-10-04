@@ -138,13 +138,21 @@ function migrateInteractionCallbackType(db: Database): void {
 /** Preserves legacy controls while allowing separate bots to fault one GET path. */
 function migrateRestFaultSelectors(db: Database): void {
   db.transaction(() => {
+    const columns = db.prepare('PRAGMA table_info(test_rest_faults)').all() as {
+      name: string
+    }[]
+    if (columns.every((column) => column.name !== 'query'))
+      db.exec(
+        "ALTER TABLE test_rest_faults ADD COLUMN query TEXT NOT NULL DEFAULT ''"
+      )
     db.exec(`
       DROP INDEX IF EXISTS idx_active_rest_fault;
       CREATE UNIQUE INDEX idx_active_rest_fault
         ON test_rest_faults(method, path)
         WHERE remaining > 0 AND method != 'GET';
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_active_rest_get_fault
-        ON test_rest_faults(method, path, guild_id)
+      DROP INDEX IF EXISTS idx_active_rest_get_fault;
+      CREATE UNIQUE INDEX idx_active_rest_get_fault
+        ON test_rest_faults(method, path, guild_id, query)
         WHERE remaining > 0 AND method = 'GET';
     `)
   })()

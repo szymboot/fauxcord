@@ -250,6 +250,9 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `GET`    | `/guilds/{guildId}/audit-logs`                      | Deletion audit-log reads    |
 | `GET`    | `/guilds/{guildId}/members/{userId}`                | Member reads                |
 | `GET`    | `/users/{userId}`                                   | Global user reads           |
+| `GET`    | `/guilds/{guildId}/members`                         | A specific member page      |
+| `GET`    | `/guilds/{guildId}/bans`                            | A specific ban page         |
+| `GET`    | `/channels/{channelId}/messages`                    | A specific history page     |
 
 `path` must be a bare path with no query, version prefix, wildcard, or trailing
 slash. It selects the exact Channel, Channel/Message, or Guild/User/Role IDs, so
@@ -262,7 +265,8 @@ exact request, regardless of token or body.
 `GET` faults apply only to the registered Bot that owns the scope's Guild
 (`guilds.bot_token`). Nonowner Bots and Bearer callers run the ordinary route
 without consuming the control. Guild GETs derive their scope from the path; an
-optional `guild_id` must equal that path's Guild ID. Global `/users/{userId}` GETs
+optional `guild_id` must equal that path's Guild ID. Channel GETs derive the
+Guild and owning Bot from the Channel; do not supply `guild_id` for these selectors. Global `/users/{userId}` GETs
 **require** an explicit numeric `guild_id` of an existing Guild:
 
 ```json
@@ -283,7 +287,7 @@ independent faults for the same User. A global user request carries no Guild ID,
 so a fault applies to that Bot's exact User lookup across its Guild scenarios.
 Use separate Bot tokens (or separate databases) for concurrent scenarios sharing
 the same User target; otherwise serialize them. An active GET control for the
-same method/path and owning Bot returns `409`, including when another Guild of
+same method/path, normalized query (for list GETs), and owning Bot returns `409`, including when another Guild of
 that Bot is supplied. No all-GET or wildcard selector is supported.
 
 `status` is an integer from `400` through `599`; `code` is a nonnegative safe
@@ -302,15 +306,78 @@ Automatic library retries count as separate attempts. The control provides the
 two-field Discord error body; specialized rate-limit retry fields are not modeled.
 
 All three request prefixes (`/api/v10`, `/api`, and bare) match the same control.
-Request query parameters are ignored. In particular, an audit-log fault selects the exact Guild's GET route
+Legacy selectors (all mutations, audit logs, individual members and global users)
+ignore request query parameters. In particular, an audit-log fault selects the exact Guild's GET route
 regardless of `action_type`, `limit`, `user_id`, `before`, `after`, parameter
 ordering, or omitted parameters. These queries neither create separate targets
 nor expand the path selector to other Guilds or routes. Queries in the configured
 `path` are rejected with `400`.
 
+The three list GETs select an **exact normalized page**, including its size. Set
+`query` to a JSON object alongside the bare `path`; never embed a query in `path`:
+
+```json
+{
+  "method": "GET",
+  "path": "/guilds/222222222222222222/members",
+  "query": { "after": "555555555555555555", "limit": 1000 },
+  "status": 500,
+  "code": 0,
+  "message": "Import page failed",
+  "times": 2
+}
+```
+
+Only the owning Bot's member request with this cursor and size consumes these two
+attempts. The first page, another cursor or size, another Guild/Channel, and
+another Bot cannot consume them. Select the cursor returned by the preceding
+successful page to fail a concrete later import page. This is a cursor selector,
+not an ordinal page counter or a response-content predicate.
+
+| List GET | Allowed query keys                   | Default limit | Maximum limit |
+| -------- | ------------------------------------ | ------------- | ------------- |
+| Members  | `limit`, `after`                     | 1             | 1000          |
+| Bans     | `limit`, `before`, `after`           | 1000          | 1000          |
+| Messages | `limit`, `before`, `after`, `around` | 50            | 100           |
+
+`query` is optional: omission or `{}` selects only the default first page, never
+all pages. `limit` accepts an integer or a string of 1–4 decimal digits within
+`1..maximum`. Cursors must be strings of 1–20 decimal digits, preserving exact
+Snowflakes; leading zeros are removed. Members normalize omitted `after` to
+`"0"`; bans/messages distinguish omitted cursors from explicit `"0"`. Omitted
+limits equal explicit default limits. At most one cursor is allowed. A control
+with null/array query, unknown keys, unsupported cursors, multiple cursors,
+invalid values or out-of-range limits returns `400`. Supplying `query` on any
+legacy selector also returns `400`; their documented query-ignoring request
+behavior is preserved.
+
+Request parameter order and URL encoding do not matter. Unrelated request query
+keys are ignored. The four recognized keys (`limit`, `before`, `after`, `around`)
+are validated: duplicate recognized keys, unsupported cursors, multiple cursors,
+or malformed/out-of-range values bypass fault consumption and run the native
+route (including its existing validation behavior). Fault matching does not
+change native query parsing or clamp invalid values into a faulted page.
+Distinct normalized pages may be armed concurrently. Equivalent active selectors
+return `409`, including differing key order, numeric/string limits, leading zeros,
+and omitted/explicit defaults. Exhaustion allows rearming with a new ID while
+retaining the old counters. Creation and consumption are atomic in SQLite.
+
+Use `GET /_test/rest-faults/:id` to observe the normalized `query`, `remaining`
+and `consumed` without issuing a Bot request against the armed list route. This
+control endpoint accepts inspection without authentication and never consumes the
+fault. Ordinary native list data recovers after exhaustion or control deletion.
+
+Regression coverage: `src/rest-page-faults.test.ts` exercises concrete later pages
+and native data recovery for all three routes, query normalization/conflicts,
+authentication and scope isolation, anonymous inspection, concurrent bounds and
+reset/deletion cleanup. `src/services/rest-faults.test.ts` covers migration from
+pre-query databases and persistence of page selectors/counters across reopen.
+`src/rest-get-faults.test.ts` and `src/e2e-rest-failures.test.ts` preserve legacy
+GET and mutation contracts.
+
 Controls and counters are isolated per
 database. `/_test/reset` clears them, and environment/Guild deletion cascades
-them; Channel deletion also removes message-send and message-delete controls for
+them; Channel deletion also removes message-send, message-delete and message-page controls for
 that Channel. Exhausted records remain inspectable until cleared, and a fresh control may then
 be armed for the same selector.
 

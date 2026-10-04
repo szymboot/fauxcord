@@ -312,7 +312,7 @@ describe('scoped REST GET faults', () => {
     { path: '/users/*', guild_id: '123' },
     { path: '/guilds/123/audit-logs?limit=1' },
     { path: '/guilds/123/audit-logs/' },
-    { path: '/guilds/123/members' },
+    { path: '/guilds/123/members/search' },
     { path: '/guilds/123/audit-logs', guild_id: '456' },
     { path: '/guilds/123/members/456', guild_id: '789' },
   ])('rejects invalid GET selector %j', async (selector) => {

@@ -10,7 +10,13 @@ export function createRestFaultMiddleware(
 ): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const path = c.req.path.replace(/^\/api(?:\/v10)?(?=\/)/, '')
-    const fault = consumeRestFault(db, c.req.method, path, c.get('bot')?.token)
+    const fault = consumeRestFault(
+      db,
+      c.req.method,
+      path,
+      c.get('bot')?.token,
+      new URL(c.req.url).searchParams
+    )
     if (fault) {
       return c.json(
         { message: fault.message, code: fault.code },

@@ -39,6 +39,7 @@ describe('REST fault selector index migration', () => {
       expect(legacy).toMatchObject({ remaining: 2, consumed: 0 })
       if (typeof legacy === 'string') throw new Error(legacy)
       consumeRestFault(db, 'PATCH', legacyPath)
+      db.exec('ALTER TABLE test_rest_faults DROP COLUMN query')
       db.close()
       db = initializeDatabase(dbPath)
       expect(getRestFault(db, legacy.id)).toMatchObject({
@@ -69,8 +70,37 @@ describe('REST fault selector index migration', () => {
       expect(other).toMatchObject({ guild_id: otherGuild })
       if (typeof own === 'string' || typeof other === 'string')
         throw new Error('Unexpected scope conflict')
+      const pagePath = `/guilds/${guild}/members`
+      const pageQuery = { limit: 2, after: '555555555555555555' }
+      const page = createRestFault(db, {
+        method: 'GET',
+        path: pagePath,
+        query: pageQuery,
+        ...configuration,
+      })
+      if (typeof page === 'string') throw new Error(page)
+      consumeRestFault(
+        db,
+        'GET',
+        pagePath,
+        token,
+        new URLSearchParams('after=555555555555555555&limit=2')
+      )
       db.close()
       db = initializeDatabase(dbPath)
+      expect(getRestFault(db, page.id)).toMatchObject({
+        query: pageQuery,
+        remaining: 1,
+        consumed: 1,
+      })
+      expect(
+        createRestFault(db, {
+          method: 'GET',
+          path: pagePath,
+          query: pageQuery,
+          ...configuration,
+        })
+      ).toBe('CONFLICT')
       expect(consumeRestFault(db, 'GET', userPath, otherToken)).toMatchObject({
         id: other.id,
         remaining: 1,
