@@ -5,6 +5,12 @@
  */
 
 import { Hono } from 'hono'
+import { generateSnowflake } from '../snowflake'
+import { decodeTestAttachments } from '../validators/attachment'
+import {
+  withMessageAttachments,
+  cleanupAttachmentFiles,
+} from '../services/attachments'
 import type { Database } from '../db'
 import { validateInteractionLocale } from '../validators/interaction'
 import {
@@ -41,9 +47,14 @@ import {
  * Creates the test control API routes.
  * @param db - Database
  * @param baseUrl - Base URL (used for injected message attachment URL generation)
+ * @param uploadPath - Directory used for fixture uploads and lifecycle cleanup
  * @returns Hono router instance
  */
-export function createTestRoutes(db: Database, baseUrl: string): Hono {
+export function createTestRoutes(
+  db: Database,
+  baseUrl: string,
+  uploadPath = '/data/uploads'
+): Hono {
   const app = new Hono()
 
   app.post('/_test/rest-faults', async (c) => {
@@ -116,6 +127,7 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
   app.delete('/_test/setup/*', (c) => {
     // Decode the path parameter manually (Bot tokens may contain spaces)
     const token = decodeURIComponent(c.req.path.replace('/_test/setup/', ''))
+    cleanupAttachmentFiles(db, uploadPath, { setupToken: token })
     const deleted = deleteTestSetup(db, token)
     return deleted
       ? c.body(null, 204)
@@ -221,6 +233,7 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
       // Reset everything when no body is provided
     }
 
+    cleanupAttachmentFiles(db, uploadPath, { token })
     resetTestData(db, token)
     return c.body(null, 204)
   })
@@ -256,11 +269,15 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
       content?: string
       author?: { id?: string }
       remove_after_create?: boolean
+      attachments?: unknown
     }
 
+    const files = decodeTestAttachments(payload.attachments)
     if (
-      typeof payload.content !== 'string' ||
-      payload.content.length === 0 ||
+      files === null ||
+      (payload.content !== undefined && typeof payload.content !== 'string') ||
+      (!payload.content && files.length === 0) ||
+      (payload.content?.length ?? 0) > 2000 ||
       typeof payload.author?.id !== 'string' ||
       payload.author.id.length === 0 ||
       (payload.id !== undefined &&
@@ -271,16 +288,28 @@ export function createTestRoutes(db: Database, baseUrl: string): Hono {
       return c.json({ message: '400: Bad Request', code: 0 }, 400)
     }
 
-    const result = injectTestMessage(
+    const authorId = payload.author.id
+    const messageId = payload.id ?? generateSnowflake()
+    const result = await withMessageAttachments(
       db,
+      uploadPath,
       channelId,
-      {
-        id: payload.id,
-        content: payload.content,
-        author: { id: payload.author.id },
-        remove_after_create: payload.remove_after_create,
-      },
-      baseUrl
+      messageId,
+      '',
+      files,
+      (persist) =>
+        injectTestMessage(
+          db,
+          channelId,
+          {
+            id: messageId,
+            content: payload.content,
+            author: { id: authorId },
+            remove_after_create: payload.remove_after_create,
+          },
+          baseUrl,
+          persist
+        )
     )
 
     if (result === 'CONFLICT')

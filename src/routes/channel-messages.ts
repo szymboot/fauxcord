@@ -8,6 +8,15 @@ import { Hono } from 'hono'
 import type { Database } from '../db'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { generateSnowflake } from '../snowflake'
+import {
+  MAX_FILE_SIZE,
+  withMessageAttachments,
+  type AttachmentInput,
+} from '../services/attachments'
+import {
+  isAttachmentFilename,
+  isAttachmentContentType,
+} from '../validators/attachment'
 import { getChannel } from '../services/channels'
 import {
   getMessage,
@@ -125,39 +134,65 @@ export function createChannelMessageRoutes(
 
     const contentType = c.req.header('content-type') ?? ''
     let payload: Record<string, unknown>
-    const attachmentFiles: {
-      name: string
-      data: ArrayBuffer
-      type: string
-    }[] = []
+    const attachmentFiles: AttachmentInput[] = []
 
     if (contentType.includes('multipart/form-data')) {
-      const formData = await c.req.formData()
-      const payloadJson = formData.get('payload_json')
-      payload = payloadJson
-        ? (JSON.parse(payloadJson as string) as Record<string, unknown>)
-        : {}
-
-      for (let i = 0; i < 10; i++) {
-        const file = formData.get(`files[${i}]`) as File | null
-        if (!file) break
-        if (file.size > 25 * 1024 * 1024) {
-          const err = discordError(
-            DiscordErrorCode.FILE_TOO_LARGE,
-            'File uploaded exceeds the maximum size',
-            400
+      try {
+        const formData = await c.req.formData()
+        const payloadJson = formData.get('payload_json')
+        if (payloadJson !== null && typeof payloadJson !== 'string')
+          return c.json({ message: '400: Bad Request', code: 0 }, 400)
+        const parsed: unknown = payloadJson ? JSON.parse(payloadJson) : {}
+        if (
+          typeof parsed !== 'object' ||
+          parsed === null ||
+          Array.isArray(parsed)
+        )
+          return c.json({ message: '400: Bad Request', code: 0 }, 400)
+        payload = parsed as Record<string, unknown>
+        const indices = new Set<number>()
+        for (const [key, file] of formData) {
+          if (key === 'payload_json') continue
+          const match = /^files\[(\d+)\]$/.exec(key)
+          const index = match ? Number(match[1]) : -1
+          if (
+            !match ||
+            !(file instanceof File) ||
+            index >= 10 ||
+            indices.has(index) ||
+            !isAttachmentFilename(file.name) ||
+            !isAttachmentContentType(file.type || 'application/octet-stream')
           )
-          return c.json(err.body, 400)
+            return c.json({ message: '400: Bad Request', code: 0 }, 400)
+          indices.add(index)
+          if (file.size > MAX_FILE_SIZE) {
+            return c.json(
+              discordError(
+                DiscordErrorCode.FILE_TOO_LARGE,
+                'File uploaded exceeds the maximum size',
+                400
+              ).body,
+              400
+            )
+          }
+          attachmentFiles.push({
+            filename: file.name,
+            data: await file.arrayBuffer(),
+            contentType: file.type || 'application/octet-stream',
+          })
         }
-        attachmentFiles.push({
-          name: file.name,
-          data: await file.arrayBuffer(),
-          type: file.type || 'application/octet-stream',
-        })
+      } catch {
+        return c.json({ message: '400: Bad Request', code: 0 }, 400)
       }
     } else {
       payload = await parseJsonBody(c)
     }
+    if (
+      payload.content !== undefined &&
+      payload.content !== null &&
+      typeof payload.content !== 'string'
+    )
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
 
     const hasAttachments = attachmentFiles.length > 0
     const hasPoll = payload.poll !== undefined && payload.poll !== null
@@ -184,68 +219,51 @@ export function createChannelMessageRoutes(
 
     const messageId = generateSnowflake()
 
-    const msg = createMessage(
+    const responseMessage = await withMessageAttachments(
       db,
-      {
-        messageId,
-        channelId,
-        authorId,
-        authorToken,
-        content: payload.content as string | undefined,
-        tts: payload.tts as boolean | undefined,
-        embeds: payload.embeds as unknown[] | undefined,
-        messageReference: payload.message_reference as
-          { message_id?: string } | undefined,
-        flags: payload.flags as number | undefined,
-      },
-      baseUrl
-    )
-
-    if (attachmentFiles.length > 0) {
-      try {
-        const { saveAttachment } = await import('../services/attachments')
-        for (const f of attachmentFiles) {
-          // Each attachment gets its own Snowflake so concurrent uploads to
-          // the same message don't collide on a shared PRIMARY KEY.
-          await saveAttachment(
-            db,
-            uploadPath,
-            baseUrl,
-            channelId,
+      uploadPath,
+      channelId,
+      messageId,
+      authorToken,
+      attachmentFiles,
+      (persist) =>
+        createMessage(
+          db,
+          {
             messageId,
-            generateSnowflake(),
-            f.name,
-            f.type,
-            f.data
-          )
-        }
-      } catch (err) {
-        // Ignore a missing upload directory (e.g. in-memory test env), but
-        // surface any other failure instead of silently discarding it.
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw err
-        }
-      }
-    }
-
-    const responseMessage = getMessage(db, messageId, baseUrl) ?? msg
-
-    if (hasPoll) {
-      const pollField = payload.poll as PollCreatePayloadField
-      createPoll(db, responseMessage.id, {
-        question: pollField.question.text,
-        answers: pollField.answers.map((a) => ({
-          text: a.poll_media.text,
-          emoji: a.poll_media.emoji ?? undefined,
-        })),
-        allowMultiselect: pollField.allow_multiselect,
-        durationHours: pollField.duration,
-      })
-      const poll = getPollForMessage(db, responseMessage.id)
-      return c.json({ ...responseMessage, poll })
-    }
-
-    return c.json(responseMessage)
+            channelId,
+            authorId,
+            authorToken,
+            content: payload.content as string | undefined,
+            tts: payload.tts as boolean | undefined,
+            embeds: payload.embeds as unknown[] | undefined,
+            messageReference: payload.message_reference as
+              { message_id?: string } | undefined,
+            flags: payload.flags as number | undefined,
+          },
+          baseUrl,
+          () => {
+            persist()
+            if (!hasPoll) return
+            const pollField = payload.poll as PollCreatePayloadField
+            createPoll(db, messageId, {
+              question: pollField.question.text,
+              answers: pollField.answers.map((a) => ({
+                text: a.poll_media.text,
+                emoji: a.poll_media.emoji ?? undefined,
+              })),
+              allowMultiselect: pollField.allow_multiselect,
+              durationHours: pollField.duration,
+            })
+          }
+        )
+    )
+    return hasPoll
+      ? c.json({
+          ...responseMessage,
+          poll: getPollForMessage(db, messageId),
+        })
+      : c.json(responseMessage)
   })
 
   // PATCH /channels/:channelId/messages/:messageId — Edit a message
