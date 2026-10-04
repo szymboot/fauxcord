@@ -153,6 +153,11 @@ curl -X POST http://localhost:3000/_test/rest-faults \
   }'
 ```
 
+To fail an edit-log send, use `"method": "POST"` and
+`"path": "/channels/333333333333333333/messages"` with the desired status, code,
+message, and count. For example, a representative server failure is
+`"status": 500, "code": 0, "message": "Internal Server Error"`.
+
 Returns `201` with `id`, the supplied configuration, `guild_id`, `channel_id`
 (`null` for Guild routes), `remaining`, and `consumed`. Initially `remaining`
 equals `times` and `consumed` is zero.
@@ -161,14 +166,15 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 
 | Method   | Path                                                | Use                         |
 | -------- | --------------------------------------------------- | --------------------------- |
+| `POST`   | `/channels/{channelId}/messages`                    | Message / edit-log sending  |
 | `DELETE` | `/channels/{channelId}/messages/{messageId}`        | Triggering-message deletion |
 | `PUT`    | `/guilds/{guildId}/bans/{userId}`                   | Ban creation                |
 | `PATCH`  | `/guilds/{guildId}/members/{userId}`                | Member update / mute        |
 | `PUT`    | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role assignment        |
 
 `path` must be a bare path with no query, version prefix, wildcard, or trailing
-slash. It selects the exact Channel/Message or Guild/User/Role IDs, so unrelated
-requests cannot consume the fault. The Channel must belong to an existing Guild,
+slash. It selects the exact Channel, Channel/Message, or Guild/User/Role IDs, so
+unrelated requests cannot consume the fault. The Channel must belong to an existing Guild,
 or the Guild must exist (`404` otherwise). The target Message/User/Role does not
 need to exist yet, allowing prearming before message injection. Faults apply to
 any authenticated caller issuing that exact request, regardless of token or body.
@@ -181,8 +187,8 @@ integer from `1` through `100`, defaulting to `1`. Invalid/malformed input retur
 On a matching authenticated request, Fauxcord atomically decrements `remaining`
 and increments `consumed`, then returns the chosen status with exactly
 `{"message":"...","code":...}`. The ordinary route does not run: no message
-deletion, ban/purge, member update, role assignment, or corresponding Gateway
-mutation event happens. Authentication runs first (`401` attempts do not count);
+creation (including attachments and polls), deletion, ban/purge, member update,
+role assignment, or corresponding Gateway mutation event happens. Authentication runs first (`401` attempts do not count);
 the normal latency and rate-limit headers still apply. After exhaustion, requests
 use the ordinary REST behavior, including ordinary validation and 404 responses.
 Automatic library retries count as separate attempts. The control provides the
@@ -191,8 +197,8 @@ two-field Discord error body; specialized rate-limit retry fields are not modele
 All three request prefixes (`/api/v10`, `/api`, and bare) match the same control.
 Request query parameters are ignored. Controls and counters are isolated per
 database. `/_test/reset` clears them, and environment/Guild deletion cascades
-them; Channel deletion also removes message-delete controls for that Channel.
-Exhausted records remain inspectable until cleared, and a fresh control may then
+them; Channel deletion also removes message-send and message-delete controls for
+that Channel. Exhausted records remain inspectable until cleared, and a fresh control may then
 be armed for the same selector.
 
 ## `GET /_test/rest-faults/:id` — Inspect consumption
