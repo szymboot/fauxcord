@@ -44,8 +44,10 @@ import {
   createFullTestApp,
   seedBot,
   seedGuild,
+  seedChannel,
 } from './test-helpers'
 import { closeDatabase } from './db'
+import { validateAuditLogQuery } from './validators/audit-log'
 import { MANIFEST } from '../spec/manifest'
 import type { SpecEndpoint, SpecSuccessBranch } from '../spec/manifest'
 import '../spec/manifest.test'
@@ -83,6 +85,77 @@ describe('Discord custom schema formats', () => {
     expect(validate('1')).toBe(true)
     expect(validate('01')).toBe(false)
     expect(validate('not-a-snowflake')).toBe(false)
+  })
+})
+
+describe('Test API audit-log schema contract', () => {
+  it('accepts every action filter in the committed query enum', () => {
+    const schema = spec.components.schemas.AuditLogActionTypes as {
+      oneOf: { const: number }[]
+    }
+    for (const action of schema.oneOf) {
+      expect(
+        validateAuditLogQuery({ action_type: String(action.const) })
+      ).toEqual({
+        action_type: action.const,
+      })
+    }
+  })
+
+  it('returns populated and filtered Discord audit logs from controlled fixtures', async () => {
+    const { db, app } = createFullTestApp()
+    try {
+      const token = seedBot(db)
+      const guildId = seedGuild(db, token)
+      const channelId = seedChannel(db, guildId)
+      const actor = db
+        .prepare('SELECT user_id FROM bots WHERE token = ?')
+        .get(token) as { user_id: string }
+      const registered = await app.request('/_test/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'AuditAuthor' }),
+      })
+      const author = (await registered.json()) as { id: string }
+      const response = await app.request(
+        `/_test/guilds/${guildId}/audit-logs`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: '100',
+            action_type: 72,
+            user_id: actor.user_id,
+            target_id: author.id,
+            options: { channel_id: channelId, count: '2' },
+          }),
+        }
+      )
+      expect(response.status).toBe(201)
+      const validateEntry = ajv.compile({
+        $ref: 'https://discord.com/spec#/components/schemas/AuditLogEntryResponse',
+      })
+      expect(
+        validateEntry(await response.json()),
+        JSON.stringify(validateEntry.errors)
+      ).toBe(true)
+      const validateLog = ajv.compile({
+        $ref: 'https://discord.com/spec#/components/schemas/GuildAuditLogResponse',
+      })
+      for (const query of ['', '?after=0', '?action_type=73']) {
+        const log = await app.request(
+          `/api/v10/guilds/${guildId}/audit-logs${query}`,
+          {
+            headers: { Authorization: token },
+          }
+        )
+        expect(log.status).toBe(200)
+        const body: unknown = await log.json()
+        expect(validateLog(body), JSON.stringify(validateLog.errors)).toBe(true)
+      }
+    } finally {
+      closeDatabase(db)
+    }
   })
 })
 

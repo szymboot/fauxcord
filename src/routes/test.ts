@@ -5,6 +5,11 @@
  */
 
 import { Hono } from 'hono'
+import { createAuditLogEntry } from '../services/audit-logs'
+import {
+  isAuditSnowflake,
+  validateAuditLogFixture,
+} from '../validators/audit-log'
 import type { Database } from '../db'
 import { validateInteractionLocale } from '../validators/interaction'
 import {
@@ -45,6 +50,38 @@ import {
  */
 export function createTestRoutes(db: Database, baseUrl: string): Hono {
   const app = new Hono()
+
+  app.post('/_test/guilds/:guildId/audit-logs', async (c) => {
+    const guildId = c.req.param('guildId')
+    const payload = validateAuditLogFixture(
+      await c.req.json<unknown>().catch(() => undefined)
+    )
+    if (!payload || guildId === '0' || !isAuditSnowflake(guildId)) {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
+    const result = createAuditLogEntry(db, guildId, payload)
+    if (result === 'INVALID_INPUT')
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    if (result === 'CONFLICT')
+      return c.json({ message: '409: Conflict', code: 0 }, 409)
+    if (result === 'UNKNOWN_GUILD')
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild', 404).body,
+        404
+      )
+    if (result === 'UNKNOWN_USER')
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404).body,
+        404
+      )
+    return result === 'UNKNOWN_CHANNEL'
+      ? c.json(
+          discordError(DiscordErrorCode.UNKNOWN_CHANNEL, 'Unknown Channel', 404)
+            .body,
+          404
+        )
+      : c.json(result, 201)
+  })
 
   app.post('/_test/rest-faults', async (c) => {
     const parsed: unknown = await c.req.json().catch(() => undefined)

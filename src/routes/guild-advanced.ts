@@ -1,4 +1,6 @@
 import { Hono } from 'hono'
+import { listAuditLogs } from '../services/audit-logs'
+import { validateAuditLogQuery } from '../validators/audit-log'
 import type { Context, MiddlewareHandler } from 'hono'
 import type { Database } from '../db'
 import { runInTransaction } from '../db'
@@ -309,18 +311,11 @@ export function createGuildAdvancedRoutes(db: Database): Hono<AppEnv> {
   app.get('/guilds/:guildId/audit-logs', (c) => {
     const { guildId } = c.req.param()
     const access = requireGuildAccess(c, db, guildId)
-    return access instanceof Response
-      ? access
-      : c.json({
-          audit_log_entries: [],
-          users: [],
-          integrations: [],
-          webhooks: [],
-          guild_scheduled_events: listGuildScheduledEvents(db, guildId),
-          threads: [],
-          application_commands: [],
-          auto_moderation_rules: listAutoModerationRules(db, guildId),
-        })
+    if (access instanceof Response) return access
+    const query = validateAuditLogQuery(c.req.query())
+    return typeof query === 'string'
+      ? invalid(c, query)
+      : c.json(listAuditLogs(db, guildId, query))
   })
 
   app.get('/guilds/:guildId/auto-moderation/rules', (c) => {
