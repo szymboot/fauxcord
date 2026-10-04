@@ -12,6 +12,8 @@ import {
   withMessageAttachments,
   cleanupAttachmentFiles,
 } from '../services/attachments'
+import { getRestPageHolds } from '../services/rest-page-holds'
+import { validateRestPageHold } from '../validators/rest-page-hold'
 import { createAuditLogEntry } from '../services/audit-logs'
 import {
   isAuditSnowflake,
@@ -101,6 +103,41 @@ export function createTestRoutes(
           404
         )
       : c.json(result, 201)
+  })
+
+  const pageHolds = getRestPageHolds(db)
+  app.post('/_test/rest-page-holds', async (c) => {
+    const payload = validateRestPageHold(
+      await c.req.json<unknown>().catch(() => undefined)
+    )
+    if (!payload) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    const result = pageHolds.create(payload)
+    if (result === 'UNKNOWN_SCOPE')
+      return c.json({ message: '404: Not Found', code: 0 }, 404)
+    return result === 'CONFLICT'
+      ? c.json({ message: '409: Conflict', code: 0 }, 409)
+      : c.json(result, 201)
+  })
+
+  app.get('/_test/rest-page-holds/:id', (c) => {
+    c.header('Cache-Control', 'no-store')
+    const status = pageHolds.get(c.req.param('id'))
+    return status
+      ? c.json(status)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
+
+  app.post('/_test/rest-page-holds/:id/release', (c) => {
+    const status = pageHolds.release(c.req.param('id'))
+    return status
+      ? c.json(status)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
+
+  app.delete('/_test/rest-page-holds/:id', (c) => {
+    return pageHolds.remove(c.req.param('id'))
+      ? c.body(null, 204)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
   })
 
   app.post('/_test/rest-faults', async (c) => {

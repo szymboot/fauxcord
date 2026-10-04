@@ -5,6 +5,7 @@
  * operations live in `guild-roles.ts` and `guild-members.ts`.
  */
 
+import { getRestPageHolds } from './rest-page-holds'
 import type { Database } from '../db'
 import { getGuildRoles, type RoleObject } from './guild-roles'
 import { getGuildChannels } from './channels'
@@ -194,6 +195,7 @@ export function updateGuild(
  */
 export function deleteGuild(db: Database, guildId: string): boolean {
   const result = db.prepare('DELETE FROM guilds WHERE id = ?').run(guildId)
+  if (result.changes > 0) getRestPageHolds(db).reset(undefined, guildId)
   return result.changes > 0
 }
 

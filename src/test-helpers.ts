@@ -16,6 +16,7 @@ import { initializeDatabase, closeDatabase } from './db'
 import type { Database } from './db'
 import { createAuthMiddleware, type AppEnv } from './middleware/auth'
 import { createRestFaultMiddleware } from './middleware/rest-faults'
+import { createRestPageHoldMiddleware } from './middleware/rest-page-holds'
 import { corsMiddleware } from './middleware/cors'
 import { versionMiddleware } from './middleware/version'
 import { createChannelRoutes } from './routes/channels'
@@ -136,6 +137,7 @@ export function createFullTestApp(): FullTestContext {
   // Authentication middleware
   const authMiddleware = createAuthMiddleware(db, false)
   app.use('*', authMiddleware)
+  app.use('*', createRestPageHoldMiddleware(db))
   app.use('*', createRestFaultMiddleware(db))
 
   // Discord API routes (mounted under all three prefixes)
@@ -655,6 +657,9 @@ export async function createRealServer(
           },
           () => {
             for (const client of built.wss.clients) client.terminate()
+          },
+          () => {
+            built.shutdownRestPageHolds()
           },
           () => closeNodeServer(server),
           () => {

@@ -16,6 +16,8 @@ import { createAuthMiddleware, type AppEnv } from './middleware/auth'
 import { rateLimitMiddleware } from './middleware/rate-limit'
 import { createLatencyMiddleware } from './middleware/latency'
 import { createRestFaultMiddleware } from './middleware/rest-faults'
+import { createRestPageHoldMiddleware } from './middleware/rest-page-holds'
+import { getRestPageHolds } from './services/rest-page-holds'
 import { createChannelRoutes } from './routes/channels'
 import { createGuildRoutes } from './routes/guilds'
 import { createUserRoutes } from './routes/users'
@@ -82,6 +84,8 @@ export function buildApp(
   sessionManager: SessionManager
   /** Function that unsubscribes the listeners registered by registerGatewaySubscriptions */
   unsubscribeGateway: () => void
+  /** Disarms page holds before closing the HTTP server. */
+  shutdownRestPageHolds: () => void
 } {
   const app = new Hono<AppEnv>()
   // `noServer: true` is required because `@hono/node-server`'s
@@ -154,6 +158,7 @@ export function buildApp(
   app.use('*', authMiddleware)
   app.use('*', latencyMiddleware)
   app.use('*', rateLimitMiddleware)
+  app.use('*', createRestPageHoldMiddleware(db))
   app.use('*', createRestFaultMiddleware(db))
 
   // Normalize version prefixes and mount each route
@@ -202,5 +207,8 @@ export function buildApp(
     wss,
     sessionManager: gatewayHandler.sessionManager,
     unsubscribeGateway,
+    shutdownRestPageHolds: () => {
+      getRestPageHolds(db).shutdown()
+    },
   }
 }

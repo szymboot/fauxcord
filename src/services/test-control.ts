@@ -4,6 +4,7 @@
  * Handles test environment setup and reset.
  */
 
+import { getRestPageHolds } from './rest-page-holds'
 import { randomBytes } from 'node:crypto'
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
@@ -303,6 +304,7 @@ export function deleteTestSetup(db: Database, token: string): boolean {
   // application_commands and every interactions row have no FK to bots
   // (there is no applications table), so they are cleaned up explicitly.
   db.prepare('DELETE FROM bots WHERE token = ?').run(token)
+  getRestPageHolds(db).reset(token)
   db.prepare(
     'DELETE FROM application_commands WHERE application_id = ? AND guild_id IS NULL'
   ).run(bot.user_id)
@@ -318,6 +320,7 @@ export function deleteTestSetup(db: Database, token: string): boolean {
  * @param token - Bot token to reset (all tokens if omitted)
  */
 export function resetTestData(db: Database, token?: string): void {
+  getRestPageHolds(db).reset(token)
   resetRestFaults(db, token)
   if (token) {
     db.prepare(
