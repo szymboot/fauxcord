@@ -336,6 +336,9 @@ curl http://localhost:3000/_test/messages/333333333333333333
 If `author_token` is `"webhook"`, the message was posted via a Webhook.
 If `author_token` is an empty string, the message was injected via
 `POST /_test/channels/:channelId/messages` (see below) as a non-bot user.
+Messages with stickers also include `sticker_items`, with the same catalog-derived
+`id`, `name`, and `format_type` as ordinary message reads. The field is omitted
+when there are no stickers.
 
 ---
 
@@ -480,10 +483,64 @@ Returns the created message object (same shape as
 
 | Field                 | Required | Description                                                                                                                       |
 | --------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `content`             | ✅       | Message content.                                                                                                                  |
+| `content`             | —        | Message content, up to 2,000 characters. Optional when valid stickers are supplied.                                               |
+| `sticker_ids`         | —        | Up to three distinct existing sticker IDs as snowflake strings. Omitted, `null`, or `[]` means no stickers.                       |
 | `author.id`           | ✅       | ID of a user already registered via `POST /_test/users` (or any other existing user). Returns `404` if unregistered.              |
 | `id`                  | —        | Explicit numeric Message ID (1–20 digits), otherwise generated. An existing Message ID returns `409` without mutations or events. |
 | `remove_after_create` | —        | Boolean, default `false`. Remove the message immediately after its native create dispatch is queued.                              |
+
+**Stickers**
+
+Create guild stickers through the existing `POST /guilds/:guildId/stickers`
+catalog endpoint, then use the returned IDs. Sticker-only injection is supported:
+
+```json
+{
+  "author": { "id": "555555555555555555" },
+  "sticker_ids": ["666666666666666666"]
+}
+```
+
+Guild stickers (type `2`) must be available and belong to the target channel's
+guild. Human fixtures can also use standard stickers (type `1`) already seeded
+in the local sticker-pack catalog. PNG (`1`), APNG (`2`), Lottie (`3`), and GIF
+(`4`) format metadata are preserved; the existing guild creation endpoint
+currently creates PNG metadata. This control does not upload or render sticker
+assets, simulate Nitro entitlements, or permit external guild stickers. The
+catalog starts empty: IDs from the live Discord catalog are not automatically
+available locally.
+
+Use string IDs to preserve snowflake precision. Non-arrays, numeric or malformed
+IDs, duplicates, more than three IDs, missing catalog entries, unavailable or
+foreign guild stickers, and unsupported catalog formats return `400` / `50035`
+without creating a message, registering membership, or emitting events. Supplied
+`sticker_items` objects are rejected: items are derived from catalog data, never
+accepted from caller-provided names or formats. Content plus stickers is also
+supported. Empty content with no stickers still fails.
+
+The ordinary `POST /channels/:channelId/messages` endpoint also accepts
+`sticker_ids`, including sticker-only messages, for available stickers in that
+channel's guild. Bot REST creation does not support standard pack stickers or
+external guild stickers; stickers cannot be combined with voice-message or
+components-v2 flags. Existing authentication and prefix mounting apply.
+
+Returned REST messages, single-message/history reads, `/_test/messages`, and
+native `MESSAGE_CREATE` / `MESSAGE_UPDATE` payloads carry ordered `sticker_items`
+containing exactly `id`, `name`, and `format_type`. `sticker_ids` is a creation
+input field only. Metadata is snapshotted when sent, persists across database
+reopening, and remains in retained messages after catalog edits or deletion.
+Gateway delivery uses Fauxcord’s existing intent-gated broadcast behavior;
+sessions are not filtered by guild membership. Sticker identity validation and
+persistence cleanup are scoped to the target guild.
+Content/embeds/flags edits preserve stickers; replacing/removing stickers through
+message edits is unsupported. Message/channel/guild deletion and existing reset
+controls cascade removal of message sticker snapshots. `remove_after_create`
+works for sticker-only fixtures, returning the create snapshot even after actual
+message deletion.
+
+The limit and response shape follow Discord's
+[Create Message documentation](https://docs.discord.com/developers/resources/message#create-message)
+and [Sticker Item structure](https://docs.discord.com/developers/resources/sticker#sticker-item-object).
 
 To test a triggering-message DELETE failure, choose a unique `id`, arm its exact
 DELETE path through `/_test/rest-faults`, then inject with that same `id`. The bot
@@ -526,7 +583,8 @@ The JSON object must contain a string `content` of at most 2,000 characters
 (the same length validation as ordinary message edits). Empty strings, Unicode,
 and unchanged content are accepted. Other fields are ignored. Only content and
 the edit timestamp change: message ID, channel, author (`bot: false`), original
-timestamp, embeds, attachments, reactions, flags, and other fields are preserved.
+timestamp, embeds, attachments, sticker items, reactions, flags, and other fields
+are preserved.
 
 Returns `200` with the actual persisted message object. The ordinary message
 service emits native `MESSAGE_UPDATE` with the edited message, guild ID and
