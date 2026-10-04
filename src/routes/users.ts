@@ -340,6 +340,7 @@ export function createUserRoutes(db: Database): Hono<AppEnv> {
           bot: number
           global_name: string | null
           communication_disabled_until: string | null
+          premium_since: string | null
         }
       | undefined
     return row
@@ -352,7 +353,7 @@ export function createUserRoutes(db: Database): Hono<AppEnv> {
           joined_at: new Date(`${row.joined_at}Z`).toISOString(),
           nick: row.nick,
           pending: false,
-          premium_since: null,
+          premium_since: row.premium_since,
           roles: [],
           collectibles: null,
           user: {

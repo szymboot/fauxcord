@@ -402,6 +402,47 @@ as `user.global_name`.
 
 ---
 
+## `PATCH /_test/guilds/:guildId/members/:userId` — Prepare a member boost date
+
+Sets `premium_since` on an **existing** Guild membership, including Bot members.
+No Authorization header is required. Run this after setup or joining a test user,
+before starting the Bot or connecting it to the Gateway:
+
+```bash
+curl -X PATCH http://localhost:3000/_test/guilds/222222222222222222/members/555555555555555555 \
+  -H "Content-Type: application/json" \
+  -d '{"premium_since":"2020-02-29T14:00:00.123+02:00"}'
+```
+
+The body must be a JSON object. Its only supported field is `premium_since`:
+
+| Input            | Result                                                                                                                                                           |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Omitted (`{}`)   | Preserve the stored date; new and upgraded memberships default to `null`.                                                                                        |
+| `null`           | Clear the stored date.                                                                                                                                           |
+| Timestamp string | Set the stored date. Use a valid calendar date and `YYYY-MM-DDTHH:mm:ss`, optionally followed by 1–6 fractional digits, then `Z` or a numeric `±HH:mm` timezone. |
+
+Timestamps are normalized to UTC with six fractional digits and `+00:00`;
+precision beyond milliseconds is truncated. The example returns
+`2020-02-29T12:00:00.123000+00:00`. There is no constraint relative to the current
+time, allowing deterministic historical or future fixtures.
+
+**Response**: `200 OK` with the stored Guild member object. The same
+`premium_since` appears in individual member GETs, paginated member lists and
+the next `GUILD_CREATE`. Dates persist across server restarts. The operation
+changes only that Guild/user pair's boost date, preserving profile, nickname,
+join time, Roles and other member state. It does not create a user or membership,
+alter Guild boost counts/tier, or emit Gateway events. Ordinary member updates
+preserve the fixture date.
+
+**Errors** (no state changes or events): `404` / `10004` for an unknown Guild;
+`404` / `10007` for an unknown membership (including unknown users or users only
+in another Guild); `400` / `0` for malformed JSON, a missing body or a non-object
+body; `400` / `50035` with field errors for unsupported fields, invalid types,
+invalid calendar dates, or timestamps without a timezone.
+
+---
+
 ## `POST /_test/guilds/:guildId/members/:userId` — Join a non-bot user to a Guild
 
 Joins an already registered non-bot user (typically created by `POST /_test/users`)

@@ -26,6 +26,7 @@ import {
   getTestMessages,
   createTestUser,
   joinTestGuildMember,
+  prepareMemberPremiumFixture,
   injectTestMessage,
   editTestMessage,
   createTestInteraction,
@@ -39,6 +40,7 @@ import { getInteractionCallbackObservation } from '../services/interactions'
 import { injectPollVote } from '../services/polls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { validateGuildMemberUpdate } from '../validators/guild'
+import { validateMemberPremiumFixture } from '../validators/member-premium'
 import { validateRestFault } from '../validators/rest-fault'
 import { validateMessageCreate } from '../validators/message'
 import {
@@ -267,6 +269,40 @@ export function createTestRoutes(
         return c.json(result, 201)
       }
     }
+  })
+
+  // PATCH /_test/guilds/:guildId/members/:userId — Prepare a boost date
+  app.patch('/_test/guilds/:guildId/members/:userId', async (c) => {
+    const parsed: unknown = await c.req.json().catch(() => undefined)
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
+    const payload = parsed as Record<string, unknown>
+    const errors = validateMemberPremiumFixture(payload)
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
+    const { guildId, userId } = c.req.param()
+    const result = prepareMemberPremiumFixture(db, guildId, userId, {
+      premium_since: payload.premium_since as string | null | undefined,
+    })
+    if (result === 'UNKNOWN_GUILD') {
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild', 404).body,
+        404
+      )
+    }
+    return result === 'UNKNOWN_MEMBER'
+      ? c.json(
+          discordError(DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member', 404)
+            .body,
+          404
+        )
+      : c.json(result)
   })
 
   // POST /_test/reset — Reset test data (messages, etc.)
