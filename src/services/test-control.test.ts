@@ -3,6 +3,7 @@ import { initializeDatabase, closeDatabase } from '../db'
 import type { Database } from '../db'
 import {
   createTestInteraction,
+  createTestUser,
   deleteTestSetup,
   resetTestData,
 } from './test-control'
@@ -132,5 +133,52 @@ describe('deleteTestSetup / resetTestData — application command & interaction 
       .all(applicationId)
     expect(commands).toHaveLength(1)
     expect(interactions).toHaveLength(0)
+  })
+})
+
+describe('createTestUser avatar', () => {
+  let db: Database
+
+  beforeEach(() => {
+    db = initializeDatabase(':memory:')
+  })
+
+  afterEach(() => {
+    closeDatabase(db)
+  })
+
+  it.each(['0123456789abcdef0123456789abcdef', null, undefined])(
+    'persists avatar=%s with the existing human defaults',
+    (avatar) => {
+      const user = createTestUser(db, { username: 'Human', avatar })
+      expect(user.id).toMatch(/^\d+$/)
+      expect(user).toEqual({
+        id: user.id,
+        username: 'Human',
+        discriminator: '0',
+      })
+      expect(
+        db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)
+      ).toMatchObject({
+        avatar: avatar ?? null,
+        bot: 0,
+        global_name: null,
+      })
+    }
+  )
+
+  it('rejects an ID collision without overwriting the profile', () => {
+    const user = createTestUser(db, {
+      id: '555555555555555555',
+      username: 'Human',
+      discriminator: '1234',
+      global_name: 'Display Name',
+      avatar: '0123456789abcdef0123456789abcdef',
+    })
+    const before = db.prepare('SELECT * FROM users').all()
+    expect(() =>
+      createTestUser(db, { id: user.id, username: 'Other', avatar: null })
+    ).toThrow('CONFLICT')
+    expect(db.prepare('SELECT * FROM users').all()).toEqual(before)
   })
 })

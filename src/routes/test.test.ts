@@ -203,6 +203,66 @@ describe('Test Control API', () => {
   })
 
   describe('POST /_test/users', () => {
+    it.each(['a_0123456789abcdef0123456789abcdef', null, undefined])(
+      'stores avatar=%s without changing the creation response',
+      async (avatar) => {
+        const res = await app.request('/_test/users', {
+          method: 'POST',
+          body: JSON.stringify({
+            id: '555555555555555555',
+            username: 'TestHuman',
+            avatar,
+          }),
+        })
+        expect(res.status).toBe(201)
+        expect(await res.json()).toEqual({
+          id: '555555555555555555',
+          username: 'TestHuman',
+          discriminator: '0',
+        })
+        expect(getUser(db, '555555555555555555')).toMatchObject({
+          avatar: avatar ?? null,
+          bot: false,
+          global_name: null,
+        })
+      }
+    )
+
+    it.each([42, true, {}, []])(
+      'rejects invalid avatar=%s without creating a user',
+      async (avatar) => {
+        const res = await app.request('/_test/users', {
+          method: 'POST',
+          body: JSON.stringify({ username: 'TestHuman', avatar }),
+        })
+        expect(res.status).toBe(400)
+        expect(await res.json()).toEqual({
+          message: '400: Bad Request',
+          code: 0,
+        })
+        expect(db.prepare('SELECT * FROM users').all()).toEqual([])
+      }
+    )
+
+    it('preserves the existing profile when a duplicate ID requests a new avatar', async () => {
+      const original = createTestUser(db, {
+        id: '555555555555555555',
+        username: 'Original',
+        avatar: '0123456789abcdef0123456789abcdef',
+      })
+      const before = getUser(db, original.id)
+      const res = await app.request('/_test/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          id: original.id,
+          username: 'Replacement',
+          avatar: null,
+        }),
+      })
+      expect(res.status).toBe(409)
+      expect(getUser(db, original.id)).toEqual(before)
+    })
+
     it.each(['Display Name', null, undefined])(
       'persists global_name=%s and serializes it in user and member views',
       async (globalName) => {

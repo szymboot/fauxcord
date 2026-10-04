@@ -470,6 +470,7 @@ curl -X POST http://localhost:3000/_test/users \
 | --------------- | -------- | ------------------------------------------------------------------------------------------------------------- |
 | `id`            | —        | User ID. A Snowflake is auto-generated if omitted. Returns `409 Conflict` if an explicit `id` already exists. |
 | `global_name`   | —        | Optional global display name (string or null). Omitted/null values serialize as null in Discord user objects. |
+| `avatar`        | —        | Optional user avatar hash (string or null). Omitted/null values use the default avatar.                       |
 | `username`      | ✅       | Username.                                                                                                     |
 | `discriminator` | —        | Defaults to `"0"`.                                                                                            |
 
@@ -480,6 +481,31 @@ Gateway payloads, including the initial `GUILD_CREATE` member list and later
 global display name remains available when their guild nickname is cleared.
 `POST /_test/setup` and `SEED_FILE` bot fixtures accept the same nullable field
 as `user.global_name`.
+
+To select a user avatar, supply its hash when registering the human fixture:
+
+```bash
+curl -X POST http://localhost:3000/_test/users \
+  -H "Content-Type: application/json" \
+  -d '{"id":"555555555555555556","username":"AvatarHuman","avatar":"0123456789abcdef0123456789abcdef"}'
+
+curl http://localhost:3000/api/v10/users/555555555555555556 \
+  -H "Authorization: Bot mytoken"
+```
+
+The native user GET returns the selected hash in `avatar`. After joining a Guild,
+member GET/list responses expose it in `user.avatar`, as do Gateway
+`GUILD_CREATE` members and `GUILD_MEMBER_ADD`, `GUILD_MEMBER_UPDATE` and
+`GUILD_MEMBER_REMOVE` user objects. The member's top-level `avatar` is a separate
+Guild-specific field and remains `null`. Animated hashes (with an `a_` prefix)
+are also accepted. Fauxcord stores the string as supplied; it does not upload,
+validate or host image assets.
+
+For a default-avatar fixture, use `{"username":"DefaultHuman","avatar":null}`
+or omit `avatar`. Non-string, non-null avatar values return `400 Bad Request`
+without creating a user. An explicit ID collision still returns `409 Conflict`
+and preserves the existing profile, including its avatar. The creation response
+continues to contain only `id`, `username` and `discriminator`.
 
 ---
 

@@ -632,3 +632,87 @@ describe('global names in member Gateway state (integration)', () => {
     }
   )
 })
+
+// Exercise the human fixture through native WebSocket dispatches.
+describe('human avatar Gateway member representations (integration)', () => {
+  let close: (() => Promise<void>) | undefined
+  let ws: WebSocket | undefined
+
+  afterEach(async () => {
+    ws?.terminate()
+    ws = undefined
+    await close?.()
+    close = undefined
+  })
+
+  it.each(['a_0123456789abcdef0123456789abcdef', null, undefined])(
+    'preserves avatar=%s in initial, update, remove and rejoin events',
+    async (avatar) => {
+      const server = await createTestGatewayServer()
+      close = server.close
+      const httpUrl = server.url.replace('ws://', 'http://')
+      const token = seedBot(server.db, 'Bot avatar-events')
+      const guildId = seedGuild(server.db, token)
+      const userId = '555555555555555555'
+      const registration = await fetch(`${httpUrl}/_test/users`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: userId, username: 'Human', avatar }),
+      })
+      expect(registration.status).toBe(201)
+      const joinUrl = `${httpUrl}/_test/guilds/${guildId}/members/${userId}`
+      const join = await fetch(joinUrl, { method: 'POST' })
+      expect(join.status).toBe(201)
+      const expectedUser = { id: userId, avatar: avatar ?? null, bot: false }
+      const expectedMember = { avatar: null, user: expectedUser }
+
+      ws = new WebSocket(server.url)
+      const nextMessage = createMessageReader(ws)
+      const hello = await nextMessage()
+      expect(hello.op).toBe(GatewayOp.Hello)
+      ws.send(
+        JSON.stringify({
+          op: GatewayOp.Identify,
+          d: {
+            token,
+            intents: GatewayIntentBits.Guilds | GatewayIntentBits.GuildMembers,
+          },
+        })
+      )
+      const ready = await nextMessage()
+      expect(ready.t).toBe('READY')
+      const initial = await nextMessage()
+      expect(initial.t).toBe('GUILD_CREATE')
+      const data = initial.d as { members: { user: { id: string } }[] }
+      expect(data.members.find((m) => m.user.id === userId)).toMatchObject(
+        expectedMember
+      )
+
+      const memberUrl = `${httpUrl}/api/v10/guilds/${guildId}/members/${userId}`
+      const update = await fetch(memberUrl, {
+        method: 'PATCH',
+        headers: { Authorization: token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nick: 'Avatar unchanged' }),
+      })
+      expect(update.status).toBe(200)
+      const updated = await nextMessage()
+      expect(updated.t).toBe('GUILD_MEMBER_UPDATE')
+      expect(updated.d).toMatchObject({ guild_id: guildId, ...expectedMember })
+
+      const remove = await fetch(memberUrl, {
+        method: 'DELETE',
+        headers: { Authorization: token },
+      })
+      expect(remove.status).toBe(204)
+      const removed = await nextMessage()
+      expect(removed.t).toBe('GUILD_MEMBER_REMOVE')
+      expect(removed.d).toMatchObject({ guild_id: guildId, user: expectedUser })
+
+      const rejoin = await fetch(joinUrl, { method: 'POST' })
+      expect(rejoin.status).toBe(201)
+      const added = await nextMessage()
+      expect(added.t).toBe('GUILD_MEMBER_ADD')
+      expect(added.d).toMatchObject({ guild_id: guildId, ...expectedMember })
+    }
+  )
+})

@@ -406,6 +406,8 @@ export interface CreateTestUserRequest {
   id?: string
   username: string
   global_name?: string | null
+  /** User avatar hash, or null for the default avatar. */
+  avatar?: string | null
   discriminator?: string
 }
 
@@ -443,8 +445,14 @@ export function createTestUser(
   }
 
   db.prepare(
-    'INSERT INTO users (id, username, discriminator, global_name, bot) VALUES (?, ?, ?, ?, 0)'
-  ).run(id, request.username, discriminator, request.global_name ?? null)
+    'INSERT INTO users (id, username, discriminator, global_name, avatar, bot) VALUES (?, ?, ?, ?, ?, 0)'
+  ).run(
+    id,
+    request.username,
+    discriminator,
+    request.global_name ?? null,
+    request.avatar ?? null
+  )
 
   return { id, username: request.username, discriminator }
 }

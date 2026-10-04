@@ -22,12 +22,10 @@ describe('Test guild owner fixtures', () => {
         username: 'HumanOwner',
         global_name: 'Human Display Name',
         discriminator: '1234',
+        avatar: 'owner-avatar',
       }),
     })
     expect(response.status).toBe(201)
-    context.db
-      .prepare('UPDATE users SET avatar = ? WHERE id = ?')
-      .run('owner-avatar', ownerId)
   })
 
   afterEach(() => {
