@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import type { Database } from '../db'
 
 /** Mapping of event names to their payloads exchanged over gatewayBus */
 export interface GatewayBusEvents {
@@ -20,6 +21,14 @@ export interface GatewayBusEvents {
     guildId: string | undefined
     channelId: string
     messageId: string
+  }
+  'message.delete.bulk': {
+    guildId: string
+    channelId: string
+    messageIds: string[]
+    botId: string
+    /** Scope the singleton bus event to its originating app/database. */
+    db: Database
   }
   'message.reaction.add': {
     guildId: string | undefined
