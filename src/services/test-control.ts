@@ -486,7 +486,7 @@ export interface InjectTestMessageRequest {
   /** Validated IDs from the existing guild or standard sticker catalog. */
   sticker_ids?: string[] | null
   author: { id: string }
-  /** Delete synchronously after the ordinary native create event is queued. */
+  /** Remove atomically, then queue the captured create and delete snapshots. */
   remove_after_create?: boolean
 }
 
@@ -506,12 +506,14 @@ export interface InjectTestMessageRequest {
  * @returns Created message object, or an error code when the channel or
  * author is unknown, or CONFLICT when the explicit Message ID already exists.
  * With remove_after_create, returns the create snapshot after actual deletion.
+ * @param persistAttachments - Synchronous attachment writes in the creation transaction
  */
 export function injectTestMessage(
   db: Database,
   channelId: string,
   request: InjectTestMessageRequest,
-  baseUrl: string
+  baseUrl: string,
+  persistAttachments?: () => void
 ):
   | MessageObject
   | 'UNKNOWN_CHANNEL'
@@ -542,30 +544,37 @@ export function injectTestMessage(
   }
 
   const guildId = getGuildIdForChannel(db, channelId)
-  if (guildId) {
-    db.prepare(
-      'INSERT OR IGNORE INTO guild_members (guild_id, user_id) VALUES (?, ?)'
-    ).run(guildId, request.author.id)
-  }
-
-  const message = createMessage(
-    db,
-    {
-      channelId,
-      authorId: request.author.id,
-      // Neither a real bot token nor the webhook sentinel value, so this
-      // message resolves to a plain, non-bot, non-webhook author.
-      authorToken: '',
-      messageId: request.id ?? generateSnowflake(),
-      content: request.content,
-      stickerItems,
-    },
-    baseUrl
-  )
-  // MESSAGE_CREATE has been synchronously queued by the ordinary Gateway bus.
-  // Remove before yielding to another HTTP request; no timer or acknowledgement
-  // is needed for the client to observe an actually missing message on DELETE.
-  if (request.remove_after_create) deleteMessage(db, message.id, channelId)
+  const pendingEvents: (() => void)[] = []
+  const message = db.transaction(() => {
+    const snapshot = createMessage(
+      db,
+      {
+        channelId,
+        authorId: request.author.id,
+        // A plain human author, rather than a bot token or webhook sentinel.
+        authorToken: '',
+        messageId: request.id ?? generateSnowflake(),
+        content: request.content,
+        stickerItems,
+      },
+      baseUrl,
+      () => {
+        if (guildId) {
+          db.prepare(
+            'INSERT OR IGNORE INTO guild_members (guild_id, user_id) VALUES (?, ?)'
+          ).run(guildId, request.author.id)
+        }
+        persistAttachments?.()
+      },
+      pendingEvents
+    )
+    if (request.remove_after_create) {
+      deleteMessage(db, snapshot.id, channelId, pendingEvents)
+    }
+    return snapshot
+  })()
+  // Queue the create snapshot before its optional delete, only after commit.
+  for (const emit of pendingEvents) emit()
   return message
 }
 

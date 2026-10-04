@@ -120,6 +120,7 @@ curl -X POST http://localhost:3000/_test/reset \
 ```
 
 What gets deleted: messages, webhooks, invites, reactions, pins, embeds, attachments,
+retained attachment files and download metadata (including deleted-message uploads),
 audit-log fixtures, and all REST fault controls (including exhausted controls and consumption history).
 
 ### Reset only a specific Bot's data
@@ -483,11 +484,56 @@ Returns the created message object (same shape as
 
 | Field                 | Required | Description                                                                                                                       |
 | --------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `content`             | —        | Message content, up to 2,000 characters. Optional when valid stickers are supplied.                                               |
+| `content`             | —        | Message content, up to 2,000 characters. Optional when valid stickers or attachments are supplied.                                               |
+| `attachments`         | —        | Up to 10 byte-preserving base64 file fixtures; see below.                                                                          |
 | `sticker_ids`         | —        | Up to three distinct existing sticker IDs as snowflake strings. Omitted, `null`, or `[]` means no stickers.                       |
 | `author.id`           | ✅       | ID of a user already registered via `POST /_test/users` (or any other existing user). Returns `404` if unregistered.              |
 | `id`                  | —        | Explicit numeric Message ID (1–20 digits), otherwise generated. An existing Message ID returns `409` without mutations or events. |
-| `remove_after_create` | —        | Boolean, default `false`. Remove the message immediately after its native create dispatch is queued.                              |
+| `remove_after_create` | —        | Boolean, default `false`. Atomically remove after capturing its create snapshot; queue create then delete after commit.                              |
+
+**File fixtures**
+
+Supply `attachments` as an array of up to 10 objects. Each object has a
+`filename`, `content_type` (MIME type), and `data` containing canonical padded
+base64 of the original file bytes. No URLs are fetched. Each decoded file may
+be at most 25 MiB, matching Fauxcord's existing multipart upload limit. Empty
+files are allowed. Omit `content` or use `""` for an attachment-only message.
+Malformed base64, invalid MIME types, path separators, control characters,
+empty names, and filenames over 255 UTF-8 bytes return `400` without creating
+a message or emitting events. Filenames with spaces, Unicode, `#`, and `?` are
+preserved. Multiple files may share a filename; their returned URLs are unique.
+
+```json
+{
+  "author": { "id": "555555555555555555" },
+  "content": "Original evidence",
+  "attachments": [
+    { "filename": "proof.txt", "content_type": "text/plain", "data": "aGVsbG8=" },
+    { "filename": "raw.bin", "content_type": "application/octet-stream", "data": "AP8=" }
+  ]
+}
+```
+
+The `201` response and the **first native `MESSAGE_CREATE`** both contain all
+persisted attachment metadata, including `id`, `filename`, `size`,
+`content_type`, `url`, and `proxy_url`. The same guarantee applies to ordinary
+bot multipart sends (`payload_json` plus `files[0]` through `files[9]`). Files
+are saved before the message is published; storage or database failures leave
+no visible message, related rows, uploaded files, or create events. A storage
+failure returns `500` instead of silently returning an attachmentless message.
+
+Original attachment URLs remain downloadable after ordinary single/bulk
+message deletion and `remove_after_create`, so deletion logs can fetch the
+bytes and re-upload them through the bot's normal multipart REST API. The MIME
+type is retained even when the filename extension differs. Retention is bounded
+by the test lifecycle: `/_test/reset` without a token removes all retained
+uploads and download metadata, including deleted human-message files. A reset
+with a token removes only that bot's uploads, even if their messages were
+already deleted; human and other bots' uploads stay intact, matching existing
+message reset scope. `DELETE /_test/setup/:token` also clears uploads in the
+removed channels. Use a full reset or discard the emulator's database and upload
+directory between test suites; there is no time-based expiry. Reset does not
+cancel HTTP requests already in flight.
 
 **Stickers**
 
@@ -516,7 +562,9 @@ foreign guild stickers, and unsupported catalog formats return `400` / `50035`
 without creating a message, registering membership, or emitting events. Supplied
 `sticker_items` objects are rejected: items are derived from catalog data, never
 accepted from caller-provided names or formats. Content plus stickers is also
-supported. Empty content with no stickers still fails.
+supported. Empty content with neither stickers nor attachments still fails.
+Attachments and stickers can be combined in one human fixture or bot multipart
+send; the initial create snapshot contains both fields.
 
 The ordinary `POST /channels/:channelId/messages` endpoint also accepts
 `sticker_ids`, including sticker-only messages, for available stickers in that
@@ -549,10 +597,13 @@ the fault. For example, use `403` / `50013` / `Missing Permissions` to exercise 
 error other than Unknown Message while retaining the message.
 
 To test **real Unknown Message** without a race or fixed sleep, inject with
-`"remove_after_create": true` and do not arm a DELETE fault. The service first
-creates the real stored message and synchronously emits its ordinary create
-event. It then uses ordinary deletion before yielding to another HTTP request,
-emitting `MESSAGE_DELETE`. Connected clients with the Guild Messages intent see
+`"remove_after_create": true` and do not arm a DELETE fault. The service captures
+the full create snapshot and removes the stored message
+in one transaction. After that transaction commits, it synchronously queues
+`MESSAGE_CREATE` followed by `MESSAGE_DELETE` before yielding to another HTTP
+request. A creation or removal failure rolls back the message, stickers, and
+attachments without emitting either event. Connected clients with the Guild
+Messages intent see
 `MESSAGE_CREATE` followed by `MESSAGE_DELETE` in order; the create payload still
 contains the original content and author. Any REST DELETE issued in response to
 the create event finds the actual message absent and returns the ordinary `404`
@@ -788,7 +839,7 @@ If `db` is not `"ok"`, there is a problem with SQLite.
 
 ---
 
-## `GET /_mock/attachments/:channelId/:messageId/:filename` — Download an attachment
+## `GET /_mock/attachments/...` — Download an attachment
 
 Message and application attachment responses contain a public `url` and `proxy_url` under this path. Fetch the returned URL without an Authorization header to verify the uploaded bytes in your test.
 
@@ -796,7 +847,7 @@ Message and application attachment responses contain a public `url` and `proxy_u
 curl http://localhost:3000/_mock/attachments/333333333333333333/1513052391153471489/proof.txt
 ```
 
-The response uses the uploaded file's content type and returns the original bytes. An attachment that does not exist returns `404` with Fauxcord's standard error response.
+New message uploads use `/_mock/attachments/:channelId/:messageId/:attachmentId/:filename`; existing three-component URLs remain supported. Always fetch the returned URL rather than constructing one. The response uses the uploaded file's content type and returns the original bytes, including after message deletion until reset/setup cleanup. An attachment that does not exist returns `404` with Fauxcord's standard error response.
 
 ---
 

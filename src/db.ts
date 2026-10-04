@@ -405,6 +405,24 @@ export function initializeDatabase(dbPath: string): Database {
 
     CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
 
+    -- Retained downloads intentionally outlive message deletion. Reset controls
+    -- their lifetime; no message FK may cascade away the MIME/path metadata.
+    CREATE TABLE IF NOT EXISTS attachment_files (
+      id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      author_token TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      file_path TEXT NOT NULL UNIQUE
+    );
+    CREATE INDEX IF NOT EXISTS idx_attachment_files_channel
+      ON attachment_files(channel_id);
+    INSERT OR IGNORE INTO attachment_files
+      SELECT a.id, m.channel_id, a.message_id, COALESCE(m.author_token, ''),
+             a.filename, a.content_type, a.file_path
+      FROM attachments a JOIN messages m ON m.id = a.message_id;
+
     CREATE TABLE IF NOT EXISTS reactions (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
       message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,

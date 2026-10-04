@@ -253,8 +253,14 @@ export function toMessageObject(
       id: a.id,
       filename: a.filename,
       size: a.size,
-      url: `${baseUrl}/_mock/attachments/${row.channel_id}/${row.id}/${encodeURIComponent(a.filename)}`,
-      proxy_url: `${baseUrl}/_mock/attachments/${row.channel_id}/${row.id}/${encodeURIComponent(a.filename)}`,
+      url: `${baseUrl}/_mock/attachments/${a.file_path
+        .split(/[\\/]/)
+        .map((part) => encodeURIComponent(part))
+        .join('/')}`,
+      proxy_url: `${baseUrl}/_mock/attachments/${a.file_path
+        .split(/[\\/]/)
+        .map((part) => encodeURIComponent(part))
+        .join('/')}`,
       content_type: a.content_type,
     })),
     embeds: embeds
@@ -516,75 +522,89 @@ export const MESSAGE_FLAGS = {
 } as const
 
 /**
- * Creates a message.
+ * Creates a message atomically, then emits its complete persisted snapshot.
  * @param db - Database
  * @param params - Message creation parameters
  * @param baseUrl - Base URL
+ * @param persistRelated - Optional synchronous related writes in the transaction
+ * @param pendingEvents - Collect dispatches until an enclosing transaction commits
  * @returns Created message object
  */
 export function createMessage(
   db: Database,
   params: MessageCreateParams,
-  baseUrl: string
+  baseUrl: string,
+  persistRelated?: () => void,
+  pendingEvents?: (() => void)[]
 ): MessageObject {
-  db.prepare(
-    `INSERT INTO messages (id, channel_id, author_id, author_token, content, tts, flags, referenced_message_id, type)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    params.messageId,
-    params.channelId,
-    params.authorId,
-    params.authorToken,
-    params.content ?? '',
-    params.tts ? 1 : 0,
-    params.flags ?? 0,
-    params.messageReference?.message_id ?? null,
-    params.type ?? 0
-  )
-
-  // Save embeds
-  if (params.embeds) {
-    for (let i = 0; i < params.embeds.length; i++) {
-      db.prepare(
-        'INSERT INTO embeds (message_id, data, position) VALUES (?, ?, ?)'
-      ).run(params.messageId, JSON.stringify(params.embeds[i]), i)
-    }
-  }
-
-  // Snapshot validated catalog metadata before hydrating or dispatching.
-  const stickerItems = params.stickerItems ?? []
-  for (const [position, sticker] of stickerItems.entries()) {
+  const msg = db.transaction(() => {
     db.prepare(
-      'INSERT INTO message_stickers (message_id, position, id, name, format_type) VALUES (?, ?, ?, ?, ?)'
+      `INSERT INTO messages (id, channel_id, author_id, author_token, content, tts, flags, referenced_message_id, type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       params.messageId,
-      position,
-      sticker.id,
-      sticker.name,
-      sticker.format_type
+      params.channelId,
+      params.authorId,
+      params.authorToken,
+      params.content ?? '',
+      params.tts ? 1 : 0,
+      params.flags ?? 0,
+      params.messageReference?.message_id ?? null,
+      params.type ?? 0
     )
-  }
 
-  // Ephemeral responses are accessible through their interaction token only.
-  if (!((params.flags ?? 0) & MESSAGE_FLAGS.EPHEMERAL)) {
-    // Update the channel's last_message_id
-    db.prepare('UPDATE channels SET last_message_id = ? WHERE id = ?').run(
-      params.messageId,
-      params.channelId
-    )
-  }
+    // Save embeds
+    if (params.embeds) {
+      for (let i = 0; i < params.embeds.length; i++) {
+        db.prepare(
+          'INSERT INTO embeds (message_id, data, position) VALUES (?, ?, ?)'
+        ).run(params.messageId, JSON.stringify(params.embeds[i]), i)
+      }
+    }
 
-  const msg = getMessage(db, params.messageId, baseUrl)
-  if (!msg) throw new Error('Failed to create message')
+    // Snapshot validated catalog metadata inside the creation transaction.
+    const stickerItems = params.stickerItems ?? []
+    for (const [position, sticker] of stickerItems.entries()) {
+      db.prepare(
+        'INSERT INTO message_stickers (message_id, position, id, name, format_type) VALUES (?, ?, ?, ?, ?)'
+      ).run(
+        params.messageId,
+        position,
+        sticker.id,
+        sticker.name,
+        sticker.format_type
+      )
+    }
+
+    // Ephemeral responses are accessible through their interaction token only.
+    if (!((params.flags ?? 0) & MESSAGE_FLAGS.EPHEMERAL)) {
+      // Update the channel's last_message_id
+      db.prepare('UPDATE channels SET last_message_id = ? WHERE id = ?').run(
+        params.messageId,
+        params.channelId
+      )
+    }
+
+    persistRelated?.()
+    const stored = getMessage(db, params.messageId, baseUrl)
+    if (!stored) throw new Error('Failed to create message')
+    return stored
+  })()
 
   if (!(msg.flags & MESSAGE_FLAGS.EPHEMERAL)) {
     const guildId = getGuildIdForChannel(db, params.channelId)
-    gatewayBus.emit('message.create', {
-      guildId,
-      channelId: params.channelId,
-      message: msg as unknown as Record<string, unknown>,
-      member: dispatchMemberFor(db, guildId, params.authorId),
-    })
+    const member = dispatchMemberFor(db, guildId, params.authorId)
+    /** Emits the committed create snapshot, possibly after an outer commit. */
+    const emit = (): void => {
+      gatewayBus.emit('message.create', {
+        guildId,
+        channelId: params.channelId,
+        message: msg as unknown as Record<string, unknown>,
+        member,
+      })
+    }
+    if (pendingEvents) pendingEvents.push(emit)
+    else emit()
   }
 
   return msg
@@ -679,12 +699,14 @@ export function getDispatchMember(
  * @param db - Database
  * @param messageId - Message ID
  * @param channelId - Optional channel ID the message must belong to
+ * @param pendingEvents - Collect dispatches until an enclosing transaction commits
  * @returns true on successful deletion
  */
 export function deleteMessage(
   db: Database,
   messageId: string,
-  channelId?: string
+  channelId?: string,
+  pendingEvents?: (() => void)[]
 ): boolean {
   // The row is gone after DELETE runs, so capture channel_id beforehand
   const target = db
@@ -705,11 +727,17 @@ export function deleteMessage(
     result.changes > 0 &&
     !(target.flags & MESSAGE_FLAGS.EPHEMERAL)
   ) {
-    gatewayBus.emit('message.delete', {
-      guildId: getGuildIdForChannel(db, target.channel_id),
-      channelId: target.channel_id,
-      messageId,
-    })
+    const guildId = getGuildIdForChannel(db, target.channel_id)
+    /** Emits the deletion only when its enclosing transaction succeeded. */
+    const emit = (): void => {
+      gatewayBus.emit('message.delete', {
+        guildId,
+        channelId: target.channel_id,
+        messageId,
+      })
+    }
+    if (pendingEvents) pendingEvents.push(emit)
+    else emit()
   }
 
   return result.changes > 0

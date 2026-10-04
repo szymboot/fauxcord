@@ -6,7 +6,14 @@
 
 import { Hono } from 'hono'
 import type { Database } from '../db'
-import { getAttachment, guessContentType } from '../services/attachments'
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
+import type { Context } from 'hono'
+import {
+  findAttachmentFile,
+  getAttachment,
+  guessContentType,
+} from '../services/attachments'
 
 /** Server start time */
 const START_TIME = Date.now()
@@ -47,28 +54,38 @@ export function createMockRoutes(db: Database, uploadPath: string): Hono {
         })
   })
 
-  // GET /_mock/attachments/:channelId/:messageId/:filename — Serve attachments
-  app.get('/_mock/attachments/:channelId/:messageId/:filename', async (c) => {
-    const { channelId, messageId, filename } = c.req.param()
-
-    const data = await getAttachment(uploadPath, channelId, messageId, filename)
-    if (!data) {
-      return c.json({ message: '404: Not Found', code: 0 }, 404)
-    }
-
-    const attachment = db
-      .prepare(
-        'SELECT content_type FROM attachments WHERE message_id = ? AND filename = ?'
-      )
-      .get(messageId, filename) as { content_type: string } | undefined
-    const contentType = attachment?.content_type ?? guessContentType(filename)
-    c.header('Content-Type', contentType)
+  /** Serves only committed metadata, including retained deleted-message uploads. */
+  async function serveAttachment(c: Context): Promise<Response> {
+    const { channelId, messageId, filename, attachmentId } = c.req.param()
+    const attachment = findAttachmentFile(
+      db,
+      channelId,
+      messageId,
+      filename,
+      attachmentId
+    )
+    // Application assets and older unindexed uploads use the original path.
+    const data = attachment
+      ? await readFile(path.join(uploadPath, attachment.file_path)).catch(
+          () => null
+        )
+      : attachmentId
+        ? null
+        : await getAttachment(uploadPath, channelId, messageId, filename)
+    if (!data) return c.json({ message: '404: Not Found', code: 0 }, 404)
+    c.header(
+      'Content-Type',
+      attachment?.content_type ?? guessContentType(filename)
+    )
     c.header('Content-Length', String(data.length))
-    // Buffer can be returned directly as BodyInit, but Hono's type definitions require ReadableStream,
-    // so a type assertion is used reluctantly (it works correctly as a Buffer at runtime)
-
-    return c.body(data as any)
-  })
+    return c.body(new Uint8Array(data))
+  }
+  app.get(
+    '/_mock/attachments/:channelId/:messageId/:attachmentId/:filename',
+    serveAttachment
+  )
+  // Preserve the original three-component download URLs for existing uploads.
+  app.get('/_mock/attachments/:channelId/:messageId/:filename', serveAttachment)
 
   return app
 }

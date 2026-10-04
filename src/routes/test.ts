@@ -6,6 +6,12 @@
 
 import type { GatewayEventControls } from '../gateway/event-controls'
 import { Hono } from 'hono'
+import { generateSnowflake } from '../snowflake'
+import { decodeTestAttachments } from '../validators/attachment'
+import {
+  withMessageAttachments,
+  cleanupAttachmentFiles,
+} from '../services/attachments'
 import { createAuditLogEntry } from '../services/audit-logs'
 import {
   isAuditSnowflake,
@@ -51,11 +57,14 @@ import {
  * Creates the test control API routes.
  * @param db - Database
  * @param baseUrl - Base URL (used for injected message attachment URL generation)
+ * @param uploadPath - Directory used for fixture uploads and lifecycle cleanup
+ * @param eventControls - Gateway captures to clear on reset or setup deletion
  * @returns Hono router instance
  */
 export function createTestRoutes(
   db: Database,
   baseUrl: string,
+  uploadPath = '/data/uploads',
   eventControls?: GatewayEventControls
 ): Hono {
   const app = new Hono()
@@ -162,6 +171,8 @@ export function createTestRoutes(
   app.delete('/_test/setup/*', (c) => {
     // Decode the path parameter manually (Bot tokens may contain spaces)
     const token = decodeURIComponent(c.req.path.replace('/_test/setup/', ''))
+    if (!token) return c.json({ message: '404: Not Found', code: 0 }, 404)
+    cleanupAttachmentFiles(db, uploadPath, { setupToken: token })
     const deleted = deleteTestSetup(db, token)
     if (deleted && token) eventControls?.reset(token)
     return deleted
@@ -268,6 +279,7 @@ export function createTestRoutes(
       // Reset everything when no body is provided
     }
 
+    cleanupAttachmentFiles(db, uploadPath, { token })
     eventControls?.reset(token)
     resetTestData(db, token)
     return c.body(null, 204)
@@ -306,9 +318,12 @@ export function createTestRoutes(
       sticker_items?: unknown
       author?: { id?: string }
       remove_after_create?: boolean
+      attachments?: unknown
     }
 
+    const files = decodeTestAttachments(payload.attachments)
     if (
+      files === null ||
       (payload.content !== undefined && typeof payload.content !== 'string') ||
       typeof payload.author?.id !== 'string' ||
       payload.author.id.length === 0 ||
@@ -329,20 +344,32 @@ export function createTestRoutes(
     }
     if (Object.keys(errors).length > 0)
       return c.json(validationError(errors).body, 400)
-    if (!payload.content && !payload.sticker_ids?.length)
+    if (!payload.content && files.length === 0 && !payload.sticker_ids?.length)
       return c.json({ message: '400: Bad Request', code: 0 }, 400)
 
-    const result = injectTestMessage(
+    const authorId = payload.author.id
+    const messageId = payload.id ?? generateSnowflake()
+    const result = await withMessageAttachments(
       db,
+      uploadPath,
       channelId,
-      {
-        id: payload.id,
-        content: payload.content,
-        sticker_ids: payload.sticker_ids,
-        author: { id: payload.author.id },
-        remove_after_create: payload.remove_after_create,
-      },
-      baseUrl
+      messageId,
+      '',
+      files,
+      (persist) =>
+        injectTestMessage(
+          db,
+          channelId,
+          {
+            id: messageId,
+            content: payload.content,
+            sticker_ids: payload.sticker_ids,
+            author: { id: authorId },
+            remove_after_create: payload.remove_after_create,
+          },
+          baseUrl,
+          persist
+        )
     )
 
     if (result === 'CONFLICT')

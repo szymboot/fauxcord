@@ -106,7 +106,10 @@ export function buildApp(
   )
   // Test control APIs require no authentication
   app.route('/', createGatewayEventControlRoutes(eventControls))
-  app.route('/', createTestRoutes(db, config.baseUrl, eventControls))
+  app.route(
+    '/',
+    createTestRoutes(db, config.baseUrl, config.uploadPath, eventControls)
+  )
 
   // OAuth2 is partially exempt from authentication (its endpoints validate
   // their own Bearer/client-credential auth internally), so it is mounted

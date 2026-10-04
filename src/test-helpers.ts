@@ -123,7 +123,7 @@ export function createFullTestApp(): FullTestContext {
 
   // Routes that do not require authentication (mounted before auth middleware)
   app.route('/', createMockRoutes(db, TEST_UPLOAD_PATH))
-  app.route('/', createTestRoutes(db, TEST_BASE_URL))
+  app.route('/', createTestRoutes(db, TEST_BASE_URL, TEST_UPLOAD_PATH))
   // OAuth2 must be reachable under all three version prefixes, matching
   // src/index.ts (see its comment for why it is exempt from auth here).
   for (const oauth2Prefix of ['/api/v10', '/api', '']) {
