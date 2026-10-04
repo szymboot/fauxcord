@@ -14,6 +14,11 @@ import { getGuildMember, type GuildMemberObject } from './guild-members'
 import { getChannel } from './channels'
 import { resetRestFaults } from './rest-faults'
 import {
+  resolveMessageStickers,
+  getMessageStickerItems,
+} from './message-stickers'
+import type { APIStickerItem } from 'discord-api-types/v10'
+import {
   createMessage,
   deleteMessage,
   getMessage,
@@ -349,8 +354,9 @@ export function getTestMessages(
   content: string
   author_token: string | null
   created_at: string
+  sticker_items?: APIStickerItem[]
 }[] {
-  return db
+  const messages = db
     .prepare(
       'SELECT id, content, author_token, created_at FROM messages WHERE channel_id = ? ORDER BY id'
     )
@@ -360,6 +366,10 @@ export function getTestMessages(
     author_token: string | null
     created_at: string
   }[]
+  return messages.map((message) => {
+    const items = getMessageStickerItems(db, message.id)
+    return { ...message, ...(items.length > 0 && { sticker_items: items }) }
+  })
 }
 
 /** Request payload for registering a non-bot test user */
@@ -463,7 +473,9 @@ export function joinTestGuildMember(
 export interface InjectTestMessageRequest {
   /** Optional unique Message ID, allowing exact DELETE faults to be prearmed. */
   id?: string
-  content: string
+  content?: string
+  /** Validated IDs from the existing guild or standard sticker catalog. */
+  sticker_ids?: string[] | null
   author: { id: string }
   /** Delete synchronously after the ordinary native create event is queued. */
   remove_after_create?: boolean
@@ -491,7 +503,12 @@ export function injectTestMessage(
   channelId: string,
   request: InjectTestMessageRequest,
   baseUrl: string
-): MessageObject | 'UNKNOWN_CHANNEL' | 'UNKNOWN_USER' | 'CONFLICT' {
+):
+  | MessageObject
+  | 'UNKNOWN_CHANNEL'
+  | 'UNKNOWN_USER'
+  | 'CONFLICT'
+  | 'INVALID_STICKERS' {
   const channel = getChannel(db, channelId)
   if (!channel) return 'UNKNOWN_CHANNEL'
 
@@ -499,6 +516,14 @@ export function injectTestMessage(
     .prepare('SELECT id FROM users WHERE id = ?')
     .get(request.author.id)
   if (!author) return 'UNKNOWN_USER'
+
+  const stickerItems = resolveMessageStickers(
+    db,
+    channelId,
+    request.sticker_ids ?? [],
+    true
+  )
+  if (!stickerItems) return 'INVALID_STICKERS'
 
   if (
     request.id &&
@@ -524,6 +549,7 @@ export function injectTestMessage(
       authorToken: '',
       messageId: request.id ?? generateSnowflake(),
       content: request.content,
+      stickerItems,
     },
     baseUrl
   )

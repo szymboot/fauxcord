@@ -350,6 +350,17 @@ export function initializeDatabase(dbPath: string): Database {
 
     CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, id);
 
+    -- Retain sent sticker metadata even when its catalog entry is deleted.
+    CREATE TABLE IF NOT EXISTS message_stickers (
+      message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      position INTEGER NOT NULL,
+      id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      format_type INTEGER NOT NULL,
+      PRIMARY KEY (message_id, position),
+      UNIQUE (message_id, id)
+    );
+
     CREATE TABLE IF NOT EXISTS embeds (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
       message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,

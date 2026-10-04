@@ -8,6 +8,11 @@ import { Hono } from 'hono'
 import type { Database } from '../db'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { generateSnowflake } from '../snowflake'
+import { resolveMessageStickers } from '../services/message-stickers'
+import {
+  validateMessageStickers,
+  unusableMessageStickersError,
+} from '../validators/message-stickers'
 import { getChannel } from '../services/channels'
 import {
   getMessage,
@@ -162,7 +167,21 @@ export function createChannelMessageRoutes(
     const hasAttachments = attachmentFiles.length > 0
     const hasPoll = payload.poll !== undefined && payload.poll !== null
 
-    if (!hasPoll && isEmptyMessage(payload, hasAttachments)) {
+    const stickerErrors = validateMessageStickers(payload)
+    if (Object.keys(stickerErrors).length > 0)
+      return c.json(validationError(stickerErrors).body, 400)
+    const stickerItems = resolveMessageStickers(
+      db,
+      channelId,
+      (payload.sticker_ids ?? []) as string[]
+    )
+    if (!stickerItems)
+      return c.json(validationError(unusableMessageStickersError()).body, 400)
+
+    if (
+      !hasPoll &&
+      isEmptyMessage(payload, hasAttachments, stickerItems.length > 0)
+    ) {
       const err = discordError(
         DiscordErrorCode.EMPTY_MESSAGE,
         'Cannot send an empty message',
@@ -197,6 +216,7 @@ export function createChannelMessageRoutes(
         messageReference: payload.message_reference as
           { message_id?: string } | undefined,
         flags: payload.flags as number | undefined,
+        stickerItems,
       },
       baseUrl
     )
