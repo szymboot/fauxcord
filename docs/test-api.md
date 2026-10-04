@@ -44,6 +44,7 @@ curl -X POST http://localhost:3000/_test/setup \
 | `guilds`                   | —        | Array of Guilds to create                             |
 | `guilds[].id`              | —        | Guild ID (auto-generated if omitted)                  |
 | `guilds[].name`            | ✅       | Guild name                                            |
+| `guilds[].icon`            | —        | Opaque icon hash string or null; default: null        |
 | `guilds[].owner_id`        | —        | Registered non-bot user ID; defaults to the setup bot |
 | `guilds[].channels`        | —        | Array of channels to create                           |
 | `guilds[].channels[].id`   | —        | Channel ID (auto-generated if omitted)                |
@@ -54,6 +55,19 @@ curl -X POST http://localhost:3000/_test/setup \
 
 **Note**: Calling this twice with the same token returns `409 Conflict`.  
 For subsequent calls, delete the existing data first via `/_test/reset` or `DELETE /_test/setup/:token`.
+
+To seed a guild icon, pass `guilds[].icon`, for example
+`"a_0123456789abcdef0123456789abcdef"`. The value is stored verbatim and appears
+in native guild GET responses and Gateway `GUILD_CREATE`, including on initial
+connection and reconnect with IDENTIFY. This is a hash fixture; Fauxcord does
+not upload images or serve icon CDN assets.
+
+Omitting `icon` leaves new guilds at `null` and preserves the current icon when
+setup reuses an existing guild ID under a different token. Explicit `null`
+clears the icon; a string replaces it. Strings must be non-empty and have no
+surrounding whitespace. Other values return `400`, with no partial fixture
+state or Gateway events. Other guilds are unaffected. `SEED_FILE` accepts the
+same field and validation through the shared setup service.
 
 To create a guild owned by a human, first register that user through
 `POST /_test/users`, then pass its returned ID as `guilds[].owner_id`:
