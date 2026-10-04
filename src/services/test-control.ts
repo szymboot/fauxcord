@@ -295,6 +295,15 @@ export function deleteTestSetup(db: Database, token: string): boolean {
 export function resetTestData(db: Database, token?: string): void {
   resetRestFaults(db, token)
   if (token) {
+    db.prepare(
+      `DELETE FROM guild_audit_log_entries WHERE guild_id IN (
+         SELECT id FROM guilds WHERE bot_token = ?
+       )`
+    ).run(token)
+  } else {
+    db.exec('DELETE FROM guild_audit_log_entries')
+  }
+  if (token) {
     const bot = db
       .prepare('SELECT user_id FROM bots WHERE token = ?')
       .get(token) as { user_id: string } | undefined

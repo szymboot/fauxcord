@@ -185,6 +185,17 @@ export function initializeDatabase(dbPath: string): Database {
       created_at                      TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS guild_audit_log_entries (
+      id         TEXT PRIMARY KEY,
+      guild_id   TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+      user_id    TEXT NOT NULL,
+      target_id  TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      count      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS guild_audit_log_entries_guild
+      ON guild_audit_log_entries(guild_id);
+
     CREATE TABLE IF NOT EXISTS channels (
       id                    TEXT PRIMARY KEY,
       guild_id              TEXT REFERENCES guilds(id) ON DELETE CASCADE,

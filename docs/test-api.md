@@ -96,7 +96,7 @@ current seed file format registers only bots.
 ## `DELETE /_test/setup/:token` — Completely delete an environment
 
 Deletes the Bot and all of its related data (Guilds, Channels, Messages, Webhooks).
-Guild-scoped REST fault controls and their consumption history are also removed.
+Guild-scoped audit-log fixtures, REST fault controls, and their consumption history are also removed.
 
 ```bash
 curl -X DELETE "http://localhost:3000/_test/setup/Bot%20mytoken"
@@ -106,7 +106,7 @@ curl -X DELETE "http://localhost:3000/_test/setup/Bot%20mytoken"
 
 ---
 
-## `POST /_test/reset` — Reset posted data and REST faults
+## `POST /_test/reset` — Reset posted data, audit logs and REST faults
 
 Deletes only posted data, while keeping Guild, Channel, and Bot registrations intact.  
 Use this for initialization before and after each test case.
@@ -120,7 +120,7 @@ curl -X POST http://localhost:3000/_test/reset \
 ```
 
 What gets deleted: messages, webhooks, invites, reactions, pins, embeds, attachments,
-and all REST fault controls (including exhausted controls and consumption history).
+audit-log fixtures, and all REST fault controls (including exhausted controls and consumption history).
 
 ### Reset only a specific Bot's data
 
@@ -132,7 +132,68 @@ curl -X POST http://localhost:3000/_test/reset \
 
 Only messages sent by that Bot and Webhooks/Invites belonging to that Bot's Guilds are deleted.
 REST fault controls in that Bot's Guilds are also deleted, including controls targeting
-human-authored messages. Other Bots' Guilds keep their controls.
+human-authored messages. Audit-log fixtures are cleared by the target Guild's Bot token,
+regardless of their actor or target author. Other Bots' Guilds keep their controls and audit history.
+
+---
+
+## `POST /_test/guilds/:guildId/audit-logs` — Create a deletion audit fixture
+
+Create an audit entry independently of messages and Gateway events. This operation
+neither deletes a message nor emits an event. Register the actor and target author
+first with `/_test/setup` or `POST /_test/users`; the channel must belong to the
+specified Guild. Users need not still be Guild members.
+
+```bash
+curl -X POST http://localhost:3000/_test/guilds/222222222222222222/audit-logs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action_type": 72,
+    "user_id": "111111111111111111",
+    "target_id": "555555555555555555",
+    "options": { "channel_id": "333333333333333333", "count": "1" }
+  }'
+```
+
+Returns `201` with the Discord-shaped entry: `id`, `action_type`, `user_id`,
+`target_id`, and `options`. Only `MESSAGE_DELETE` (`72`) is supported. `user_id`
+is the actor; `target_id` is the deleted message's author. `options.channel_id`
+and a positive decimal **string** `options.count` are required. IDs must be
+canonical nonzero unsigned 64-bit decimal strings. Counts must fit a safe integer.
+Unsupported fields/actions, malformed JSON, and invalid values return `400`;
+unknown Guild/User or a channel outside the Guild returns `404`; duplicate entry
+IDs across any Guild return `409`. Rejected requests leave the database unchanged.
+
+Omit `id` and `timestamp` to generate a recent entry. For deterministic history,
+provide either an explicit unique `id` or `timestamp` in UTC ISO format, such as
+`"2026-01-01T00:00:00.000Z"`. The timestamp is encoded in the Snowflake's upper
+bits, with the lower 22 bits zero. Reusing a timestamp therefore returns `409`;
+use explicit distinct IDs for multiple entries in one millisecond. The timestamp
+must be after Discord's epoch and within the Snowflake range. There is no extra
+`timestamp` field in the Discord entry: clients derive its age from `id`.
+
+Read entries through authenticated `GET /api/v10/guilds/:guildId/audit-logs`
+(also `/api` and bare paths). Existing Guild access checks apply. It returns only
+that Guild's entries and deduplicated referenced actor/target users, plus empty
+arrays for other referenced entity types. History is empty until fixtures are
+created. Message deletion does not automatically create audit entries.
+
+Supported filters are `action_type`, actor `user_id`, `target_id` (also present in
+the committed OpenAPI spec), strict `before`/`after` Snowflake cursors, and `limit`
+(`1`–`100`, default `50`). Results are newest first by default and with `before`;
+`after` returns oldest first, as documented by
+[Discord](https://docs.discord.com/developers/resources/audit-log#get-guild-audit-log).
+If both cursors are supplied, both bounds apply and the order follows `after`.
+The default cursor includes the current millisecond and omits future-dated entries;
+explicit cursors can retrieve future fixtures. Invalid query values return `400`.
+
+To test recent attribution, seed a generated entry for the expected author. To
+test stale attribution, seed an older `timestamp` or Snowflake. To test a mismatch,
+choose another registered `target_id` or another channel in the same Guild. For
+empty history, create no fixture or call `/_test/reset`. Fixtures persist until
+reset or Guild/setup deletion; there is no automatic 45-day retention purge.
+Channel deletion leaves historical audit entries intact. Bot-scoped reset follows
+the fixture's Guild, even when its actor is another Bot or a human.
 
 ---
 
