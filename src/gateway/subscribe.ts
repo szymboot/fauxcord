@@ -133,6 +133,18 @@ export function registerGatewaySubscriptions(
   const onChannelUpdate: Parameters<
     typeof gatewayBus.on<'channel.update'>
   >[1] = (payload) => {
+    if (payload.scope) {
+      if (payload.scope.db !== db) return
+      broadcastToBot(
+        manager,
+        payload.scope.botId,
+        'CHANNEL_UPDATE',
+        payload.channel,
+        GatewayIntentBits.Guilds,
+        payload.scope.token
+      )
+      return
+    }
     broadcastToAll(
       manager,
       'CHANNEL_UPDATE',
