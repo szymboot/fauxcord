@@ -8,6 +8,7 @@ import { deliverDispatch } from './dispatch'
 
 /** Native dispatches supported by the narrow test capture control. */
 export const CONTROL_EVENTS = [
+  'MESSAGE_CREATE',
   'MESSAGE_DELETE',
   'MESSAGE_DELETE_BULK',
   'MESSAGE_REACTION_ADD',

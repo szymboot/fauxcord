@@ -12,6 +12,7 @@ import {
 } from '../test-helpers'
 import type { GatewayPayload } from './protocol'
 import { sendDispatch } from './dispatch'
+import type { MessageObject } from '../services/messages'
 
 /** Wire client and all frames observed on its one connection. */
 interface Client {
@@ -37,6 +38,7 @@ interface Observation {
 
 const BOT_ID = '111111111111111111'
 const TOKEN = 'Bot controls'
+const HUMAN_ID = '888888888888888888'
 const ROOT = '/_test/gateway-event-controls'
 
 describe('scoped Gateway event controls over real WebSockets', () => {
@@ -152,6 +154,35 @@ describe('scoped Gateway event controls over real WebSockets', () => {
     return seedMessage(server.db, channel, BOT_ID, TOKEN)
   }
 
+  /** Registers a real human profile and guild membership through the test API. */
+  async function prepareHuman(): Promise<Record<string, unknown>> {
+    const user = await request('/_test/users', 'POST', {
+      id: HUMAN_ID,
+      username: 'Capture human',
+      global_name: 'Original display name',
+      avatar: 'a_original_avatar',
+    })
+    expect(user.status).toBe(201)
+    const joined = await request(
+      `/_test/guilds/${guild}/members/${HUMAN_ID}`,
+      'POST',
+      { nick: 'Original nickname' }
+    )
+    expect(joined.status).toBe(201)
+    return (await joined.json()) as Record<string, unknown>
+  }
+
+  /** Creates a native human message without supplying a Gateway payload. */
+  async function humanMessage(targetChannel = channel): Promise<MessageObject> {
+    const response = await request(
+      `/_test/channels/${targetChannel}/messages`,
+      'POST',
+      { content: 'Captured human content', author: { id: HUMAN_ID } }
+    )
+    expect(response.status).toBe(201)
+    return (await response.json()) as MessageObject
+  }
+
   beforeEach(async () => {
     server = await createTestGatewayServer()
     base = server.url.replace('ws://', 'http://')
@@ -165,6 +196,303 @@ describe('scoped Gateway event controls over real WebSockets', () => {
     for (const session of server.sessionManager.getAll())
       server.sessionManager.remove(session.sessionId)
     await server.close()
+  })
+
+  it.each([
+    { order: 'create then delete', sequence: 'new' },
+    { order: 'delete then create', sequence: 'new' },
+    { order: 'create then delete', sequence: 'original' },
+    { order: 'delete then create', sequence: 'original' },
+  ])(
+    'delivers $order and repeated create replay with $sequence sequences',
+    async ({ order, sequence }) => {
+      const member = await prepareHuman()
+      const otherSession = await connect()
+      const id = await arm({
+        events: ['MESSAGE_CREATE', 'MESSAGE_DELETE'],
+        allow_original_sequence: sequence === 'original',
+      })
+      const created = await humanMessage()
+      const path = `/channels/${channel}/messages/${created.id}`
+      const result41 = await request(path)
+      expect(result41.status).toBe(200)
+      const result42 = await request(path, 'DELETE')
+      expect(result42.status).toBe(204)
+      const result43 = await request(path)
+      expect(result43.status).toBe(404)
+      for (const target of [client, otherSession]) await fence(target)
+      expect(
+        client.frames.filter((frame) => frame.t?.startsWith('MESSAGE_'))
+      ).toHaveLength(0)
+      const observation = await observe(id)
+      expect(observation.skipped).toBe(0)
+      expect(observation.events_captured).toHaveLength(2)
+      const [create, deletion] = observation.events_captured
+      expect(create.envelope).toMatchObject({
+        op: 0,
+        t: 'MESSAGE_CREATE',
+        d: { ...created, guild_id: guild, member },
+      })
+      expect(create.envelope.d.author).toMatchObject({
+        id: HUMAN_ID,
+        bot: false,
+        avatar: 'a_original_avatar',
+        global_name: 'Original display name',
+      })
+      expect(create.envelope.d.channel_id).toBe(channel)
+      expect(deletion.envelope.d).toEqual({
+        id: created.id,
+        channel_id: channel,
+        guild_id: guild,
+      })
+      const native = otherSession.frames.filter((frame) =>
+        frame.t?.startsWith('MESSAGE_')
+      )
+      expect(native.map((frame) => frame.d)).toEqual([
+        create.envelope.d,
+        deletion.envelope.d,
+      ])
+      const session = server.sessionManager.get(client.sessionId)
+      assert.ok(session)
+      const highWater = session.seq
+      const history = session.replayBuffer.length
+      expect(
+        session.replayBuffer.some(
+          (entry) =>
+            entry.event.d &&
+            (entry.event.d as { id?: string }).id === created.id
+        )
+      ).toBe(false)
+      expect(create).toMatchObject({
+        state: 'held',
+        deliveries: 0,
+        last_sequence: null,
+      })
+      const premature = await request(`${ROOT}/${id}/replay`, 'POST', {
+        event_ids: [create.id],
+        sequence,
+      })
+      expect(premature.status).toBe(409)
+      const invalid = await request(`${ROOT}/${id}/release`, 'POST', {
+        event_ids: [create.id, 'a'.repeat(36)],
+        sequence,
+      })
+      expect(invalid.status).toBe(404)
+      const result44 = await observe(id)
+      expect(result44.operations).toBe(0)
+      // Change the source records to prove delivery uses the original snapshot.
+      server.db
+        .prepare('UPDATE users SET username = ?, avatar = ? WHERE id = ?')
+        .run('Changed human', null, HUMAN_ID)
+      server.db
+        .prepare('UPDATE guild_members SET nick = ? WHERE user_id = ?')
+        .run('Changed nickname', HUMAN_ID)
+      const ordered =
+        order === 'create then delete' ? [create, deletion] : [deletion, create]
+      const release = await request(`${ROOT}/${id}/release`, 'POST', {
+        event_ids: ordered.map((event) => event.id),
+        sequence,
+      })
+      expect(release.status).toBe(200)
+      for (let i = 0; i < 2; i += 1) {
+        const replay = await request(`${ROOT}/${id}/replay`, 'POST', {
+          event_ids: [create.id],
+          sequence,
+        })
+        expect(replay.status).toBe(200)
+      }
+      await fence()
+      const delivered = client.frames.filter((frame) =>
+        frame.t?.startsWith('MESSAGE_')
+      )
+      const expected = [...ordered, create, create].map((event, index) => ({
+        ...event.envelope,
+        s: sequence === 'original' ? event.envelope.s : highWater + index + 1,
+      }))
+      expect(delivered).toEqual(expected)
+      expect(session.seq).toBe(highWater + (sequence === 'new' ? 4 : 0))
+      expect(session.replayBuffer).toHaveLength(
+        history + (sequence === 'new' ? 4 : 0)
+      )
+      if (sequence === 'new') {
+        expect(
+          session.replayBuffer.slice(history).map((entry) => entry.event)
+        ).toEqual(expected)
+      }
+      const completed = await observe(id)
+      expect(completed.operations).toBe(4)
+      expect(completed.events_captured[0]).toMatchObject({
+        envelope: create.envelope,
+        state: 'released',
+        deliveries: 3,
+        last_sequence: delivered.at(-1)?.s,
+      })
+      expect(completed.events_captured[1]).toMatchObject({
+        state: 'released',
+        deliveries: 1,
+      })
+      const result45 = await request(path)
+      expect(result45.status).toBe(404)
+      const result46 = await request(`${ROOT}/${id}/release`, 'POST', {
+        event_ids: [create.id],
+      })
+      expect(result46.status).toBe(409)
+      const result47 = await request(`${ROOT}/${id}`, 'DELETE')
+      expect(result47.status).toBe(204)
+      const nextSequence = session.seq + 1
+      await request(`/channels/${channel}/messages`, 'POST', {
+        content: 'next',
+      })
+      await fence()
+      expect(
+        client.frames.findLast((frame) => frame.t === 'MESSAGE_CREATE')?.s
+      ).toBe(nextSequence)
+      await fence(otherSession)
+      expect(
+        otherSession.frames.filter((frame) => frame.d?.id === created.id)
+      ).toHaveLength(2)
+    }
+  )
+
+  it('holds only create while native deletion proceeds before release', async () => {
+    await prepareHuman()
+    const id = await arm({ events: ['MESSAGE_CREATE'] })
+    const created = await humanMessage()
+    const path = `/channels/${channel}/messages/${created.id}`
+    const result48 = await request(path, 'DELETE')
+    expect(result48.status).toBe(204)
+    await fence()
+    const result49 = await observe(id)
+    const event = result49.events_captured[0]
+    expect(
+      client.frames
+        .filter((frame) => frame.t?.startsWith('MESSAGE_'))
+        .map((frame) => frame.t)
+    ).toEqual(['MESSAGE_DELETE'])
+    const result50 = await request(`${ROOT}/${id}/release`, 'POST', {
+      event_ids: [event.id],
+    })
+    expect(result50.status).toBe(200)
+    await fence()
+    const delivered = client.frames.filter((frame) =>
+      frame.t?.startsWith('MESSAGE_')
+    )
+    expect(delivered.map((frame) => frame.t)).toEqual([
+      'MESSAGE_DELETE',
+      'MESSAGE_CREATE',
+    ])
+    expect(delivered[1]?.d).toEqual(event.envelope.d)
+    expect(delivered[1]?.s).toBe((delivered[0]?.s ?? 0) + 1)
+    const result51 = await request(path)
+    expect(result51.status).toBe(404)
+  })
+
+  it('observes ordinary create delivery and requires opt-in for original replay', async () => {
+    await prepareHuman()
+    const id = await arm({ events: ['MESSAGE_CREATE'], hold: false })
+    const created = await humanMessage()
+    await fence()
+    const observation = await observe(id)
+    expect(observation.events_captured).toHaveLength(1)
+    const event = observation.events_captured[0]
+    expect(event).toMatchObject({
+      state: 'delivered',
+      deliveries: 1,
+      last_sequence: event.envelope.s,
+    })
+    expect(client.frames.find((frame) => frame.t === 'MESSAGE_CREATE')).toEqual(
+      event.envelope
+    )
+    const rejected = await request(`${ROOT}/${id}/replay`, 'POST', {
+      event_ids: [event.id],
+      sequence: 'original',
+    })
+    expect(rejected.status).toBe(409)
+    const result52 = await request(`${ROOT}/${id}/release`, 'POST', {
+      event_ids: [event.id],
+    })
+    expect(result52.status).toBe(409)
+    const result53 = await request(
+      `/channels/${channel}/messages/${created.id}`,
+      'DELETE'
+    )
+    expect(result53.status).toBe(204)
+    const result54 = await request(`${ROOT}/${id}/replay`, 'POST', {
+      event_ids: [event.id],
+    })
+    expect(result54.status).toBe(200)
+    await fence()
+    const frames = client.frames.filter((frame) => frame.t === 'MESSAGE_CREATE')
+    expect(frames).toHaveLength(2)
+    expect(frames[1]?.d).toEqual(event.envelope.d)
+    expect(frames[1]?.s).toBe((event.envelope.s ?? 0) + 2)
+    const result55 = await observe(id)
+    expect(result55.events_captured).toHaveLength(1)
+  })
+
+  it('isolates create capture by guild, setup, session and Guild Messages intent', async () => {
+    await prepareHuman()
+    const otherSession = await connect()
+    const noIntent = await connect(
+      TOKEN,
+      GatewayIntentBits.GuildMessageReactions
+    )
+    seedBot(server.db, 'Bot other', '444444444444444444')
+    const otherGuild = seedGuild(server.db, 'Bot other', '555555555555555555')
+    const otherChannel = seedChannel(
+      server.db,
+      otherGuild,
+      '666666666666666666'
+    )
+    const otherBot = await connect('Bot other')
+    const id = await arm({ events: ['MESSAGE_CREATE'] })
+    const filtered = await arm({
+      events: ['MESSAGE_CREATE'],
+      session_id: noIntent.sessionId,
+    })
+    const otherResponse = await request(ROOT, 'POST', {
+      guild_id: otherGuild,
+      bot_id: '444444444444444444',
+      session_id: otherBot.sessionId,
+      events: ['MESSAGE_CREATE'],
+      hold: true,
+    })
+    expect(otherResponse.status).toBe(201)
+    const otherId = ((await otherResponse.json()) as { id: string }).id
+    const created = await humanMessage()
+    const unrelated = await humanMessage(otherChannel)
+    // The guild scope intentionally includes every channel in that guild.
+    const sibling = seedChannel(server.db, guild, '777777777777777777')
+    const sameGuild = await humanMessage(sibling)
+    for (const target of clients) await fence(target)
+    const result56 = await observe(id)
+    expect(
+      result56.events_captured.map((event) => event.envelope.d.id)
+    ).toEqual([created.id, sameGuild.id])
+    const result57 = await observe(otherId)
+    expect(
+      result57.events_captured.map((event) => event.envelope.d.id)
+    ).toEqual([unrelated.id])
+    const result58 = await observe(filtered)
+    expect(result58.events_captured).toHaveLength(0)
+    expect(noIntent.frames.some((frame) => frame.t === 'MESSAGE_CREATE')).toBe(
+      false
+    )
+    expect(
+      client.frames
+        .filter((frame) => frame.t === 'MESSAGE_CREATE')
+        .map((frame) => frame.d?.id)
+    ).toEqual([unrelated.id])
+    expect(
+      otherSession.frames
+        .filter((frame) => frame.t === 'MESSAGE_CREATE')
+        .map((frame) => frame.d?.id)
+    ).toEqual([created.id, unrelated.id, sameGuild.id])
+    expect(
+      otherBot.frames
+        .filter((frame) => frame.t === 'MESSAGE_CREATE')
+        .map((frame) => frame.d?.id)
+    ).toEqual([created.id, sameGuild.id])
   })
 
   it('holds native deletion, releases and duplicates it without repeating mutations', async () => {
@@ -451,6 +779,8 @@ describe('scoped Gateway event controls over real WebSockets', () => {
       { events: ['READY'] },
       { events: [] },
       { events: ['MESSAGE_DELETE', 'MESSAGE_DELETE'] },
+      { events: ['MESSAGE_CREATE', 'MESSAGE_CREATE'] },
+      { events: ['MESSAGE_CREATE', 'MESSAGE_UPDATE'] },
       { limit: 101 },
       { ttl_ms: 60_001 },
       { hold: null },
@@ -568,76 +898,91 @@ describe('scoped Gateway event controls over real WebSockets', () => {
     ).toEqual(['123', '456'])
   })
 
-  it('cleans up on cancellation, disconnect, replacement, removal and expiry', async () => {
-    const canceled = await arm()
-    await request(`/channels/${channel}/messages/${message()}`, 'DELETE')
-    const result31 = await request(`${ROOT}/${canceled}`, 'DELETE')
-    expect(result31.status).toBe(204)
-    const result32 = await request(`${ROOT}/${canceled}/release`, 'POST', {
-      event_ids: ['a'.repeat(36)],
-    })
-    expect(result32.status).toBe(404)
-    await fence()
-    expect(client.frames.some((frame) => frame.t === 'MESSAGE_DELETE')).toBe(
-      false
-    )
-    const expired = await arm({ ttl_ms: 10 })
-    await expect
-      .poll(async () => {
-        const response = await request(`${ROOT}/${expired}`)
-        return response.status
+  it.each(['MESSAGE_DELETE', 'MESSAGE_CREATE'])(
+    'cleans up %s on cancellation, disconnect, replacement, removal and expiry',
+    async (eventType) => {
+      const canceled = await arm({ events: [eventType] })
+      if (eventType === 'MESSAGE_CREATE') {
+        await prepareHuman()
+        await humanMessage()
+      } else {
+        await request(`/channels/${channel}/messages/${message()}`, 'DELETE')
+      }
+      const result31 = await request(`${ROOT}/${canceled}`, 'DELETE')
+      expect(result31.status).toBe(204)
+      const result32 = await request(`${ROOT}/${canceled}/release`, 'POST', {
+        event_ids: ['a'.repeat(36)],
       })
-      .toBe(404)
-    const replaced = await arm()
-    client.ws.send(
-      JSON.stringify({
-        op: 2,
-        d: { token: TOKEN, intents: GatewayIntentBits.GuildMessages },
-      })
-    )
-    await once(client.ws, 'message')
-    const result34 = await request(`${ROOT}/${replaced}`)
-    expect(result34.status).toBe(404)
-    client.sessionId = String(
-      client.frames.findLast((frame) => frame.t === 'READY')?.d?.session_id
-    )
-    const removed = await arm()
-    server.sessionManager.remove(client.sessionId)
-    const result35 = await request(`${ROOT}/${removed}`)
-    expect(result35.status).toBe(404)
-    client = await connect()
-    const disconnected = await arm()
-    client.ws.close()
-    await once(client.ws, 'close')
-    const result36 = await request(`${ROOT}/${disconnected}`)
-    expect(result36.status).toBe(404)
-  })
+      expect(result32.status).toBe(404)
+      await fence()
+      expect(client.frames.some((frame) => frame.t === eventType)).toBe(false)
+      const expired = await arm({ events: [eventType], ttl_ms: 10 })
+      await expect
+        .poll(async () => {
+          const response = await request(`${ROOT}/${expired}`)
+          return response.status
+        })
+        .toBe(404)
+      const replaced = await arm({ events: [eventType] })
+      client.ws.send(
+        JSON.stringify({
+          op: 2,
+          d: { token: TOKEN, intents: GatewayIntentBits.GuildMessages },
+        })
+      )
+      await once(client.ws, 'message')
+      const result34 = await request(`${ROOT}/${replaced}`)
+      expect(result34.status).toBe(404)
+      client.sessionId = String(
+        client.frames.findLast((frame) => frame.t === 'READY')?.d?.session_id
+      )
+      const removed = await arm({ events: [eventType] })
+      server.sessionManager.remove(client.sessionId)
+      const result35 = await request(`${ROOT}/${removed}`)
+      expect(result35.status).toBe(404)
+      client = await connect()
+      const disconnected = await arm({ events: [eventType] })
+      client.ws.close()
+      await once(client.ws, 'close')
+      const result36 = await request(`${ROOT}/${disconnected}`)
+      expect(result36.status).toBe(404)
+    }
+  )
 
-  it('clears only the reset setup controls and discards data on setup deletion', async () => {
-    const id = await arm()
-    seedBot(server.db, 'Bot other', '444444444444444444')
-    const otherGuild = seedGuild(server.db, 'Bot other', '555555555555555555')
-    const other = await connect('Bot other')
-    const response = await request(ROOT, 'POST', {
-      guild_id: otherGuild,
-      bot_id: '444444444444444444',
-      session_id: other.sessionId,
-      events: ['MESSAGE_DELETE'],
-    })
-    const otherId = ((await response.json()) as { id: string }).id
-    await request('/_test/reset', 'POST', { token: TOKEN })
-    const result37 = await request(`${ROOT}/${id}`)
-    expect(result37.status).toBe(404)
-    const result38 = await request(`${ROOT}/${otherId}`)
-    expect(result38.status).toBe(200)
-    const deleted = await arm()
-    await request('/_test/setup/Bot%20controls', 'DELETE')
-    const result39 = await request(`${ROOT}/${deleted}`)
-    expect(result39.status).toBe(404)
-    await request('/_test/reset', 'POST', {})
-    const result40 = await request(`${ROOT}/${otherId}`)
-    expect(result40.status).toBe(404)
-  })
+  it.each(['MESSAGE_DELETE', 'MESSAGE_CREATE'])(
+    'clears only the reset setup %s controls and discards data on setup deletion',
+    async (eventType) => {
+      const id = await arm({ events: [eventType] })
+      if (eventType === 'MESSAGE_CREATE') {
+        await prepareHuman()
+        await humanMessage()
+      } else {
+        await request(`/channels/${channel}/messages/${message()}`, 'DELETE')
+      }
+      seedBot(server.db, 'Bot other', '444444444444444444')
+      const otherGuild = seedGuild(server.db, 'Bot other', '555555555555555555')
+      const other = await connect('Bot other')
+      const response = await request(ROOT, 'POST', {
+        guild_id: otherGuild,
+        bot_id: '444444444444444444',
+        session_id: other.sessionId,
+        events: [eventType],
+      })
+      const otherId = ((await response.json()) as { id: string }).id
+      await request('/_test/reset', 'POST', { token: TOKEN })
+      const result37 = await request(`${ROOT}/${id}`)
+      expect(result37.status).toBe(404)
+      const result38 = await request(`${ROOT}/${otherId}`)
+      expect(result38.status).toBe(200)
+      const deleted = await arm({ events: [eventType] })
+      await request('/_test/setup/Bot%20controls', 'DELETE')
+      const result39 = await request(`${ROOT}/${deleted}`)
+      expect(result39.status).toBe(404)
+      await request('/_test/reset', 'POST', {})
+      const result40 = await request(`${ROOT}/${otherId}`)
+      expect(result40.status).toBe(404)
+    }
+  )
   it('bounds total controls and releases capacity and connection listeners on cancellation', async () => {
     const ids: string[] = []
     const session = server.sessionManager.get(client.sessionId)
@@ -660,40 +1005,47 @@ describe('scoped Gateway event controls over real WebSockets', () => {
     await arm()
   })
 
-  it('does not transfer held captures to a resumed connection', async () => {
-    const id = await arm()
-    const mid = message()
-    await request(`/channels/${channel}/messages/${mid}`, 'DELETE')
-    const capture = await observe(id)
-    const session = server.sessionManager.get(client.sessionId)
-    assert.ok(session)
-    const seq = session.seq
-    client.ws.close()
-    await once(client.ws, 'close')
-    const ws = new WebSocket(server.url)
-    const frames: Client['frames'] = []
-    ws.on('message', (raw: Buffer) => {
-      frames.push(JSON.parse(raw.toString()) as Client['frames'][number])
-    })
-    await once(ws, 'message')
-    const resumed = once(ws, 'message')
-    ws.send(
-      JSON.stringify({
-        op: 6,
-        d: { token: TOKEN, session_id: client.sessionId, seq },
+  it.each(['MESSAGE_DELETE', 'MESSAGE_CREATE'])(
+    'does not transfer held %s captures to a resumed connection',
+    async (eventType) => {
+      const id = await arm({ events: [eventType] })
+      if (eventType === 'MESSAGE_CREATE') {
+        await prepareHuman()
+        await humanMessage()
+      } else {
+        await request(`/channels/${channel}/messages/${message()}`, 'DELETE')
+      }
+      const capture = await observe(id)
+      const session = server.sessionManager.get(client.sessionId)
+      assert.ok(session)
+      const seq = session.seq
+      client.ws.close()
+      await once(client.ws, 'close')
+      const ws = new WebSocket(server.url)
+      const frames: Client['frames'] = []
+      ws.on('message', (raw: Buffer) => {
+        frames.push(JSON.parse(raw.toString()) as Client['frames'][number])
       })
-    )
-    await resumed
-    const target = { ws, frames, sessionId: client.sessionId }
-    clients.push(target)
-    await fence(target)
-    expect(frames.some((frame) => frame.t === 'RESUMED')).toBe(true)
-    expect(frames.some((frame) => frame.t === 'MESSAGE_DELETE')).toBe(false)
-    const stale = await request(`${ROOT}/${id}/release`, 'POST', {
-      event_ids: capture.events_captured.map((event) => event.id),
-    })
-    expect(stale.status).toBe(404)
-  })
+      await once(ws, 'message')
+      const resumed = once(ws, 'message')
+      ws.send(
+        JSON.stringify({
+          op: 6,
+          d: { token: TOKEN, session_id: client.sessionId, seq },
+        })
+      )
+      await resumed
+      const target = { ws, frames, sessionId: client.sessionId }
+      clients.push(target)
+      await fence(target)
+      expect(frames.some((frame) => frame.t === 'RESUMED')).toBe(true)
+      expect(frames.some((frame) => frame.t === eventType)).toBe(false)
+      const stale = await request(`${ROOT}/${id}/release`, 'POST', {
+        event_ids: capture.events_captured.map((event) => event.id),
+      })
+      expect(stale.status).toBe(404)
+    }
+  )
   it('binds guild scope to the exact setup token even when bot user IDs are shared', async () => {
     seedBot(server.db, 'Bot alias', BOT_ID)
     const aliasGuild = seedGuild(server.db, 'Bot alias', '777777777777777777')

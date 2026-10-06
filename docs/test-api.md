@@ -1111,6 +1111,7 @@ not have Discord OpenAPI manifest entries.
   "guild_id": "222222222222222222",
   "bot_id": "111111111111111111",
   "events": [
+    "MESSAGE_CREATE",
     "MESSAGE_DELETE",
     "MESSAGE_REACTION_ADD",
     "MESSAGE_REACTION_REMOVE"
@@ -1139,11 +1140,12 @@ is pinned to the resolved session and socket and never follows a replacement.
 After disconnect/replacement, create a fresh control; the returned ID identifies
 the newly resolved session.
 
-`events` is a nonempty, unique subset of `MESSAGE_DELETE`,
+`events` is a nonempty, unique subset of `MESSAGE_CREATE`, `MESSAGE_DELETE`,
 `MESSAGE_DELETE_BULK`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
 `MESSAGE_REACTION_REMOVE_ALL`, and `MESSAGE_REACTION_REMOVE_EMOJI`. Only events
-that the native producer actually emits are captured. Single deletion, native
-bulk deletion through the REST endpoint below, reaction addition, and single
+that the native producer actually emits are captured. Message creation (including
+human messages via `POST /_test/channels/:channelId/messages`), single deletion,
+native bulk deletion through the REST endpoint below, reaction addition, and single
 reaction removal have producers. Reaction-clear selectors are ready for
 separately implemented native events; this feature adds no reaction-clear producer.
 
@@ -1154,7 +1156,10 @@ behavior. `hold` defaults to `false`: observe while delivering normally. With
 `hold: true`, matching events are retained without sending or entering the
 normal resume buffer. The database operation still completes immediately.
 Payloads are copied at capture time, so message removal cannot invalidate a
-late reaction payload, and duplicate deletion does not require a second DELETE.
+late create or reaction payload, and duplicate deletion does not require a second
+DELETE. Captured creates retain the original message, channel and guild IDs,
+content, author profile and guild member data; release/replay does not look up
+current records or recreate a deleted message.
 
 `limit` is an integer from 1–100 (default 20); `ttl_ms` is an integer from
 1–60000 (default 30000). Each control also has a fixed 256 KiB serialized payload
@@ -1227,8 +1232,8 @@ Replay accepts exactly one event from this control that was delivered normally
 or released. A still-held event returns `409`; release it first. Replay keeps
 its state and increments `deliveries`. It sends the captured payload directly:
 no REST call, database mutation, or resource lookup is repeated. This includes
-`MESSAGE_DELETE` after the message has already disappeared. Exhausting the
-100-delivery budget returns `429` without sending.
+`MESSAGE_CREATE` and `MESSAGE_DELETE` after the message has already disappeared.
+Exhausting the 100-delivery budget returns `429` without sending.
 
 For release and replay, `sequence` defaults to `new`: each send gets a fresh
 monotonically increasing session sequence and is added to normal resume history.
@@ -1264,6 +1269,18 @@ observation until the expected events appear, then select their UUIDs. A useful
 scenario is to hold reaction ADD/REMOVE and DELETE, perform the real operations,
 then release DELETE before the captured reactions. REST can confirm the message
 is absent before release.
+
+For a human create/delete race, arm `events: ["MESSAGE_CREATE", "MESSAGE_DELETE"]`
+with `hold: true`, create a registered human's message through
+`POST /_test/channels/:channelId/messages`, and delete its returned ID through
+`DELETE /channels/:channelId/messages/:messageId`. Both database operations
+complete while the native Gateway envelopes remain held. Inspect the control,
+then release the DELETE UUID followed by the CREATE UUID with `sequence: "new"`
+to deliver deletion before the delayed create. Reverse those UUIDs to deliver
+create before deletion. Replay the released CREATE UUID to deliver the same
+creation snapshot again; repeated replay is supported within the delivery budget.
+Alternatively, hold only `MESSAGE_CREATE` to let native DELETE delivery proceed
+normally before releasing the held create.
 
 TCP frame ordering does **not** reproduce or control application handler
 scheduling. Libraries may drop original-sequence frames, update caches before
