@@ -1,5 +1,9 @@
 import type { Database } from '../db'
 import { GatewayIntentBits } from 'discord-api-types/v10'
+import type {
+  GatewayMessageReactionRemoveAllDispatchData,
+  GatewayMessageReactionRemoveEmojiDispatchData,
+} from 'discord-api-types/v10'
 import { gatewayBus } from './bus'
 import { broadcastToAll, broadcastToBot } from './dispatch'
 import type { SessionManager } from './session'
@@ -128,6 +132,47 @@ export function registerGatewaySubscriptions(
         emoji: payload.emoji,
       },
       GatewayIntentBits.GuildMessageReactions
+    )
+  }
+  const onReactionRemoveAll: Parameters<
+    typeof gatewayBus.on<'message.reaction.remove.all'>
+  >[1] = (payload) => {
+    if (payload.scope.db !== db) return
+    const data: GatewayMessageReactionRemoveAllDispatchData = {
+      channel_id: payload.channelId,
+      message_id: payload.messageId,
+      ...(payload.guildId && { guild_id: payload.guildId }),
+    }
+    broadcastToBot(
+      manager,
+      payload.scope.botId,
+      'MESSAGE_REACTION_REMOVE_ALL',
+      data,
+      payload.guildId
+        ? GatewayIntentBits.GuildMessageReactions
+        : GatewayIntentBits.DirectMessageReactions,
+      payload.scope.token
+    )
+  }
+  const onReactionRemoveEmoji: Parameters<
+    typeof gatewayBus.on<'message.reaction.remove.emoji'>
+  >[1] = (payload) => {
+    if (payload.scope.db !== db) return
+    const data: GatewayMessageReactionRemoveEmojiDispatchData = {
+      channel_id: payload.channelId,
+      message_id: payload.messageId,
+      ...(payload.guildId && { guild_id: payload.guildId }),
+      emoji: payload.emoji,
+    }
+    broadcastToBot(
+      manager,
+      payload.scope.botId,
+      'MESSAGE_REACTION_REMOVE_EMOJI',
+      data,
+      payload.guildId
+        ? GatewayIntentBits.GuildMessageReactions
+        : GatewayIntentBits.DirectMessageReactions,
+      payload.scope.token
     )
   }
   const onGuildCreate: Parameters<typeof gatewayBus.on<'guild.create'>>[1] = (
@@ -261,6 +306,8 @@ export function registerGatewaySubscriptions(
   gatewayBus.on('message.delete.bulk', onMessageDeleteBulk)
   gatewayBus.on('message.reaction.add', onReactionAdd)
   gatewayBus.on('message.reaction.remove', onReactionRemove)
+  gatewayBus.on('message.reaction.remove.all', onReactionRemoveAll)
+  gatewayBus.on('message.reaction.remove.emoji', onReactionRemoveEmoji)
   gatewayBus.on('guild.create', onGuildCreate)
   gatewayBus.on('channel.create', onChannelCreate)
   gatewayBus.on('channel.update', onChannelUpdate)
@@ -280,6 +327,8 @@ export function registerGatewaySubscriptions(
     gatewayBus.off('message.delete.bulk', onMessageDeleteBulk)
     gatewayBus.off('message.reaction.add', onReactionAdd)
     gatewayBus.off('message.reaction.remove', onReactionRemove)
+    gatewayBus.off('message.reaction.remove.all', onReactionRemoveAll)
+    gatewayBus.off('message.reaction.remove.emoji', onReactionRemoveEmoji)
     gatewayBus.off('guild.create', onGuildCreate)
     gatewayBus.off('channel.create', onChannelCreate)
     gatewayBus.off('channel.update', onChannelUpdate)

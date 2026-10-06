@@ -25,6 +25,44 @@ function getChannelIdForMessage(
   return row?.channel_id
 }
 
+/** Resolves clear-event delivery from the persisted guild setup (or DM author). */
+function getReactionClearDispatch(
+  db: Database,
+  messageId: string
+): GatewayBusEvents['message.reaction.remove.all'] | undefined {
+  const row = db
+    .prepare(
+      `SELECT c.id AS channel_id, c.guild_id, b.user_id, b.token
+       FROM messages m JOIN channels c ON c.id = m.channel_id
+       LEFT JOIN guilds g ON g.id = c.guild_id
+       JOIN bots b ON b.token = CASE WHEN c.guild_id IS NULL
+         THEN m.author_token ELSE g.bot_token END
+       WHERE m.id = ?`
+    )
+    .get(messageId) as
+    | {
+        channel_id: string
+        guild_id: string | null
+        user_id: string
+        token: string
+      }
+    | undefined
+  return row
+    ? {
+        guildId: row.guild_id ?? undefined,
+        channelId: row.channel_id,
+        messageId,
+        scope: { db, botId: row.user_id, token: row.token },
+      }
+    : undefined
+}
+
+/** Converts the stored REST emoji key into Discord's partial emoji object. */
+function toReactionEmoji(emoji: string): { id: string | null; name: string } {
+  const custom = /^([^:]+):(\d+)$/.exec(emoji)
+  return custom ? { id: custom[2], name: custom[1] } : { id: null, name: emoji }
+}
+
 /**
  * Adds a reaction.
  * @param db - Database
@@ -125,10 +163,17 @@ export function removeEmojiReactions(
   messageId: string,
   emoji: string
 ): void {
-  db.prepare('DELETE FROM reactions WHERE message_id = ? AND emoji = ?').run(
-    messageId,
-    emoji
-  )
+  const result = db
+    .prepare('DELETE FROM reactions WHERE message_id = ? AND emoji = ?')
+    .run(messageId, emoji)
+  if (result.changes === 0) return
+  const dispatch = getReactionClearDispatch(db, messageId)
+  if (dispatch) {
+    gatewayBus.emit('message.reaction.remove.emoji', {
+      ...dispatch,
+      emoji: toReactionEmoji(emoji),
+    })
+  }
 }
 
 /**
@@ -137,7 +182,12 @@ export function removeEmojiReactions(
  * @param messageId - Message ID
  */
 export function removeAllReactions(db: Database, messageId: string): void {
-  db.prepare('DELETE FROM reactions WHERE message_id = ?').run(messageId)
+  const result = db
+    .prepare('DELETE FROM reactions WHERE message_id = ?')
+    .run(messageId)
+  if (result.changes === 0) return
+  const dispatch = getReactionClearDispatch(db, messageId)
+  if (dispatch) gatewayBus.emit('message.reaction.remove.all', dispatch)
 }
 
 /**

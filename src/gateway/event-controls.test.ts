@@ -852,7 +852,7 @@ describe('scoped Gateway event controls over real WebSockets', () => {
     })
     const session = server.sessionManager.get(client.sessionId)
     assert.ok(session)
-    // Exercise the dispatch boundary directly for payload budgets and future reaction-clear producers.
+    // Exercise the dispatch boundary directly for payload budgets.
     sendDispatch(server.sessionManager, session, 'MESSAGE_DELETE_BULK', {
       guild_id: guild,
       channel_id: channel,

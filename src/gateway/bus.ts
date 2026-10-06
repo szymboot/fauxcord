@@ -48,6 +48,19 @@ export interface GatewayBusEvents {
     userId: string
     emoji: Record<string, unknown>
   }
+  'message.reaction.remove.all': {
+    guildId: string | undefined
+    channelId: string
+    messageId: string
+    scope: { db: Database; botId: string; token: string }
+  }
+  'message.reaction.remove.emoji': {
+    guildId: string | undefined
+    channelId: string
+    messageId: string
+    emoji: { id: string | null; name: string }
+    scope: { db: Database; botId: string; token: string }
+  }
   'guild.create': { guild: Record<string, unknown> }
   'channel.create': { channel: Record<string, unknown> }
   'channel.update': {

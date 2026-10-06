@@ -1380,9 +1380,29 @@ the newly resolved session.
 that the native producer actually emits are captured. Message creation (including
 human messages via `POST /_test/channels/:channelId/messages`), single deletion,
 native bulk deletion through the REST endpoint below, reaction addition (including
-human additions through the control above), and single
-reaction removal have producers. Reaction-clear selectors are ready for
-separately implemented native events; this feature adds no reaction-clear producer.
+human additions through the control above), single reaction removal, and both
+reaction-clear DELETE endpoints have native producers.
+
+`DELETE /channels/:channelId/messages/:messageId/reactions` returns `204` and
+emits one `MESSAGE_REACTION_REMOVE_ALL` with `channel_id`, `message_id` and
+`guild_id` for guild messages. `DELETE .../reactions/:emoji` clears that emoji
+for every user and emits one `MESSAGE_REACTION_REMOVE_EMOJI` with the same IDs
+plus `emoji`: `{ "id": null, "name": "🐝" }` for Unicode, or
+`{ "id": "123456789012345678", "name": "party" }` for a stored REST key
+`party:123456789012345678`. URL-encode the emoji path segment. The existing
+storage matches emoji keys exactly. Both routes work under `/api/v10`, `/api`
+and bare paths.
+
+Clear dispatches follow persisted guild setup ownership, scoped to the app's
+database, bot ID and exact setup token, with Guild Message Reactions intent.
+Existing REST authentication and cross-guild access remain unchanged. DM clears
+omit `guild_id`, resolve the registered message-author token and require Direct
+Message Reactions intent. A missing registered delivery scope never broadcasts
+to unrelated sessions. No-op clears return `204` without an event; rejected
+requests do not mutate reactions or emit. A clear preserves the message and
+other messages' reactions, and emits neither per-user removes nor message deletes.
+Capture/hold happens after the SQLite deletion. Release/replay delivers the
+native snapshot even after source-message deletion and never restores reactions.
 
 Capture runs after native intent filtering: missing Guild Messages / Guild
 Message Reactions intent means no corresponding capture or delivery. Unrelated
