@@ -252,19 +252,20 @@ curl -X POST http://localhost:3000/_test/audit-log-responses \
   }'
 ```
 
-A successful creation returns `201` with the normalized configuration and
+A successful creation (or identical keyed retry) returns `201` with the normalized configuration and
 `id`, `remaining`, `consumed`, `state`, `expires_at`, and `consumed_at`.
 Initially `remaining` equals `times`, `consumed` is `0`, `state` is `armed`,
 and `consumed_at` is `null`. Credentials are never included in this response.
 
-| Field      | Contract                                                                                                                                                                                                                      |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bot_id`   | Required canonical, nonzero unsigned 64-bit snowflake string identifying a registered bot that owns the selected guild.                                                                                                       |
-| `guild_id` | Required canonical, nonzero unsigned 64-bit snowflake string identifying an existing guild owned by that bot.                                                                                                                 |
-| `query`    | Required object specifying the exact audit GET query. Supported keys: `action_type`, `limit`, `user_id`, `target_id`, `before`, `after`. Use `{}` to select a request with no query parameters.                               |
-| `entries`  | Required array of 0–100 objects. Each entry may contain only `id`, `action_type`, `user_id`, `target_id`, and `options`. Every field may be omitted; its value may be any JSON value, subject to the size/depth bounds below. |
-| `times`    | Optional integer from 1–100; defaults to 1.                                                                                                                                                                                   |
-| `ttl_ms`   | Required integer from 1–60000, measured from creation using the server's wall clock.                                                                                                                                          |
+| Field           | Contract                                                                                                                                                                                                                      |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ownership_key` | Optional opaque string of 1–128 ASCII letters, digits, underscores, or hyphens; see recoverable ownership below.                                                                                                              |
+| `bot_id`        | Required canonical, nonzero unsigned 64-bit snowflake string identifying a registered bot that owns the selected guild.                                                                                                       |
+| `guild_id`      | Required canonical, nonzero unsigned 64-bit snowflake string identifying an existing guild owned by that bot.                                                                                                                 |
+| `query`         | Required object specifying the exact audit GET query. Supported keys: `action_type`, `limit`, `user_id`, `target_id`, `before`, `after`. Use `{}` to select a request with no query parameters.                               |
+| `entries`       | Required array of 0–100 objects. Each entry may contain only `id`, `action_type`, `user_id`, `target_id`, and `options`. Every field may be omitted; its value may be any JSON value, subject to the size/depth bounds below. |
+| `times`         | Optional integer from 1–100; defaults to 1.                                                                                                                                                                                   |
+| `ttl_ms`        | Required integer from 1–60000, measured from creation using the server's wall clock.                                                                                                                                          |
 
 Control policy is validated independently of response contents. Query IDs use
 normal audit-query snowflake validation (including `"0"`); `action_type` must
@@ -309,6 +310,67 @@ selected `limit`. This explicit deviation is what allows negative attribution
 tests. Requests without a matching active control retain ordinary fixture
 filtering, ordering, pagination, referenced users, and validation.
 
+### Recoverable ownership and ambiguous POST outcomes
+
+For harnesses that need cleanup even if the POST response is lost, truncated,
+undecoded, or canceled, generate and retain a fresh unpredictable `ownership_key`
+(such as a UUID) **before** sending POST. Include it with the normal configuration.
+Keys are case-sensitive and unique for the entire SQLite database, across all
+bots, guilds, and selectors. Different databases have independent namespaces.
+Existing clients can omit the key and keep using the generated ID unchanged.
+
+Recover configuration, the generated ID, and current evidence with:
+
+```text
+GET /_test/audit-log-responses/by-key/<ownership_key>?bot_id=<bot_id>&guild_id=<guild_id>
+DELETE /_test/audit-log-responses/by-key/<ownership_key>?bot_id=<bot_id>&guild_id=<guild_id>
+```
+
+Both routes require exactly one canonical, nonzero `bot_id` and `guild_id`, and
+no additional query fields. Invalid keys/scopes or duplicate fields return `400`.
+GET returns `200` with the same configuration/evidence as ID-based inspection,
+including `ownership_key`, and `Cache-Control: no-store`. Unknown or closed keys
+and mismatched bot/guild scopes return `404`. Possession of the key and its
+original scope permits recovery and cleanup even if the guild's token changes
+or the guild/setup is removed; these are trusted test-control routes, with the
+same unauthenticated access model as the existing ID-based controls. Keys are
+ownership handles, not an authorization boundary. Do not share or reuse them
+between independent harness runs.
+
+An identical keyed POST retry returns `201` with the original ID and **current**
+counters, timestamps, and state, including expired/exhausted controls. It never
+extends TTL or resets consumption. Comparison uses normalized query values and
+`times` (including its default), exact TTL, and JSON entry values. Object key
+order is ignored at every nesting level; array order and missing versus null
+fields remain significant. A changed payload, bot/guild scope, or current exact
+guild-owner token returns `409`, without changing the original. Keyed controls
+can only be consumed by the exact token bound at creation, as well as the
+existing bot/guild/query checks. A fresh key can arm an expired/exhausted selector;
+retrying the old key continues to address only the old control. Validation,
+unknown-scope, and active-selector conflicts never reserve a new POST key.
+
+DELETE by key atomically removes only that key's configuration and consumption
+evidence and permanently closes the key. It returns `204` on repeated cleanup.
+For an unknown key with an existing valid bot/guild owner scope, it also returns
+`204` and reserves a closed key: **cleanup may arrive before the original POST**,
+and that delayed POST will return `409`. Unknown keys with nonexistent/mismatched
+owner scopes return `404` without reservation. A key already bound to a different
+bot/guild returns `404` and is untouched. Cleanup never deletes a different
+control selected by the same query, ordinary audit fixtures, messages, or guild
+state. If cleanup's response is lost, retry the same DELETE.
+
+Closure also applies to ID-based deletion, reset, guild deletion, and setup
+deletion. Later POSTs with a closed key return `409`, even after recreating the
+original guild/bot. Use a new key to arm again. SQLite retains only a small
+reservation (key, original bot/guild IDs, token hash, and a null control link)
+after cleanup; no entries, query, TTL, counters, or consumption timestamps remain.
+Reservations persist across restarts and are intentionally not TTL-pruned or
+removed by reset, because forgetting them would allow a delayed POST to recreate
+a cleaned control. They accumulate for the lifetime of the database; a fresh
+database starts a new ownership namespace. No guarantee survives replacing,
+restoring an older copy of, or manually purging the database. The server must
+remain reachable for cleanup retries; cancellation alone cannot undo a POST.
+
 ### Inspection, exhaustion, expiration, and cleanup
 
 - `GET /_test/audit-log-responses/:id` returns `200` with the configuration and
@@ -319,9 +381,9 @@ filtering, ordering, pagination, referenced users, and validation.
 - At `expires_at`, an unexhausted control becomes `expired` and cannot be
   consumed. Expiration leaves the remaining-use count and consumption evidence
   intact. Exhausted controls keep `state: "exhausted"` after their deadline.
-- Only one active control may select a given bot/guild/query. A duplicate returns
-  `409`; a different exact query may coexist. Exhaustion or expiration permits
-  rearming the same selector with a new control ID.
+- Only one active control may select a given bot/guild/query. A duplicate without
+  an identical ownership key returns `409`; a different exact query may coexist.
+  Exhaustion or expiration permits rearming the same selector with a new control ID.
 - `DELETE /_test/audit-log-responses/:id` returns `204`, removing both the control
   and evidence. Normal fixtures then become visible again. Unknown/removed IDs
   return `404` on inspection or deletion.
@@ -347,7 +409,8 @@ JSON, scope syntax, selector policy, entries structure, or bounds (`400`);
 `{ "message": "413: Payload Too Large", "code": 0 }` for an oversized raw body
 (`413`); `{ "message": "404: Not Found", "code": 0 }` for an unknown guild,
 unknown bot, or a bot that does not own the guild (`404`); and
-`{ "message": "409: Conflict", "code": 0 }` for an active duplicate (`409`).
+`{ "message": "409: Conflict", "code": 0 }` for an active selector duplicate,
+a conflicting keyed retry, or a closed ownership key (`409`).
 Inspection/deletion of an unknown control uses the same generic `404` body.
 These infrastructure endpoints require no authentication, like the existing
 test-control API; the selected Discord REST read still requires bot auth.

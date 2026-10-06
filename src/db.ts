@@ -234,6 +234,15 @@ export function initializeDatabase(dbPath: string): Database {
     CREATE INDEX IF NOT EXISTS test_audit_log_response_scope
       ON test_audit_log_responses(guild_id, bot_id, query);
 
+    CREATE TABLE IF NOT EXISTS test_audit_log_response_owners (
+      ownership_key TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL,
+      guild_id TEXT NOT NULL,
+      token_hash TEXT NOT NULL,
+      response_id TEXT UNIQUE REFERENCES test_audit_log_responses(id)
+        ON DELETE SET NULL
+    );
+
     CREATE TABLE IF NOT EXISTS channels (
       id                    TEXT PRIMARY KEY,
       guild_id              TEXT REFERENCES guilds(id) ON DELETE CASCADE,
