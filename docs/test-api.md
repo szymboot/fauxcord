@@ -126,7 +126,7 @@ current seed file format registers only bots.
 ## `DELETE /_test/setup/:token` — Completely delete an environment
 
 Deletes the Bot and all of its related data (Guilds, Channels, Messages, Webhooks).
-Guild-scoped audit-log fixtures, REST fault controls, and their consumption history are also removed.
+Guild-scoped audit-log fixtures, audit response controls, REST fault controls, and their consumption history are also removed.
 
 ```bash
 curl -X DELETE "http://localhost:3000/_test/setup/Bot%20mytoken"
@@ -151,7 +151,7 @@ curl -X POST http://localhost:3000/_test/reset \
 
 What gets deleted: messages, webhooks, invites, reactions, pins, embeds, attachments,
 retained attachment files and download metadata (including deleted-message uploads),
-audit-log fixtures, and all REST fault controls (including exhausted controls and consumption history).
+audit-log fixtures, audit response controls, and all REST fault controls (including exhausted controls and consumption history).
 
 ### Reset only a specific Bot's data
 
@@ -227,6 +227,130 @@ Channel deletion leaves historical audit entries intact. Bot-scoped reset follow
 the fixture's Guild, even when its actor is another Bot or a human.
 
 ---
+
+## `POST /_test/audit-log-responses` — Return deliberately unusual audit entries
+
+Use this separate control for client robustness tests that must **receive** an
+unexpected action type or malformed entry fields. The ordinary
+`POST /_test/guilds/:guildId/audit-logs` fixture still requires valid
+`MESSAGE_DELETE` entries and does not accept this data.
+
+```bash
+curl -X POST http://localhost:3000/_test/audit-log-responses \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "bot_id": "111111111111111111",
+    "guild_id": "222222222222222222",
+    "query": {"action_type": 72, "limit": 10},
+    "entries": [
+      {"id": "invalid", "action_type": 73, "options": null},
+      {"action_type": 72, "options": {"channel_id": 42, "count": "NaN"}},
+      {"id": null, "action_type": 72}
+    ],
+    "times": 1,
+    "ttl_ms": 60000
+  }'
+```
+
+A successful creation returns `201` with the normalized configuration and
+`id`, `remaining`, `consumed`, `state`, `expires_at`, and `consumed_at`.
+Initially `remaining` equals `times`, `consumed` is `0`, `state` is `armed`,
+and `consumed_at` is `null`. Credentials are never included in this response.
+
+| Field      | Contract                                                                                                                                                                                                                      |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bot_id`   | Required canonical, nonzero unsigned 64-bit snowflake string identifying a registered bot that owns the selected guild.                                                                                                       |
+| `guild_id` | Required canonical, nonzero unsigned 64-bit snowflake string identifying an existing guild owned by that bot.                                                                                                                 |
+| `query`    | Required object specifying the exact audit GET query. Supported keys: `action_type`, `limit`, `user_id`, `target_id`, `before`, `after`. Use `{}` to select a request with no query parameters.                               |
+| `entries`  | Required array of 0–100 objects. Each entry may contain only `id`, `action_type`, `user_id`, `target_id`, and `options`. Every field may be omitted; its value may be any JSON value, subject to the size/depth bounds below. |
+| `times`    | Optional integer from 1–100; defaults to 1.                                                                                                                                                                                   |
+| `ttl_ms`   | Required integer from 1–60000, measured from creation using the server's wall clock.                                                                                                                                          |
+
+Control policy is validated independently of response contents. Query IDs use
+normal audit-query snowflake validation (including `"0"`); `action_type` must
+be a supported Discord action and `limit` must be 1–100. `action_type` and
+`limit` accept canonical decimal strings or integer numbers and normalize to
+numbers. Query IDs must be strings. Unknown fields in the control, query, or
+entry object are rejected. Entry values deliberately bypass audit-fixture
+validation: IDs can be absent, null, numeric, or noncanonical strings;
+`action_type` can be unexpected; `options`, `channel_id`, and `count` can be
+missing or have incorrect types or values. Nested option objects may have
+arbitrary keys. No referenced user or channel registration is required for
+these intentionally unusual values.
+
+The entire POST body is limited to 65536 UTF-8 bytes; its parsed, compact JSON
+representation must also fit that bound. Entry values have at most ten nested
+levels below the entry object (direct fields are level one). Non-finite numeric
+values are rejected. This is an audit-entry control, not an arbitrary HTTP
+response mechanism: it cannot change status codes, headers, companion lists,
+other REST resources, or the top-level response shape.
+
+The selector applies only to the owning bot's authenticated
+`GET /guilds/:guildId/audit-logs`, across `/api/v10`, `/api`, and bare prefixes.
+Query parameter order does not matter. Absent fields remain absent: `{}` does
+not match `?limit=50`, and `{ "action_type": 72 }` does not match an unfiltered
+read. All query values must match after normalization. Extra parameters,
+repeated parameters (even with equal values), and invalid queries never consume
+this control. Such reads follow the existing endpoint's normal query behavior.
+Other bots, guilds, HTTP methods (including `HEAD`), and routes never consume it; existing
+unauthenticated and missing-access errors still apply. Ownership is checked
+again at consumption. Existing REST fault controls run first: a faulted request
+does not consume an audit response control.
+
+On each matching read, Fauxcord atomically decrements `remaining`, increments
+`consumed`, and records the latest consumption time in `consumed_at`. It returns
+HTTP `200` with `audit_log_entries` exactly equal to `entries`, preserving order,
+JSON values, and absent fields. The companion arrays (`users`, `integrations`,
+`webhooks`, `guild_scheduled_events`, `threads`, `application_commands`, and
+`auto_moderation_rules`) are empty. Deliberately unusual entries bypass **all**
+action/user/target/cursor filtering, ordering, and page-size truncation: even
+`action_type=72` can return action `73`, and the configured array can exceed the
+selected `limit`. This explicit deviation is what allows negative attribution
+tests. Requests without a matching active control retain ordinary fixture
+filtering, ordering, pagination, referenced users, and validation.
+
+### Inspection, exhaustion, expiration, and cleanup
+
+- `GET /_test/audit-log-responses/:id` returns `200` with the configuration and
+  current counters, with `Cache-Control: no-store`. Consumption is server-side
+  request evidence, not proof that a client received or processed the body.
+- The last permitted read changes `state` to `exhausted`. Later reads use the
+  normal audit response. Concurrent reads cannot exceed `times`.
+- At `expires_at`, an unexhausted control becomes `expired` and cannot be
+  consumed. Expiration leaves the remaining-use count and consumption evidence
+  intact. Exhausted controls keep `state: "exhausted"` after their deadline.
+- Only one active control may select a given bot/guild/query. A duplicate returns
+  `409`; a different exact query may coexist. Exhaustion or expiration permits
+  rearming the same selector with a new control ID.
+- `DELETE /_test/audit-log-responses/:id` returns `204`, removing both the control
+  and evidence. Normal fixtures then become visible again. Unknown/removed IDs
+  return `404` on inspection or deletion.
+- `/_test/reset` removes all controls and evidence, including exhausted and
+  expired controls, and ordinary audit fixtures. A nonempty `token` restricts
+  cleanup to that bot's guilds; an omitted/empty token clears all. Other bots'
+  controls survive a scoped reset.
+- Guild deletion and `DELETE /_test/setup/:token` remove scoped controls and
+  evidence through database cascades. Channel deletion does not remove this
+  guild-scoped control or historical audit fixtures.
+
+Controls and counters persist in SQLite across server restarts, with the
+original absolute expiration deadline. There is no scheduled dispatch or client
+clock synchronization; retained evidence persists until explicit cleanup.
+Remove controls in harness cleanup. Creating fixtures or creating, reading,
+consuming, or deleting response controls does not delete messages or emit
+Gateway events. The integration tests exercise real HTTP, SQLite state, and an
+identified WebSocket Gateway session. Handler scheduling, exact application
+clock boundaries, and the bot application's Harness are outside this API.
+
+Creation errors use `{ "message": "400: Bad Request", "code": 0 }` for invalid
+JSON, scope syntax, selector policy, entries structure, or bounds (`400`);
+`{ "message": "413: Payload Too Large", "code": 0 }` for an oversized raw body
+(`413`); `{ "message": "404: Not Found", "code": 0 }` for an unknown guild,
+unknown bot, or a bot that does not own the guild (`404`); and
+`{ "message": "409: Conflict", "code": 0 }` for an active duplicate (`409`).
+Inspection/deletion of an unknown control uses the same generic `404` body.
+These infrastructure endpoints require no authentication, like the existing
+test-control API; the selected Discord REST read still requires bot auth.
 
 ## `POST /_test/rest-faults` — Fail bounded, exact REST attempts
 

@@ -218,6 +218,22 @@ export function initializeDatabase(dbPath: string): Database {
     CREATE INDEX IF NOT EXISTS guild_audit_log_entries_guild
       ON guild_audit_log_entries(guild_id);
 
+    CREATE TABLE IF NOT EXISTS test_audit_log_responses (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+      bot_id TEXT NOT NULL,
+      query TEXT NOT NULL,
+      entries TEXT NOT NULL,
+      times INTEGER NOT NULL,
+      ttl_ms INTEGER NOT NULL,
+      remaining INTEGER NOT NULL,
+      consumed INTEGER NOT NULL DEFAULT 0,
+      expires_at TEXT NOT NULL,
+      consumed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS test_audit_log_response_scope
+      ON test_audit_log_responses(guild_id, bot_id, query);
+
     CREATE TABLE IF NOT EXISTS channels (
       id                    TEXT PRIMARY KEY,
       guild_id              TEXT REFERENCES guilds(id) ON DELETE CASCADE,
