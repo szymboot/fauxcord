@@ -851,6 +851,97 @@ message lifetime.
 
 ---
 
+## `POST /_test/channels/:channelId/messages/:messageId/reactions` — Add a human reaction
+
+Adds a persisted normal reaction as an existing registered human. This test
+control requires no authentication, like the other `/_test/*` routes. Register
+users with `POST /_test/users`, then join each reactor through
+`POST /_test/guilds/:guildId/members/:userId` before adding reactions. The source
+message must already exist in a guild text (`type: 0`) or announcement
+(`type: 5`) channel; it may be authored by a bot, human, or webhook.
+
+```bash
+curl -X POST http://localhost:3000/_test/channels/333333333333333333/messages/MESSAGE_ID/reactions \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "555555555555555555", "emoji": "🐝"}'
+```
+
+The JSON object requires a nonempty string `user_id` and an `emoji` string
+containing exactly one Unicode RGI emoji sequence supported by the pinned Node
+runtime. Examples include `🐝`, `👍🏽`, `👩‍💻`, `🇵🇱`, `1️⃣`, and `❤️`. Send the
+literal emoji in JSON; do not URL-encode it. Other fields are ignored. Custom
+emoji IDs, `name:id` strings, arbitrary text, multiple emoji in one string, and
+super reactions are unsupported. DMs, group DMs, threads, voice, forum, and other
+channel types are outside this producer's scope. Ephemeral messages are excluded.
+
+Returns `204 No Content`, including repeated adds of the same user/message/emoji.
+The shared reaction service inserts one row per unique tuple; a duplicate adds
+no count and emits no event. Distinct humans and distinct emoji have independent
+rows. The control never registers a bot, changes a user's profile or `bot: false`,
+creates membership, or changes roles, nicknames, or membership dates. Membership
+in the source guild is required; membership in another guild does not qualify.
+This fixture does not evaluate channel permission overwrites or user eligibility
+rules implemented by your bot.
+
+Ordinary `GET /channels/:channelId/messages/:messageId/reactions/:emoji` reads
+expose the same registered human with `bot: false`. Single-message and message
+history reads include the persisted reaction counts. These REST routes still
+require normal bot authentication and work under `/api/v10`, `/api`, and bare
+paths. The ordinary `PUT .../reactions/:emoji/@me` continues to react as its
+actual authenticated bot; no human token or impersonation mode is introduced.
+
+Connect the guild's setup bot and wait for Gateway READY before adding reactions.
+Sessions need the Guild Message Reactions intent (`1024`). Each new row emits
+native `MESSAGE_REACTION_ADD` through the existing bus, dispatch, capture and
+resume pipeline, containing `user_id`, `guild_id`, `channel_id`, `message_id`,
+`emoji: {"id": null, "name": "🐝"}`, the existing reactor's full `member` data,
+`message_author_id`, `burst: false`, `type: 0`, and `burst_colors: []`. Delivery
+is limited to that guild's setup token and bot ID in the originating database,
+including all matching sessions with the intent. Raw and `Bot `-prefixed IDENTIFY
+tokens work. Another setup sharing the bot ID does not receive the event.
+Persistence succeeds without a connected session; delivery does not wait for an
+acknowledgement and is not retried as a new add when the reaction already exists.
+
+Rejected requests produce no reaction row, membership changes or add event:
+
+| Status / code   | Meaning                                                                                                                                      |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400` / `50035` | Malformed/missing JSON object, invalid `user_id`, or invalid/unsupported `emoji`. Field details appear in `errors.user_id` / `errors.emoji`. |
+| `404` / `10003` | Unknown/deleted channel.                                                                                                                     |
+| `404` / `10008` | Unknown/deleted/ephemeral message, or message belongs to another channel.                                                                    |
+| `404` / `10013` | Unknown user.                                                                                                                                |
+| `404` / `10007` | Human is not a member of the source guild.                                                                                                   |
+| `400` / `0`     | Actor is a bot, or channel/setup scope is unsupported.                                                                                       |
+| `500` / `0`     | Reaction persistence failed; no add was emitted.                                                                                             |
+
+Validation runs before target resolution. Target resolution checks channel and
+supported guild/setup scope, message, user, bot flag, then membership. The
+operation installs no pending producer and needs no fixture-specific cleanup.
+Ordinary single-user removal, emoji clear and message reaction clear remove
+these rows. Re-adding a removed reaction produces a new add event. Reaction-clear
+routes retain their current behavior and do not gain new Gateway producers.
+Message/channel/guild/setup deletion cascades reaction removal. Full
+`POST /_test/reset` removes all message reactions. A token reset removes reactions
+only when their source message is deleted by the existing reset policy: messages
+authored by that token are deleted; retained human messages and their reactions
+remain. Registered human profiles survive these controls; guild memberships
+survive resets and are removed with their guild.
+
+Existing Gateway event controls can capture, hold, release and replay the native
+human add. Holding affects delivery, not persistence or REST reads. Captures keep
+the original human profile and member snapshot even after profile edits, reaction
+removal or source-message deletion. Release/replay never recreate a reaction or
+message. Default `sequence: "new"` advances the session sequence; opt-in
+`sequence: "original"` uses the captured sequence under the existing policy.
+Token/full reset, setup/guild deletion, session replacement/disconnect,
+cancellation and expiry invalidate captures as before. A guild-scoped capture can
+survive channel or message deletion while its guild/session scope remains valid.
+Arm a fresh control after reset. This API supplies live fixture state for a future
+Harness wrapper; it neither implements that wrapper nor guarantees bot-side
+statistics or cache invalidation, which must be asserted through your bot.
+
+---
+
 ## `POST /_test/interactions` — Simulate an interaction
 
 Generates a pseudo-interaction against a registered command (global or
@@ -1161,7 +1252,8 @@ the newly resolved session.
 `MESSAGE_REACTION_REMOVE_ALL`, and `MESSAGE_REACTION_REMOVE_EMOJI`. Only events
 that the native producer actually emits are captured. Message creation (including
 human messages via `POST /_test/channels/:channelId/messages`), single deletion,
-native bulk deletion through the REST endpoint below, reaction addition, and single
+native bulk deletion through the REST endpoint below, reaction addition (including
+human additions through the control above), and single
 reaction removal have producers. Reaction-clear selectors are ready for
 separately implemented native events; this feature adds no reaction-clear producer.
 

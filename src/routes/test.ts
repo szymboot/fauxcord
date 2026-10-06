@@ -31,6 +31,7 @@ import {
   prepareMemberDateFixture,
   injectTestMessage,
   editTestMessage,
+  injectTestReaction,
   createTestInteraction,
 } from '../services/test-control'
 import type {
@@ -44,6 +45,7 @@ import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { validateGuildMemberUpdate } from '../validators/guild'
 import { validateMemberDateFixture } from '../validators/member-dates'
 import { validateRestFault } from '../validators/rest-fault'
+import { validateTestReaction } from '../validators/test-reaction'
 import { validateMessageCreate } from '../validators/message'
 import {
   validateMessageStickers,
@@ -534,6 +536,81 @@ export function createTestRoutes(
       }
     }
   })
+
+  // POST /_test/channels/:channelId/messages/:messageId/reactions — Human add
+  app.post(
+    '/_test/channels/:channelId/messages/:messageId/reactions',
+    async (c) => {
+      const { channelId, messageId } = c.req.param()
+      const payload = await parseJsonBody(c)
+      const errors = validateTestReaction(payload)
+      if (Object.keys(errors).length > 0) {
+        return c.json(validationError(errors).body, 400)
+      }
+      // The validator above guarantees both fields are strings.
+      const result = injectTestReaction(
+        db,
+        channelId,
+        messageId,
+        payload.user_id as string,
+        payload.emoji as string
+      )
+      switch (result) {
+        case 'OK': {
+          return c.body(null, 204)
+        }
+        case 'UNKNOWN_CHANNEL': {
+          return c.json(
+            discordError(
+              DiscordErrorCode.UNKNOWN_CHANNEL,
+              'Unknown Channel',
+              404
+            ).body,
+            404
+          )
+        }
+        case 'UNKNOWN_MESSAGE': {
+          return c.json(
+            discordError(
+              DiscordErrorCode.UNKNOWN_MESSAGE,
+              'Unknown Message',
+              404
+            ).body,
+            404
+          )
+        }
+        case 'UNKNOWN_USER': {
+          return c.json(
+            discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404)
+              .body,
+            404
+          )
+        }
+        case 'UNKNOWN_MEMBER': {
+          return c.json(
+            discordError(DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member', 404)
+              .body,
+            404
+          )
+        }
+        case 'BOT_USER': {
+          return c.json({ message: 'User must not be a bot', code: 0 }, 400)
+        }
+        case 'UNSUPPORTED_SCOPE': {
+          return c.json(
+            {
+              message: 'Reaction requires a guild text or announcement channel',
+              code: 0,
+            },
+            400
+          )
+        }
+        case 'WRITE_FAILED': {
+          return c.json({ message: 'Internal Server Error', code: 0 }, 500)
+        }
+      }
+    }
+  )
 
   // GET /_test/interactions/:interactionId/callback — Read accepted callback state.
   app.get('/_test/interactions/:interactionId/callback', (c) => {

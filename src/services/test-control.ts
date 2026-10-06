@@ -27,6 +27,7 @@ import {
   getGuildIdForChannel,
   type MessageObject,
 } from './messages'
+import { addReaction } from './reactions'
 import { createInteraction } from './interactions'
 import type { InteractionObject } from './interactions'
 
@@ -708,6 +709,64 @@ export function editTestMessage(
   return message.author.bot || message.webhook_id
     ? 'BOT_AUTHOR'
     : (updateMessage(db, messageId, { content }, baseUrl) ?? 'UNKNOWN_MESSAGE')
+}
+
+/**
+ * Adds a normal Unicode reaction as an existing human guild member. Validates
+ * all targets before using the ordinary persistence and reaction dispatch path.
+ * Membership is required and never created or modified by this operation.
+ * @param db - Database
+ * @param channelId - Existing guild text or announcement channel
+ * @param messageId - Existing public message in that channel
+ * @param userId - Registered non-bot member of the channel's guild
+ * @param emoji - Validated single Unicode emoji sequence
+ * @returns Success or a scoped error without writes or events on rejection
+ */
+export function injectTestReaction(
+  db: Database,
+  channelId: string,
+  messageId: string,
+  userId: string,
+  emoji: string
+):
+  | 'OK'
+  | 'UNKNOWN_CHANNEL'
+  | 'UNKNOWN_MESSAGE'
+  | 'UNKNOWN_USER'
+  | 'UNKNOWN_MEMBER'
+  | 'BOT_USER'
+  | 'UNSUPPORTED_SCOPE'
+  | 'WRITE_FAILED' {
+  const channel = getChannel(db, channelId)
+  if (!channel) return 'UNKNOWN_CHANNEL'
+  if (!channel.guild_id || ![0, 5].includes(channel.type)) {
+    return 'UNSUPPORTED_SCOPE'
+  }
+  const scope = db
+    .prepare(
+      'SELECT b.user_id AS botId, g.bot_token AS token FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ?'
+    )
+    .get(channel.guild_id) as { botId: string; token: string } | undefined
+  if (!scope) return 'UNSUPPORTED_SCOPE'
+  const message = db
+    .prepare(
+      'SELECT channel_id, author_id FROM messages WHERE id = ? AND (flags & 64) = 0'
+    )
+    .get(messageId) as { channel_id: string; author_id: string } | undefined
+  if (message?.channel_id !== channelId) return 'UNKNOWN_MESSAGE'
+  const actor = db.prepare('SELECT bot FROM users WHERE id = ?').get(userId) as
+    { bot: number } | undefined
+  if (!actor) return 'UNKNOWN_USER'
+  if (actor.bot !== 0) return 'BOT_USER'
+  const member = getGuildMember(db, channel.guild_id, userId)
+  if (!member) return 'UNKNOWN_MEMBER'
+  return addReaction(db, messageId, userId, emoji, {
+    member: { ...member },
+    messageAuthorId: message.author_id,
+    scope: { ...scope, db },
+  })
+    ? 'OK'
+    : 'WRITE_FAILED'
 }
 
 /** Request body accepted by POST /_test/interactions */

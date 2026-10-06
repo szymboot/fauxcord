@@ -6,7 +6,7 @@
 
 import type { Database } from '../db'
 import type { UserRow } from './messages'
-import { gatewayBus } from '../gateway/bus'
+import { gatewayBus, type GatewayBusEvents } from '../gateway/bus'
 import { getGuildIdForChannel } from './messages'
 
 /**
@@ -31,13 +31,18 @@ function getChannelIdForMessage(
  * @param messageId - Message ID
  * @param userId - User ID
  * @param emoji - Emoji
+ * @param dispatch - Optional member snapshot and delivery scope for human fixtures
  * @returns true on successful addition
  */
 export function addReaction(
   db: Database,
   messageId: string,
   userId: string,
-  emoji: string
+  emoji: string,
+  dispatch?: Pick<
+    GatewayBusEvents['message.reaction.add'],
+    'scope' | 'member' | 'messageAuthorId'
+  >
 ): boolean {
   let inserted: boolean
   try {
@@ -65,6 +70,7 @@ export function addReaction(
         messageId,
         userId,
         emoji: { id: null, name: emoji },
+        ...dispatch,
       })
     }
   }
