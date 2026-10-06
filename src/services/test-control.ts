@@ -50,6 +50,8 @@ export interface SetupGuildRequest {
   icon?: string | null
   /** Registered non-bot owner; defaults to the setup bot when omitted. */
   owner_id?: string
+  /** Boost tier from 0 to 3; omission preserves an existing tier. */
+  premium_tier?: 0 | 1 | 2 | 3
   channels?: SetupChannelRequest[]
 }
 
@@ -78,7 +80,8 @@ export interface SetupResponse {
  * @returns Setup result
  * @throws Error with CONFLICT for duplicate tokens, INVALID_OWNER_ID for
  * malformed owner IDs, INVALID_GUILD_ICON for malformed icon hashes,
- * UNKNOWN_USER for missing owners, or BOT_OWNER for bots
+ * INVALID_GUILD_PREMIUM_TIER for invalid boost tiers, UNKNOWN_USER for
+ * missing owners, or BOT_OWNER for bots
  */
 export function setupTestEnvironment(
   db: Database,
@@ -108,6 +111,15 @@ export function setupTestEnvironment(
     // Validate before registering the bot so a human owner cannot be promoted
     // to a bot when its ID is also used as the setup account.
     for (const guildReq of guildRequests) {
+      if (
+        guildReq.premium_tier !== undefined &&
+        (typeof guildReq.premium_tier !== 'number' ||
+          !Number.isSafeInteger(guildReq.premium_tier) ||
+          guildReq.premium_tier < 0 ||
+          guildReq.premium_tier > 3)
+      ) {
+        throw new Error('INVALID_GUILD_PREMIUM_TIER')
+      }
       if (
         guildReq.icon !== undefined &&
         guildReq.icon !== null &&
@@ -173,19 +185,22 @@ export function setupTestEnvironment(
 
       // Create the guild (if the same ID still exists, overwrite its contents and reuse it = idempotent)
       db.prepare(
-        `INSERT INTO guilds (id, name, icon, owner_id, bot_token) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO guilds (id, name, icon, premium_tier, owner_id, bot_token) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            icon = CASE WHEN ? THEN excluded.icon ELSE guilds.icon END,
+           premium_tier = CASE WHEN ? THEN excluded.premium_tier ELSE guilds.premium_tier END,
            owner_id = excluded.owner_id,
            bot_token = excluded.bot_token`
       ).run(
         guildId,
         guildReq.name,
         guildReq.icon ?? null,
+        guildReq.premium_tier ?? 0,
         ownerId,
         request.token,
-        guildReq.icon === undefined ? 0 : 1
+        guildReq.icon === undefined ? 0 : 1,
+        guildReq.premium_tier === undefined ? 0 : 1
       )
 
       pendingEvents.push(() => {

@@ -184,6 +184,18 @@ export function createTestRoutes(
       if (err instanceof Error && err.message === 'CONFLICT') {
         return c.json({ message: '409: Conflict', code: 0 }, 409)
       }
+      if (
+        err instanceof Error &&
+        err.message === 'INVALID_GUILD_PREMIUM_TIER'
+      ) {
+        return c.json(
+          {
+            message: 'premium_tier must be an integer between 0 and 3',
+            code: 0,
+          },
+          400
+        )
+      }
       if (err instanceof Error && err.message === 'INVALID_GUILD_ICON') {
         return c.json(
           { message: 'icon must be a non-empty hash string or null', code: 0 },
