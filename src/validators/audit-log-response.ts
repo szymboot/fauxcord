@@ -12,12 +12,51 @@ export type AuditResponseValue =
 
 /** Explicit bot/guild/query policy, separate from deliberately unusual entries. */
 export interface AuditLogResponseRequest {
+  ownership_key?: string
   bot_id: string
   guild_id: string
   query: AuditLogQuery
   entries: Record<string, AuditResponseValue>[]
   times: number
   ttl_ms: number
+}
+
+/** A key address includes the caller's expected immutable bot/guild scope. */
+export interface AuditResponseOwnership {
+  ownership_key: string
+  bot_id: string
+  guild_id: string
+}
+
+/** Restricts ownership keys to bounded, URL-safe opaque strings. */
+export function isAuditOwnershipKey(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 128 &&
+    !/[^A-Za-z0-9_-]/.test(value)
+  )
+}
+
+/** Validates exact ownership query fields without collapsing duplicate values. */
+export function validateAuditResponseOwnership(
+  key: string,
+  search: URLSearchParams
+): AuditResponseOwnership | undefined {
+  const bot = search.get('bot_id')
+  const guild = search.get('guild_id')
+  return bot !== '0' &&
+    guild !== '0' &&
+    search.keys().toArray().length === 2 &&
+    search.getAll('bot_id').length === 1 &&
+    search.getAll('guild_id').length === 1 &&
+    isAuditOwnershipKey(key) &&
+    isAuditSnowflake(bot) &&
+    bot.trim() === bot &&
+    isAuditSnowflake(guild) &&
+    guild.trim() === guild
+    ? { ownership_key: key, bot_id: bot, guild_id: guild }
+    : undefined
 }
 
 /** Checks JSON structure with a bounded nesting depth, without audit validation. */
@@ -105,13 +144,24 @@ export function validateAuditLogResponse(
     ) ||
     Object.keys(body).some(
       (key) =>
-        !['bot_id', 'guild_id', 'query', 'entries', 'times', 'ttl_ms'].includes(
-          key
-        )
+        ![
+          'ownership_key',
+          'bot_id',
+          'guild_id',
+          'query',
+          'entries',
+          'times',
+          'ttl_ms',
+        ].includes(key)
     ) ||
-    Buffer.byteLength(JSON.stringify(body)) > 65_536
+    Buffer.byteLength(JSON.stringify(body)) > 65_536 ||
+    (body.ownership_key !== undefined &&
+      !isAuditOwnershipKey(body.ownership_key))
     ? undefined
     : {
+        ...(body.ownership_key !== undefined && {
+          ownership_key: body.ownership_key,
+        }),
         bot_id: body.bot_id,
         guild_id: body.guild_id,
         query,

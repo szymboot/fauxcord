@@ -1,11 +1,16 @@
 import { Hono } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import type { Database } from '../db'
-import { validateAuditLogResponse } from '../validators/audit-log-response'
+import {
+  validateAuditLogResponse,
+  validateAuditResponseOwnership,
+} from '../validators/audit-log-response'
 import {
   createAuditLogResponse,
   getAuditLogResponse,
   deleteAuditLogResponse,
+  getAuditLogResponseByKey,
+  deleteAuditLogResponseByKey,
 } from '../services/audit-log-responses'
 
 /** Creates bounded audit-only response controls outside Discord's fixture API. */
@@ -31,6 +36,28 @@ export function createAuditLogResponseRoutes(db: Database): Hono {
         : c.json(result, 201)
     }
   )
+  app.get('/_test/audit-log-responses/by-key/:key', (c) => {
+    c.header('Cache-Control', 'no-store')
+    const scope = validateAuditResponseOwnership(
+      c.req.param('key'),
+      new URL(c.req.url).searchParams
+    )
+    if (!scope) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    const result = getAuditLogResponseByKey(db, scope)
+    return result
+      ? c.json(result)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
+  app.delete('/_test/audit-log-responses/by-key/:key', (c) => {
+    const scope = validateAuditResponseOwnership(
+      c.req.param('key'),
+      new URL(c.req.url).searchParams
+    )
+    if (!scope) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    return deleteAuditLogResponseByKey(db, scope)
+      ? c.body(null, 204)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
   app.get('/_test/audit-log-responses/:id', (c) => {
     c.header('Cache-Control', 'no-store')
     const result = getAuditLogResponse(db, c.req.param('id'))
