@@ -435,6 +435,55 @@ describe('GUILD_CREATE dispatch after READY (integration)', () => {
     })
   })
 
+  it.each([0, 1, 2, 3, undefined])(
+    'dispatches fixture premium_tier=%s on initial connection and reconnect with IDENTIFY',
+    async (premiumTier) => {
+      const server = await createTestGatewayServer()
+      close = server.close
+      const httpUrl = server.url.replace('ws://', 'http://')
+      const guildId = '222222222222222222'
+      const setup = await fetch(`${httpUrl}/_test/setup`, {
+        method: 'POST',
+        body: JSON.stringify({
+          token: 'Bot premium-gateway',
+          guilds: [
+            { id: guildId, name: 'Premium Guild', premium_tier: premiumTier },
+          ],
+        }),
+      })
+      expect(setup.status).toBe(201)
+
+      for (let connection = 0; connection < 2; connection++) {
+        ownerSocket = new WebSocket(server.url)
+        const nextMessage = createMessageReader(ownerSocket)
+        const hello = await nextMessage()
+        expect(hello.op).toBe(GatewayOp.Hello)
+        ownerSocket.send(
+          JSON.stringify({
+            op: GatewayOp.Identify,
+            d: { token: 'premium-gateway', intents: GatewayIntentBits.Guilds },
+          })
+        )
+        const ready = await nextMessage()
+        expect(ready.t).toBe('READY')
+        const guildCreate = await nextMessage()
+        expect(guildCreate.t).toBe('GUILD_CREATE')
+        expect(guildCreate.d).toMatchObject({
+          id: guildId,
+          premium_tier: premiumTier ?? 0,
+        })
+        const closed = new Promise<void>((resolve) => {
+          ownerSocket?.once('close', () => {
+            resolve()
+          })
+        })
+        ownerSocket.close()
+        await closed
+        ownerSocket = undefined
+      }
+    }
+  )
+
   it('dispatches explicit human owners and default bot owners with their own member identities', async () => {
     const server = await createTestGatewayServer()
     close = server.close

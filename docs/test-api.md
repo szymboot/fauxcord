@@ -35,21 +35,22 @@ curl -X POST http://localhost:3000/_test/setup \
 
 **Fields**
 
-| Field                      | Required | Description                                           |
-| -------------------------- | -------- | ----------------------------------------------------- |
-| `token`                    | ✅       | Bot token (including the `"Bot "` prefix)             |
-| `user.id`                  | —        | User ID (a Snowflake is auto-generated if omitted)    |
-| `user.global_name`         | —        | Global display name (string or null; default: null)   |
-| `user.username`            | —        | Username (default: `"MockBot"`)                       |
-| `guilds`                   | —        | Array of Guilds to create                             |
-| `guilds[].id`              | —        | Guild ID (auto-generated if omitted)                  |
-| `guilds[].name`            | ✅       | Guild name                                            |
-| `guilds[].icon`            | —        | Opaque icon hash string or null; default: null        |
-| `guilds[].owner_id`        | —        | Registered non-bot user ID; defaults to the setup bot |
-| `guilds[].channels`        | —        | Array of channels to create                           |
-| `guilds[].channels[].id`   | —        | Channel ID (auto-generated if omitted)                |
-| `guilds[].channels[].name` | ✅       | Channel name                                          |
-| `guilds[].channels[].type` | —        | Channel type (`0`: text, default: `0`)                |
+| Field                      | Required | Description                                              |
+| -------------------------- | -------- | -------------------------------------------------------- |
+| `token`                    | ✅       | Bot token (including the `"Bot "` prefix)                |
+| `user.id`                  | —        | User ID (a Snowflake is auto-generated if omitted)       |
+| `user.global_name`         | —        | Global display name (string or null; default: null)      |
+| `user.username`            | —        | Username (default: `"MockBot"`)                          |
+| `guilds`                   | —        | Array of Guilds to create                                |
+| `guilds[].id`              | —        | Guild ID (auto-generated if omitted)                     |
+| `guilds[].name`            | ✅       | Guild name                                               |
+| `guilds[].icon`            | —        | Opaque icon hash string or null; default: null           |
+| `guilds[].owner_id`        | —        | Registered non-bot user ID; defaults to the setup bot    |
+| `guilds[].premium_tier`    | —        | Integer boost tier (`0`, `1`, `2`, or `3`); default: `0` |
+| `guilds[].channels`        | —        | Array of channels to create                              |
+| `guilds[].channels[].id`   | —        | Channel ID (auto-generated if omitted)                   |
+| `guilds[].channels[].name` | ✅       | Channel name                                             |
+| `guilds[].channels[].type` | —        | Channel type (`0`: text, default: `0`)                   |
 
 **Response**: The setup result (including any auto-generated IDs)
 
@@ -68,6 +69,21 @@ clears the icon; a string replaces it. Strings must be non-empty and have no
 surrounding whitespace. Other values return `400`, with no partial fixture
 state or Gateway events. Other guilds are unaffected. `SEED_FILE` accepts the
 same field and validation through the shared setup service.
+
+To prepare a boosted guild before connecting a client, pass
+`guilds[].premium_tier`, for example `"premium_tier": 2`. The stored tier appears
+in guild REST responses and Gateway `GUILD_CREATE` on initial connection and
+reconnect with IDENTIFY. This fixture sets the tier only; other premium fields
+(such as the subscription count) retain their existing mock defaults.
+
+Omitting `premium_tier` leaves new guilds at `0` and preserves the current tier
+when setup reuses an existing guild ID under a different token. An explicit
+integer from `0` through `3` replaces it, including `0` to reset the tier. Null,
+strings, booleans, fractions, and out-of-range numbers return `400` with no
+partial fixture state or Gateway events. Other guilds are unaffected, and
+`/_test/reset` retains the stored tier. `SEED_FILE` accepts the same field and
+validation through the shared setup service. The ordinary Discord Modify Guild
+endpoint does not change the boost tier.
 
 To create a guild owned by a human, first register that user through
 `POST /_test/users`, then pass its returned ID as `guilds[].owner_id`:
