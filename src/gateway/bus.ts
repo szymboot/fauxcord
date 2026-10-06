@@ -46,7 +46,11 @@ export interface GatewayBusEvents {
   }
   'guild.create': { guild: Record<string, unknown> }
   'channel.create': { channel: Record<string, unknown> }
-  'channel.update': { channel: Record<string, unknown> }
+  'channel.update': {
+    channel: Record<string, unknown>
+    /** Optional delivery scope for permission overwrite mutations. */
+    scope?: { db: Database; botId: string; token: string }
+  }
   'channel.delete': { channel: Record<string, unknown> }
   'guild.member.add': { guildId: string; member: Record<string, unknown> }
   'guild.member.update': { guildId: string; member: Record<string, unknown> }

@@ -1326,6 +1326,44 @@ ID); all-missing requests return `204` without an event. Discord documents
 missing-ID acceptance but does not specify its event contents for these cases;
 this deterministic behavior lets tests distinguish actual deletions from no-ops.
 
+## Change channel visibility through Discord REST
+
+Use `PUT /api/v10/channels/:channelId/permissions/:overwriteId` with the bot's
+`Authorization` header to add or replace a role (`type: 0`) or member (`type: 1`)
+overwrite. `DELETE` at the same path removes it. These endpoints also accept the
+`/api` and bare prefixes and return an empty `204` response on success.
+
+For example, deny `VIEW_CHANNEL` to `@everyone` (whose role ID is the guild ID)
+to model a private channel:
+
+```bash
+curl -X PUT http://localhost:3000/api/v10/channels/333333333333333333/permissions/222222222222222222 \
+  -H 'Authorization: Bot testtoken' \
+  -H 'Content-Type: application/json' \
+  -d '{"type":0,"allow":"0","deny":"1024"}'
+```
+
+Connect the guild's registered bot with the Guilds intent and consume READY and
+initial GUILD_CREATE before making changes. Each successful PUT and each DELETE
+that removes an overwrite queues one native `CHANNEL_UPDATE` with the complete
+current channel object, including `guild_id` and all remaining
+`permission_overwrites`. The payload matches `GET /channels/:channelId` and lets
+Discord libraries refresh their channel permission caches. Omitted `allow` or
+`deny` values default to `"0"`; replacing an overwrite does not duplicate it.
+Deleting that guild overwrite restores the channel's fixture permissions.
+
+Delivery uses ordinary Gateway sequencing and replay buffers. Only sessions of
+that guild's registered bot in this database using the same setup token and the
+Guilds intent receive these overwrite updates. Other bots, databases, and channels
+retain their state. A missing overwrite DELETE returns `204` with
+no event. Invalid payloads (`400`), unknown channels (`404`), and rejected
+authentication (`401`) change no data and queue no update.
+
+Emulator limitations: Fauxcord does not enforce `MANAGE_ROLES` or channel
+visibility permissions. REST authentication permits access across guild setups;
+Gateway delivery follows the guild's registered bot rather than the request's
+bot token. Permission overwrite dispatches apply to guild channels.
+
 ## REST pagination page holds
 
 Use these controls to pause the **next matching authenticated GET** for a

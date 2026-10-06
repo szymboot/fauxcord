@@ -244,45 +244,6 @@ export function getChannelOverwritesForChannels(
 }
 
 /**
- * Creates or updates a permission overwrite for a channel (upsert).
- * @param db - Database
- * @param channelId - Channel ID
- * @param overwriteId - Role or user ID
- * @param params - Overwrite type and permission bitfields
- */
-export function putChannelOverwrite(
-  db: Database,
-  channelId: string,
-  overwriteId: string,
-  params: { type: number; allow: string; deny: string }
-): void {
-  db.prepare(
-    `INSERT INTO channel_overwrites (channel_id, id, type, allow, deny)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(channel_id, id) DO UPDATE SET
-       type = excluded.type,
-       allow = excluded.allow,
-       deny = excluded.deny`
-  ).run(channelId, overwriteId, params.type, params.allow, params.deny)
-}
-
-/**
- * Deletes a permission overwrite from a channel. No-op if it does not exist.
- * @param db - Database
- * @param channelId - Channel ID
- * @param overwriteId - Role or user ID
- */
-export function deleteChannelOverwrite(
-  db: Database,
-  channelId: string,
-  overwriteId: string
-): void {
-  db.prepare(
-    'DELETE FROM channel_overwrites WHERE channel_id = ? AND id = ?'
-  ).run(channelId, overwriteId)
-}
-
-/**
  * Converts a DB channel record into the API response format.
  * @param row - DB record
  * @param overwrites - The channel's permission overwrites (empty if none)
@@ -334,6 +295,64 @@ export function getChannel(
   const recipients =
     row.type === 1 || row.type === 3 ? getChannelRecipientUsers(db, row.id) : []
   return toChannelObject(row, getChannelOverwrites(db, row.id), recipients)
+}
+
+/** Publishes the persisted guild channel to its registered bot's sessions. */
+function emitOverwriteChannelUpdate(db: Database, channelId: string): void {
+  const channel = getChannel(db, channelId)
+  if (!channel?.guild_id) return
+  const owner = db
+    .prepare(
+      'SELECT bots.user_id, bots.token FROM guilds JOIN bots ON bots.token = guilds.bot_token WHERE guilds.id = ?'
+    )
+    .get(channel.guild_id) as { user_id: string; token: string } | undefined
+  if (!owner) return
+
+  gatewayBus.emit('channel.update', {
+    channel: channel as unknown as Record<string, unknown>,
+    scope: { db, botId: owner.user_id, token: owner.token },
+  })
+}
+
+/**
+ * Creates or updates a permission overwrite for a channel (upsert).
+ * @param db - Database
+ * @param channelId - Channel ID
+ * @param overwriteId - Role or user ID
+ * @param params - Overwrite type and permission bitfields
+ */
+export function putChannelOverwrite(
+  db: Database,
+  channelId: string,
+  overwriteId: string,
+  params: { type: number; allow: string; deny: string }
+): void {
+  db.prepare(
+    `INSERT INTO channel_overwrites (channel_id, id, type, allow, deny)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(channel_id, id) DO UPDATE SET
+       type = excluded.type,
+       allow = excluded.allow,
+       deny = excluded.deny`
+  ).run(channelId, overwriteId, params.type, params.allow, params.deny)
+  emitOverwriteChannelUpdate(db, channelId)
+}
+
+/**
+ * Deletes a permission overwrite from a channel. No-op if it does not exist.
+ * @param db - Database
+ * @param channelId - Channel ID
+ * @param overwriteId - Role or user ID
+ */
+export function deleteChannelOverwrite(
+  db: Database,
+  channelId: string,
+  overwriteId: string
+): void {
+  const result = db
+    .prepare('DELETE FROM channel_overwrites WHERE channel_id = ? AND id = ?')
+    .run(channelId, overwriteId)
+  if (result.changes > 0) emitOverwriteChannelUpdate(db, channelId)
 }
 
 /**

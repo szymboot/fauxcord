@@ -55,15 +55,24 @@ export function sendDispatch(
  * @param data - Event data
  * @param requiredIntent - Intent bit required to receive the event (sent
  * unconditionally if omitted)
+ * @param token - Optional normalized ("Bot "-prefixed) setup token to isolate
+ * sessions sharing a Bot ID
  */
 export function broadcastToBot(
   manager: SessionManager,
   botId: string,
   eventName: string,
   data: unknown,
-  requiredIntent?: number
+  requiredIntent?: number,
+  token?: string
 ): void {
   for (const session of manager.getByBotId(botId)) {
+    if (token !== undefined) {
+      const sessionToken = session.token.startsWith('Bot ')
+        ? session.token
+        : `Bot ${session.token}`
+      if (sessionToken !== token) continue
+    }
     if (
       requiredIntent !== undefined &&
       !hasIntent(session.intents, requiredIntent)
