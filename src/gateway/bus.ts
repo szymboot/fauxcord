@@ -36,6 +36,10 @@ export interface GatewayBusEvents {
     messageId: string
     userId: string
     emoji: Record<string, unknown>
+    /** Existing human member and exact setup scope for test reactions. */
+    member?: Record<string, unknown>
+    messageAuthorId?: string
+    scope?: { db: Database; botId: string; token: string }
   }
   'message.reaction.remove': {
     guildId: string | undefined
