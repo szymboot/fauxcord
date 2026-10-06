@@ -13,6 +13,7 @@ import { gatewayBus } from '../gateway/bus'
 import { buildGuildCreatePayload } from './guilds'
 import { getGuildMember, type GuildMemberObject } from './guild-members'
 import { getChannel } from './channels'
+import { resetAuditLogResponses } from './audit-log-responses'
 import { resetRestFaults } from './rest-faults'
 import {
   resolveMessageStickers,
@@ -337,6 +338,7 @@ export function deleteTestSetup(db: Database, token: string): boolean {
 export function resetTestData(db: Database, token?: string): void {
   getRestPageHolds(db).reset(token)
   resetRestFaults(db, token)
+  resetAuditLogResponses(db, token)
   if (token) {
     db.prepare(
       `DELETE FROM guild_audit_log_entries WHERE guild_id IN (

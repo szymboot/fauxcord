@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { consumeAuditLogResponse } from '../services/audit-log-responses'
 import { listAuditLogs } from '../services/audit-logs'
 import { validateAuditLogQuery } from '../validators/audit-log'
 import type { Context, MiddlewareHandler } from 'hono'
@@ -313,9 +314,22 @@ export function createGuildAdvancedRoutes(db: Database): Hono<AppEnv> {
     const access = requireGuildAccess(c, db, guildId)
     if (access instanceof Response) return access
     const query = validateAuditLogQuery(c.req.query())
-    return typeof query === 'string'
-      ? invalid(c, query)
-      : c.json(listAuditLogs(db, guildId, query))
+    if (typeof query === 'string') return invalid(c, query)
+    const override =
+      c.req.method === 'GET'
+        ? consumeAuditLogResponse(
+            db,
+            guildId,
+            c.get('bot')?.token,
+            new URL(c.req.url).searchParams
+          )
+        : undefined
+    const page = listAuditLogs(db, guildId, query)
+    return c.json(
+      override
+        ? { ...page, audit_log_entries: override.entries, users: [] }
+        : page
+    )
   })
 
   app.get('/guilds/:guildId/auto-moderation/rules', (c) => {
