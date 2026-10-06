@@ -1008,10 +1008,13 @@ This fixture does not evaluate channel permission overwrites or user eligibility
 rules implemented by your bot.
 
 Ordinary `GET /channels/:channelId/messages/:messageId/reactions/:emoji` reads
-expose the same registered human with `bot: false`. Single-message and message
-history reads include the persisted reaction counts. These REST routes still
-require normal bot authentication and work under `/api/v10`, `/api`, and bare
-paths. The ordinary `PUT .../reactions/:emoji/@me` continues to react as its
+expose the same registered human with `bot: false` when `type` is omitted or
+`type=0`. Fauxcord persists only normal reactions, so `type=1` (burst) returns an
+empty array without changing normal membership. Other `type` values return
+`400 Invalid Form Body` (code `50035`). Normal reads retain `limit` and `after`
+pagination. Single-message and message history reads include the persisted
+reaction counts. These REST routes still require normal bot authentication and
+work under `/api/v10`, `/api`, and bare paths. The ordinary `PUT .../reactions/:emoji/@me` continues to react as its
 actual authenticated bot; no human token or impersonation mode is introduced.
 
 Connect the guild's setup bot and wait for Gateway READY before adding reactions.

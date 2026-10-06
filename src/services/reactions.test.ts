@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { initializeDatabase, closeDatabase } from '../db'
 import type { Database } from '../db'
-import { addReaction, removeReaction } from './reactions'
+import { addReaction, removeReaction, getReactionUsers } from './reactions'
 import { gatewayBus } from '../gateway/bus'
 import { seedBot, seedGuild, seedChannel, seedMessage } from '../test-helpers'
 
@@ -53,6 +53,24 @@ describe('reactions service', () => {
       } finally {
         gatewayBus.off('message.reaction.add', listener)
       }
+    })
+  })
+
+  describe('getReactionUsers', () => {
+    it('defaults to normal users and returns no normal membership for burst reads', () => {
+      db.prepare("INSERT INTO users (id, username) VALUES (?, 'Human')").run(
+        userId
+      )
+      addReaction(db, messageId, userId, '👍')
+      expect(getReactionUsers(db, messageId, '👍')).toEqual([
+        expect.objectContaining({ id: userId, bot: 0 }),
+      ])
+      expect(getReactionUsers(db, messageId, '👍', 25, undefined, 0)).toEqual(
+        getReactionUsers(db, messageId, '👍')
+      )
+      expect(getReactionUsers(db, messageId, '👍', 25, undefined, 1)).toEqual(
+        []
+      )
     })
   })
 

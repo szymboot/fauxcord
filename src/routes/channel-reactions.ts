@@ -14,7 +14,7 @@ import {
   removeAllReactions,
   getReactionUsers,
 } from '../services/reactions'
-import { DiscordErrorCode, discordError } from '../errors'
+import { DiscordErrorCode, discordError, validationError } from '../errors'
 import type { AppEnv } from '../middleware/auth'
 import { parseLimitQuery } from '../lib/route-helpers'
 
@@ -153,8 +153,31 @@ export function createChannelReactionRoutes(db: Database): Hono<AppEnv> {
     const decodedEmoji = decodedResult
     const limit = parseLimitQuery(c, 25, 100)
     const after = c.req.query('after')
+    const type = c.req.query('type') ?? '0'
+    if (type !== '0' && type !== '1') {
+      return c.json(
+        validationError({
+          type: {
+            _errors: [
+              {
+                code: 'BASE_TYPE_CHOICES',
+                message: 'Value must be one of (0, 1).',
+              },
+            ],
+          },
+        }).body,
+        400
+      )
+    }
 
-    const users = getReactionUsers(db, messageId, decodedEmoji, limit, after)
+    const users = getReactionUsers(
+      db,
+      messageId,
+      decodedEmoji,
+      limit,
+      after,
+      type === '1' ? 1 : 0
+    )
     return c.json(
       users.map((u) => ({
         id: u.id,

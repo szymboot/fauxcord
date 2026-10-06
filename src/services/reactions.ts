@@ -141,12 +141,13 @@ export function removeAllReactions(db: Database, messageId: string): void {
 }
 
 /**
- * Retrieves the list of users who reacted.
+ * Retrieves the list of users who reacted with the requested reaction type.
  * @param db - Database
  * @param messageId - Message ID
  * @param emoji - Emoji
  * @param limit - Number of items to retrieve (clamped to 100, default 25)
  * @param after - Pagination cursor (user ID)
+ * @param type - Normal (0, default) or burst (1); burst persistence is unsupported
  * @returns Array of user records
  */
 export function getReactionUsers(
@@ -154,8 +155,12 @@ export function getReactionUsers(
   messageId: string,
   emoji: string,
   limit = 25,
-  after?: string
+  after?: string,
+  type: 0 | 1 = 0
 ): UserRow[] {
+  // Persisted reactions are normal only; never expose them as burst membership.
+  if (type === 1) return []
+
   const clampedLimit = Math.min(limit, 100)
   return after
     ? (db
