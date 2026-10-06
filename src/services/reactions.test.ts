@@ -1,7 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { initializeDatabase, closeDatabase } from '../db'
 import type { Database } from '../db'
-import { addReaction, removeReaction, getReactionUsers } from './reactions'
+import {
+  addReaction,
+  removeReaction,
+  getReactionUsers,
+  removeAllReactions,
+  removeEmojiReactions,
+} from './reactions'
 import { gatewayBus } from '../gateway/bus'
 import { seedBot, seedGuild, seedChannel, seedMessage } from '../test-helpers'
 
@@ -103,4 +109,31 @@ describe('reactions service', () => {
       }
     })
   })
+
+  it.each(['all', 'emoji'] as const)(
+    'does not emit a clear %s event when SQLite rejects deletion',
+    (kind) => {
+      addReaction(db, messageId, userId, '👍')
+      db.exec(`CREATE TRIGGER reject_reaction_delete BEFORE DELETE ON reactions
+        BEGIN SELECT RAISE(ABORT, 'Cannot delete reaction'); END`)
+      const event =
+        kind === 'all'
+          ? 'message.reaction.remove.all'
+          : 'message.reaction.remove.emoji'
+      const listener = vi.fn()
+      gatewayBus.on(event, listener)
+      try {
+        expect(() => {
+          if (kind === 'all') removeAllReactions(db, messageId)
+          else removeEmojiReactions(db, messageId, '👍')
+        }).toThrow('Cannot delete reaction')
+        expect(listener).not.toHaveBeenCalled()
+        expect(db.prepare('SELECT emoji FROM reactions').all()).toEqual([
+          { emoji: '👍' },
+        ])
+      } finally {
+        gatewayBus.off(event, listener)
+      }
+    }
+  )
 })
