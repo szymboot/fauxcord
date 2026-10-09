@@ -32,7 +32,7 @@ import { createGuildInviteRoutes } from './guild-invites'
  */
 export function createGuildRoutes(
   db: Database,
-  eventControls?: GatewayEventControls
+  eventControls?: Pick<GatewayEventControls, 'deleteGuild'>
 ): Hono {
   const app = new Hono()
 

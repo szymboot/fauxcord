@@ -188,6 +188,15 @@ curl -X POST http://localhost:3000/_test/reset \
 curl -X DELETE "http://localhost:3000/_test/setup/Bot%20mytoken123"
 ```
 
+### Force a live Gateway session to re-IDENTIFY
+
+`POST /_test/gateway-session-invalidations` sends INVALID_SESSION (op 9,
+`d: false`) to one exact session and closes it with `4009`, so the connected
+client logs in again with IDENTIFY and receives fresh `READY`/`GUILD_CREATE`
+snapshots. Keyed recovery, cleanup and a long-poll observation of the
+replacement IDENTIFY are described in the
+[test API documentation](./docs/test-api.md#forced-re-identify-of-a-live-gateway-session).
+
 ### Inspect channel messages (for testing)
 
 ```bash

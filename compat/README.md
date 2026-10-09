@@ -68,6 +68,13 @@ The common flow every Gateway verifier follows:
    high-level "message create" callback/event fires with a matching message
    within a timeout.
 
+The discordgo verifier adds a third step, `invalidate-session-reidentify`: it
+calls `POST /_test/gateway-session-invalidations` for its live session
+(INVALID_SESSION `d: false`, then close `4009`), waits for a new READY with a
+different session ID plus a GUILD_CREATE for the setup guild on the same
+`*discordgo.Session` (no restart, no RESUME), and confirms through the keyed
+`wait_ms` observation that Fauxcord saw that IDENTIFY complete.
+
 REST-only clients with no Gateway capability (e.g. `@discordjs/rest`,
 `DiscordRestClient`, `twilight-http` alone) are not expected to add a
 `gateway` field at all — see `docs/superpowers/specs/2026-07-06-gateway-compat-verification-design.md`

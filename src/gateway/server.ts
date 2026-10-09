@@ -331,14 +331,32 @@ function handleIdentify(
     application: { id: bot.userId, flags: 0 },
   }
 
-  ws.send(
-    encodePayload({
-      op: GatewayOp.Dispatch,
-      t: 'READY',
-      s: sessionManager.nextSeq(session),
-      d: readyData,
-    })
-  )
+  const readySequence = sessionManager.nextSeq(session)
+  const guildsIntent = hasIntent(data.intents, GatewayIntentBits.Guilds)
+  // Test controls may watch this IDENTIFY to prove READY/GUILD_CREATE writes.
+  const observer = sessionManager.observeIdentify?.(session, {
+    readySequence,
+    guildIds: existingGuildIds.map(({ id }) => id),
+    guildsIntent,
+  })
+  const ready = encodePayload({
+    op: GatewayOp.Dispatch,
+    t: 'READY',
+    s: readySequence,
+    d: readyData,
+  })
+  if (observer) {
+    observer.ready('queued')
+    try {
+      session.ws.send(ready, (error) => {
+        observer.ready(error ? 'failed' : 'sent')
+      })
+    } catch {
+      observer.ready('failed')
+    }
+  } else {
+    ws.send(ready)
+  }
 
   // Real Discord follows the READY stub list above with a GUILD_CREATE
   // Dispatch for each guild the bot belongs to shortly after. Several client
@@ -351,7 +369,7 @@ function handleIdentify(
   // `POST /guilds`), not for guilds that already existed at IDENTIFY time
   // (e.g. seeded via `/_test/setup` before the client ever connects), so
   // those need to be sent here explicitly.
-  if (!hasIntent(data.intents, GatewayIntentBits.Guilds)) return
+  if (!guildsIntent) return
 
   // buildGuildCreatePayload runs ~4 reads per guild, so an IDENTIFY from a
   // bot in N guilds issues ~4N statements. Batch them into one SQLite
@@ -364,7 +382,13 @@ function handleIdentify(
       .filter((guild) => guild !== null)
   )()
   for (const guild of payloads) {
-    sendDispatch(sessionManager, session, 'GUILD_CREATE', guild)
+    sendDispatch(
+      sessionManager,
+      session,
+      'GUILD_CREATE',
+      guild,
+      observer?.guildCreate
+    )
   }
 }
 
@@ -382,6 +406,7 @@ function handleResume(
   data: ResumeData
 ): void {
   const session = sessionManager.get(data.session_id)
+  if (!session) sessionManager.observeRejectedResume?.(data.session_id)
   if (session?.token !== data.token) {
     ws.send(encodePayload({ op: GatewayOp.InvalidSession, d: false }))
     return

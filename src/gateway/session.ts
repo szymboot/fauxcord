@@ -5,6 +5,29 @@ import type { GatewayPayload } from './protocol'
 /** Maximum number of events retained in the replay buffer */
 const REPLAY_BUFFER_SIZE = 100
 
+/** Socket write progress of one Gateway frame, never application completion. */
+export type DispatchTransport = 'buffered' | 'queued' | 'sent' | 'failed'
+
+/** Facts about a successful IDENTIFY, captured before READY is written. */
+export interface IdentifyFacts {
+  /** Sequence assigned to READY */
+  readySequence: number
+  /** Guild IDs listed in READY as unavailable stubs */
+  guildIds: string[]
+  /** Whether GUILD_CREATE dispatches follow (Guilds intent) */
+  guildsIntent: boolean
+}
+
+/** Per-IDENTIFY transport observer installed by a test control. */
+export interface IdentifyObserver {
+  /** Observes READY's socket write */
+  ready: (status: DispatchTransport) => void
+  /** Observes one GUILD_CREATE envelope, returning its write observer */
+  guildCreate: (
+    payload: GatewayPayload<unknown>
+  ) => ((status: DispatchTransport) => void) | undefined
+}
+
 /** Represents a single Gateway connection (session) */
 export interface Session {
   /** Session ID (used when resuming) */
@@ -56,7 +79,14 @@ export class SessionManager {
     session: Session,
     payload: GatewayPayload<unknown>,
     source: 'native' | 'release' | 'replay' | 'resume'
-  ) => ((status: 'buffered' | 'queued' | 'sent' | 'failed') => void) | undefined
+  ) => ((status: DispatchTransport) => void) | undefined
+  /** Observes a successful IDENTIFY; returns undefined when nothing is watching. */
+  observeIdentify?: (
+    session: Session,
+    facts: IdentifyFacts
+  ) => IdentifyObserver | undefined
+  /** Observes a RESUME rejected because its session no longer exists. */
+  observeRejectedResume?: (sessionId: string) => void
 
   private readonly connectionGenerations = new WeakMap<WebSocket, number>()
 
