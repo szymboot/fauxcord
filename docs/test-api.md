@@ -160,12 +160,12 @@ members' voice states.
 
 Allowed input fields:
 
-| Field                                                                             | Meaning                                                                                                                                                                      |
-| --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `channel_id`                                                                      | Voice (type 2) or stage (type 13) channel in the same guild, or `null` to disconnect. Required on first creation.                                                            |
-| `deaf`, `mute`, `self_deaf`, `self_mute`, `self_stream`, `self_video`, `suppress` | Strict JSON booleans. Defaults are `false`; omitted fields retain their existing values.                                                                                     |
-| `request_to_speak_timestamp`                                                      | Valid ISO8601 datetime with timezone, normalized to Discord timestamp format, or `null`. Defaults to `null`; omission preserves it.                                          |
-| `emit`                                                                            | Strict boolean, defaults to `true`. Publication policy for the future native dispatch integration; `false` requests silent historical preparation even with active sessions. |
+| Field                                                                             | Meaning                                                                                                                             |
+| --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `channel_id`                                                                      | Voice (type 2) or stage (type 13) channel in the same guild, or `null` to disconnect. Required on first creation.                   |
+| `deaf`, `mute`, `self_deaf`, `self_mute`, `self_stream`, `self_video`, `suppress` | Strict JSON booleans. Defaults are `false`; omitted fields retain their existing values.                                            |
+| `request_to_speak_timestamp`                                                      | Valid ISO8601 datetime with timezone, normalized to Discord timestamp format, or `null`. Defaults to `null`; omission preserves it. |
+| `emit`                                                                            | Strict boolean, defaults to `true`. `false` requests silent historical preparation even with active sessions.                       |
 
 To join, send `{"channel_id":"VOICE_CHANNEL_ID"}`. To stream or stop streaming
 while staying connected, send `{"self_stream":true}` or `{"self_stream":false}`.
@@ -182,14 +182,31 @@ Missing guild, user, membership or channel returns Discord-style `404`; channels
 in another guild return `404`, and non-voice/stage channels return `400`. All
 validation finishes before mutation. `{}` is a no-op for an existing valid state.
 
-**Current delivery behavior:** this foundation stores and returns state only.
-It does not publish `VOICE_STATE_UPDATE`, including when sessions are active
-and `emit` is `true`. Prepared connected states appear in `GUILD_CREATE` after
-initial or fresh IDENTIFY, with active members included for identity lookup.
-Use `emit: false` for silent historical preparation. See
+Successful live changes publish native `VOICE_STATE_UPDATE` after persistence.
+Join, stream start/stop, moves, other flag changes and disconnects are delivered
+only to sessions with `GuildVoiceStates` for the guild's registered Bot token
+and originating app/database. `Guilds` and `GuildMembers` are not required for
+live voice events. The event includes the full native state plus `member.user`;
+disconnect uses `channel_id: null` with the previous voice session ID. Client
+libraries such as DiscordGo derive `BeforeUpdate` from their own cache; it is
+not a wire field.
+
+`emit: false` persists a historical fixture without any live event, even with
+active sessions. Rejected writes, unchanged patches, repeated disconnects and
+flag-only edits while disconnected emit nothing and consume no Gateway
+sequence. Normal delivery uses the existing sequence/replay buffer, so RESUME
+replays missed voice events with their original data and sequence.
+
+Prepared connected states also appear in `GUILD_CREATE` after initial or
+fresh IDENTIFY, with active members included for identity lookup. See
 [Discovering prepared voice states on connection](gateway-voice-history.md)
-for setup, payload shape, reconnect and cleanup behavior. No audio/video
-transport is provided.
+for setup, payload shape, reconnect and cleanup behavior. RESUME replays
+missed events rather than rebuilding that snapshot. No audio/video transport
+is provided.
+
+The existing authenticated stage PATCH routes also publish committed changes
+through this path. Their writable fields are `channel_id`, `suppress` and
+`request_to_speak_timestamp`; use the fixture API for synthetic self flags.
 
 Voice fixtures are cleared by `/_test/reset`: a nonempty token scopes deletion
 to that Bot's guilds, and omission/empty token clears all voice states. Setup,
@@ -215,6 +232,13 @@ setups and memberships remain intact.
   commits, or `INVALID_INPUT`, `UNKNOWN_GUILD`, `UNKNOWN_USER`, `UNKNOWN_MEMBER`,
   `UNKNOWN_CHANNEL` before writes. The route returns only `state`. A native
   publisher can use `changed && emit` after success; this service emits nothing.
+
+`src/services/voice-state-events.ts` exports
+`publishGuildVoiceStateMutation(db, mutation)`. The fixture and stage routes
+call it after the shared storage transaction returns successfully. It attaches
+the existing member/user, resolves the guild's Bot/token scope and emits the
+typed `voice.state.update` domain event. Gateway subscriptions filter it by
+database, token and intent before normal dispatch sequencing.
 
 `src/validators/voice-state.ts` exports `TestVoiceStatePatch` and
 `validateTestVoiceState(input)`, which returns normalized typed input or `null`.

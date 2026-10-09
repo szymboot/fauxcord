@@ -2,7 +2,11 @@
 import type { Database } from '../db'
 import { runInTransaction } from '../db'
 import { generateSnowflake } from '../snowflake'
-import { getGuildVoiceState } from './voice-states'
+import { setTestGuildVoiceState } from './voice-states'
+import type {
+  VoiceStateFixtureError,
+  VoiceStateFixtureMutation,
+} from './voice-states'
 
 export { getGuildVoiceState } from './voice-states'
 
@@ -1035,40 +1039,23 @@ export function getGuildOnboarding(db: Database, guildId: string): JsonObject {
   }
 }
 
-/** Updates a guild voice state. */
+/** Applies ordinary stage fields through the shared validated voice storage. */
 export function setGuildVoiceState(
   db: Database,
   guildId: string,
   userId: string,
-  payload: JsonObject
-): void {
-  const existing = getGuildVoiceState(db, guildId, userId)
-  db.prepare(
-    `INSERT INTO guild_voice_states
-       (guild_id, user_id, channel_id, session_id, suppress,
-        request_to_speak_timestamp)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(guild_id, user_id) DO UPDATE SET
-       channel_id = excluded.channel_id, suppress = excluded.suppress,
-       request_to_speak_timestamp = excluded.request_to_speak_timestamp`
-  ).run(
-    guildId,
-    userId,
-    payload.channel_id === undefined
-      ? (existing?.channel_id ?? null)
-      : payload.channel_id,
-    existing?.session_id ?? `session-${userId}`,
-    payload.suppress === undefined
-      ? existing?.suppress
-        ? 1
-        : 0
-      : payload.suppress
-        ? 1
-        : 0,
-    payload.request_to_speak_timestamp === undefined
-      ? (existing?.request_to_speak_timestamp ?? null)
-      : payload.request_to_speak_timestamp
+  payload: unknown
+): VoiceStateFixtureMutation | VoiceStateFixtureError {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload))
+    return 'INVALID_INPUT'
+  return Object.keys(payload).some(
+    (field) =>
+      field !== 'channel_id' &&
+      field !== 'suppress' &&
+      field !== 'request_to_speak_timestamp'
   )
+    ? 'INVALID_INPUT'
+    : setTestGuildVoiceState(db, guildId, userId, payload)
 }
 
 /** Gets or updates welcome-screen settings. */

@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { Database } from '../db'
 import { DiscordErrorCode, discordError } from '../errors'
 import { setTestGuildVoiceState } from '../services/voice-states'
+import { publishGuildVoiceStateMutation } from '../services/voice-state-events'
 
 /** Creates the dedicated synthetic voice-state fixture route. */
 export function createTestVoiceStateRoutes(db: Database): Hono {
@@ -14,7 +15,10 @@ export function createTestVoiceStateRoutes(db: Database): Hono {
       userId,
       await c.req.json<unknown>().catch(() => undefined)
     )
-    if (typeof result !== 'string') return c.json(result.state)
+    if (typeof result !== 'string') {
+      publishGuildVoiceStateMutation(db, result)
+      return c.json(result.state)
+    }
     if (result === 'INVALID_INPUT')
       return c.json({ message: '400: Bad Request', code: 0 }, 400)
     const errors = {
