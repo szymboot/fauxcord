@@ -597,6 +597,7 @@ export function createMessage(
     /** Emits the committed create snapshot, possibly after an outer commit. */
     const emit = (): void => {
       gatewayBus.emit('message.create', {
+        db,
         guildId,
         channelId: params.channelId,
         message: msg as unknown as Record<string, unknown>,

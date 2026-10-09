@@ -23,6 +23,7 @@ import {
   unusableMessageStickersError,
 } from '../validators/message-stickers'
 import { getChannel } from '../services/channels'
+import { getMessageSendError } from '../services/message-permissions'
 import {
   getMessage,
   getMessages,
@@ -139,6 +140,9 @@ export function createChannelMessageRoutes(
     const authorId = bot?.user_id ?? '000000000000000000'
     const authorToken = bot?.token ?? ''
 
+    const accessError = getMessageSendError(db, channelId, authorId)
+    if (accessError) return c.json(accessError.body, accessError.status)
+
     const contentType = c.req.header('content-type') ?? ''
     let payload: Record<string, unknown>
     const attachmentFiles: AttachmentInput[] = []
@@ -238,6 +242,15 @@ export function createChannelMessageRoutes(
       return c.json(validationError(errors).body, 400)
     }
 
+    const permissionError = getMessageSendError(
+      db,
+      channelId,
+      authorId,
+      payload
+    )
+    if (permissionError)
+      return c.json(permissionError.body, permissionError.status)
+
     const messageId = generateSnowflake()
 
     const responseMessage = await withMessageAttachments(
@@ -247,39 +260,51 @@ export function createChannelMessageRoutes(
       messageId,
       authorToken,
       attachmentFiles,
-      (persist) =>
-        createMessage(
+      (persist) => {
+        // Attachment preparation can await disk writes. Re-read membership,
+        // roles and overwrites before the synchronous message transaction.
+        const currentError = getMessageSendError(
           db,
-          {
-            messageId,
-            channelId,
-            authorId,
-            authorToken,
-            content: payload.content as string | undefined,
-            tts: payload.tts as boolean | undefined,
-            embeds: payload.embeds as unknown[] | undefined,
-            messageReference: payload.message_reference as
-              { message_id?: string } | undefined,
-            flags: payload.flags as number | undefined,
-            stickerItems,
-          },
-          baseUrl,
-          () => {
-            persist()
-            if (!hasPoll) return
-            const pollField = payload.poll as PollCreatePayloadField
-            createPoll(db, messageId, {
-              question: pollField.question.text,
-              answers: pollField.answers.map((a) => ({
-                text: a.poll_media.text,
-                emoji: a.poll_media.emoji ?? undefined,
-              })),
-              allowMultiselect: pollField.allow_multiselect,
-              durationHours: pollField.duration,
-            })
-          }
+          channelId,
+          authorId,
+          payload
         )
+        return currentError
+          ? c.json(currentError.body, currentError.status)
+          : createMessage(
+              db,
+              {
+                messageId,
+                channelId,
+                authorId,
+                authorToken,
+                content: payload.content as string | undefined,
+                tts: payload.tts as boolean | undefined,
+                embeds: payload.embeds as unknown[] | undefined,
+                messageReference: payload.message_reference as
+                  { message_id?: string } | undefined,
+                flags: payload.flags as number | undefined,
+                stickerItems,
+              },
+              baseUrl,
+              () => {
+                persist()
+                if (!hasPoll) return
+                const pollField = payload.poll as PollCreatePayloadField
+                createPoll(db, messageId, {
+                  question: pollField.question.text,
+                  answers: pollField.answers.map((a) => ({
+                    text: a.poll_media.text,
+                    emoji: a.poll_media.emoji ?? undefined,
+                  })),
+                  allowMultiselect: pollField.allow_multiselect,
+                  durationHours: pollField.duration,
+                })
+              }
+            )
+      }
     )
+    if (responseMessage instanceof Response) return responseMessage
     return hasPoll
       ? c.json({
           ...responseMessage,
