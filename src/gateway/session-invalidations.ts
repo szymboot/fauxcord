@@ -16,7 +16,7 @@ import { GatewayCloseCode, GatewayOp } from './opcodes'
 const MAX_LIVE = 32
 /** Maximum ownership reservations (active, retired and tombstoned). */
 const MAX_OWNERS = 4096
-/** Maximum replacement IDENTIFYs retained per observation. */
+/** Maximum replacement attempts retained; older failed ones are evicted. */
 const MAX_IDENTIFIES = 4
 /** Maximum GUILD_CREATE summaries retained per IDENTIFY. */
 const MAX_GUILD_CREATES = 50
@@ -351,9 +351,11 @@ export class GatewaySessionInvalidations {
           )
       )
     if (!record) return undefined
+    // Only failed attempts precede this one, so evicting the oldest keeps
+    // history bounded without ever blocking a later successful replacement.
     if (record.identifies.length >= MAX_IDENTIFIES) {
+      record.identifies.shift()
       record.identifies_skipped += 1
-      return undefined
     }
     const attempt: IdentifyAttempt = {
       session_id: session.sessionId,

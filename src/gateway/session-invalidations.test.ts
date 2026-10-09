@@ -911,6 +911,23 @@ describe('Gateway session invalidation attempt accounting', () => {
     expect(body.replacement?.session_id).toBe(second.sessionId)
   })
 
+  it('evicts old failed attempts so a later success is still observed', async () => {
+    const { manager, controls, id } = setup()
+    const waiting = controls.wait(id, 5000)
+    for (let attempt = 0; attempt < 5; attempt += 1) identify(manager, 'failed')
+    const success = identify(manager, 'sent')
+    const body = (await waiting) as Invalidation
+    expect(body.identifies).toHaveLength(4)
+    expect(body.identifies_skipped).toBe(2)
+    expect(body.identifies.map((attempt) => attempt.state)).toEqual([
+      'failed',
+      'failed',
+      'failed',
+      'complete',
+    ])
+    expect(body.replacement?.session_id).toBe(success.sessionId)
+  })
+
   it('reports a pending attempt as identifying', () => {
     const { manager, controls, id } = setup()
     const replacement = session(manager)

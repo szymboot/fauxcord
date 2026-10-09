@@ -2501,8 +2501,9 @@ can never invalidate the replacement session.
   IDENTIFY with the invalidated session's setup token on any **other** socket
   after invalidation, recorded only while the observation has no pending or
   complete attempt (so after a `failed` attempt the next IDENTIFY is recorded,
-  and after a replacement nothing more is). At most 4 attempts, then
-  `identifies_skipped` counts. Sessions that existed before the invalidation,
+  and after a replacement nothing more is). At most 4 attempts are retained:
+  a new attempt evicts the oldest failed one, counted in `identifies_skipped`,
+  so repeated failures never prevent observing a later replacement. Sessions that existed before the invalidation,
   other bots and other setups never appear. Each attempt reports the new
   `session_id`, READY's sequence and guild stubs, `guild_creates_sent`, and
   one summary per `GUILD_CREATE` written (at most 50 summaries, further ones
