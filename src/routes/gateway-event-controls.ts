@@ -1,7 +1,10 @@
 import { Hono } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
+import { isAuditOwnershipKey } from '../validators/audit-log-response'
 import {
   CONTROL_EVENTS,
   type EventControlRequest,
+  type EventControlOwnership,
   type GatewayEventControls,
 } from '../gateway/event-controls'
 
@@ -20,6 +23,8 @@ function validateControl(value: unknown): EventControlRequest | undefined {
   if (
     typeof guildId !== 'string' ||
     typeof botId !== 'string' ||
+    (data.ownership_key !== undefined &&
+      (sessionId === undefined || !isAuditOwnershipKey(data.ownership_key))) ||
     !/^[1-9]\d{0,19}$/.test(guildId) ||
     !/^[1-9]\d{0,19}$/.test(botId) ||
     (sessionId !== undefined &&
@@ -63,6 +68,9 @@ function validateControl(value: unknown): EventControlRequest | undefined {
     ttlMs > 60_000
     ? undefined
     : {
+        ...(data.ownership_key !== undefined && {
+          ownership_key: data.ownership_key,
+        }),
         guild_id: guildId,
         bot_id: botId,
         session_id: sessionId,
@@ -76,11 +84,42 @@ function validateControl(value: unknown): EventControlRequest | undefined {
       }
 }
 
+/** Validates an exact key address, rejecting extra or duplicate query fields. */
+function validateOwnership(
+  key: string,
+  search: URLSearchParams
+): EventControlOwnership | undefined {
+  const bot = search.get('bot_id')
+  const guild = search.get('guild_id')
+  const session = search.get('session_id')
+  return bot !== null &&
+    guild !== null &&
+    session !== null &&
+    isAuditOwnershipKey(key) &&
+    search.keys().toArray().length === 3 &&
+    ['bot_id', 'guild_id', 'session_id'].every(
+      (field) => search.getAll(field).length === 1
+    ) &&
+    /^[1-9]\d{0,19}$/.test(bot) &&
+    /^[1-9]\d{0,19}$/.test(guild) &&
+    /^[\da-f]{32}$/.test(session)
+    ? { ownership_key: key, bot_id: bot, guild_id: guild, session_id: session }
+    : undefined
+}
+
 /** Mounts unauthenticated Fauxcord-only capture, inspection and delivery controls. */
 export function createGatewayEventControlRoutes(
   controls: GatewayEventControls
 ): Hono {
   const app = new Hono()
+  app.use(
+    '/_test/gateway-event-controls',
+    bodyLimit({
+      maxSize: 16_384,
+      onError: (c) =>
+        c.json({ message: '413: Payload Too Large', code: 0 }, 413),
+    })
+  )
   app.post('/_test/gateway-event-controls', async (c) => {
     const request = validateControl(await c.req.json().catch(() => undefined))
     if (!request) return c.json({ message: '400: Bad Request', code: 0 }, 400)
@@ -92,7 +131,31 @@ export function createGatewayEventControlRoutes(
         )
       : c.json(result, 201)
   })
+  app.get('/_test/gateway-event-controls/by-key/:key', (c) => {
+    c.header('Cache-Control', 'no-store')
+    const scope = validateOwnership(
+      c.req.param('key'),
+      new URL(c.req.url).searchParams
+    )
+    if (!scope) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    const result = controls.inspectByKey(scope)
+    return result
+      ? c.json(result)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
+  app.delete('/_test/gateway-event-controls/by-key/:key', (c) => {
+    const scope = validateOwnership(
+      c.req.param('key'),
+      new URL(c.req.url).searchParams
+    )
+    if (!scope) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    const result = controls.deleteByKey(scope)
+    return result === 'DELETED'
+      ? c.body(null, 204)
+      : c.json({ message: result, code: 0 }, result === 'LIMIT' ? 429 : 404)
+  })
   app.get('/_test/gateway-event-controls/:id', (c) => {
+    c.header('Cache-Control', 'no-store')
     const result = controls.inspect(c.req.param('id'))
     return result
       ? c.json(result)

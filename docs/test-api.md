@@ -1872,6 +1872,122 @@ normally** and increment `skipped`; no entries are evicted and no more events
 are held. Assertions should check `skipped === 0` when complete capture matters.
 Expiry does not extend when a control is inspected or used.
 
+### Recoverable capture ownership (optional)
+
+Send an optional `ownership_key` with POST, together with an **explicit**
+`session_id` from `READY.d.session_id`. Keys are case-sensitive, URL-safe opaque
+strings matching `[A-Za-z0-9_-]{1,128}`. Generate a fresh random key per capture
+attempt and retain its complete address before sending the request. Do not put
+credentials in keys. The exact owner is `(ownership_key, bot_id, guild_id,
+session_id)`; the selected session's IDENTIFY token must own that guild's setup.
+Keyed requests never infer a session or follow a replacement setup/connection.
+Unkeyed creation and all existing UUID routes remain supported. POST bodies are
+limited to 16 KiB (`413`); no arbitrary dispatch payload is accepted.
+
+Exact recovery and cleanup routes (no capture UUID required):
+
+```text
+GET /_test/gateway-event-controls/by-key/:key?bot_id=:bot&guild_id=:guild&session_id=:session
+DELETE /_test/gateway-event-controls/by-key/:key?bot_id=:bot&guild_id=:guild&session_id=:session
+```
+
+All three query fields are required exactly once. Unknown/extra fields,
+duplicates, malformed scope IDs/keys or a keyed POST without `session_id` return
+`400`. GET returns `200` with the same live inspection object as GET by UUID,
+including `ownership_key`, `id`, normalized policy, original `expires_at`,
+immutable `events_captured`, counters and delivery evidence. Keyed POST returns
+that inspection object with `201`, also on an identical retry. GET by key and
+UUID use `Cache-Control: no-store`. Wrong bot/guild/session or unknown/retired
+key returns `404`, without disclosing another owner's ID or policy.
+
+A key is reserved globally within one assembled Gateway instance. A same-key
+POST with the same owner and normalized policy reuses the original control and
+current evidence; it never renews TTL, capture allowance or delivery quotas.
+Event order is ignored for comparison; omitted boolean/default fields equal
+explicit defaults. Member selector, event set, hold, application acknowledgements,
+original-sequence permission, limit and TTL must match. Changed policy or owner
+returns `409` (`CONFLICT`), even if that owner is otherwise valid. Failed POSTs
+(`400`, `404`, overlap `409`, capacity `429`, or `413`) reserve no new key.
+
+DELETE by key returns `204` for an exact existing reservation, including one
+already retired. It also returns `204` for an unused key in a valid exact
+registered session/setup scope: it **reserves a tombstone before creation**.
+A disconnected session still registered with the Gateway can establish this
+cleanup reservation; a nonexistent session or mismatched setup returns `404`.
+Creation and cleanup are synchronous after body validation, so DELETE can run
+while POST's body is incomplete. Every later POST for a tombstoned key fails
+`409`; cleanup never deletes overlapping controls owned by other keys.
+A `404` GET alone does not close an unused key: always DELETE after an ambiguous
+outcome and verify `204`. A wrong-scope DELETE returns `404` and changes nothing.
+
+UUID deletion, TTL expiry, ordinary socket disconnect, session invalidation,
+setup deletion, guild deletion and scoped/global reset retire keyed controls,
+discarding held snapshots just as for legacy captures. Their ownership
+reservations remain closed, including after recreating a guild/setup with the
+same IDs/token. GET then returns `404`; POST cannot resurrect the key. Capture
+count/byte exhaustion continues to fail open and keeps its existing evidence
+until normal expiry/cleanup; retries do not replenish it. Explicit controlled
+`disconnect`/RESUME retains the original session and key under existing rules.
+Setup token replacement invalidates the original capture before further actions;
+an old address can still delete its reservation without touching the new setup.
+
+At most 32 live controls and **4096 total ownership reservations** (active plus
+retired) are allowed per Gateway instance. Reservations retain only bounded
+public identity/policy metadata, never payload snapshots, sockets or credentials.
+They are never evicted or cleared by reset: new keyed POSTs or new-key DELETEs
+return `429` (`LIMIT`) when capacity is full, while existing-key recovery/cleanup
+and legacy controls still work within their own limits. There is deliberately
+no ownership eviction endpoint. Restart/reassemble the Gateway for fresh
+capacity only after all old HTTP attempts have settled. Controls and reservations
+are in memory; restart ends this recovery contract and does not restore holds.
+
+Example harness flow for an ambiguous creation response:
+
+```typescript
+const ownership = {
+  ownership_key: crypto.randomUUID(),
+  bot_id: botId,
+  guild_id: guildId,
+  session_id: ready.session_id,
+}
+const query = new URLSearchParams({
+  bot_id: ownership.bot_id,
+  guild_id: ownership.guild_id,
+  session_id: ownership.session_id,
+})
+const address = `${base}/_test/gateway-event-controls/by-key/${ownership.ownership_key}?${query}`
+try {
+  const response = await fetch(`${base}/_test/gateway-event-controls`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ...ownership,
+      events: ['VOICE_STATE_UPDATE'],
+      hold: true,
+    }),
+  })
+  // A lost, truncated, malformed or undecodable response leaves outcome unknown.
+  // GET address recovers the installed UUID and exact native evidence if needed.
+  if (!response.ok) throw new Error(`Capture create: ${response.status}`)
+  const capture = await response.json()
+  // Exercise native fixtures, inspect/release/replay using capture.id as usual.
+} finally {
+  // Cancel the POST attempt if still running, then close ownership even if its
+  // body may arrive later. Retry this exact DELETE on ambiguous cleanup replies.
+  const cleanup = await fetch(address, { method: 'DELETE' })
+  if (cleanup.status !== 204)
+    throw new Error(`Capture cleanup: ${cleanup.status}`)
+}
+```
+
+A valid UUID retained in a partial response remains usable through existing ID
+routes; key cleanup additionally confirms closure when no UUID was decoded.
+Cleanup discards held events, leaves persisted voice/member/application state
+unchanged and allows future native voice delivery immediately. A client-side
+response parser failure does not change server ownership. Focused real HTTP/WS
+coverage is in `src/gateway/event-control-ownership.test.ts`; existing message,
+reaction, member and voice control suites cover legacy capture/release/replay.
+
 ### `GET /_test/gateway-event-controls/:id` — Inspect capture state
 
 Returns `200` with the policy, `expires_at` (epoch milliseconds), `bytes`,

@@ -7,6 +7,7 @@
 
 import { Hono } from 'hono'
 import type { Database } from '../db'
+import type { GatewayEventControls } from '../gateway/event-controls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { getGuild, updateGuild, deleteGuild } from '../services/guilds'
 import { getGuildChannels, createGuildChannel } from '../services/channels'
@@ -29,7 +30,10 @@ import { createGuildInviteRoutes } from './guild-invites'
  * @param db - Database
  * @returns Hono router instance
  */
-export function createGuildRoutes(db: Database): Hono {
+export function createGuildRoutes(
+  db: Database,
+  eventControls?: GatewayEventControls
+): Hono {
   const app = new Hono()
 
   // GET /guilds/:guildId — Retrieve guild information
@@ -89,6 +93,7 @@ export function createGuildRoutes(db: Database): Hono {
       )
       return c.json(err.body, 404)
     }
+    eventControls?.deleteGuild(guildId)
     return c.body(null, 204)
   })
 

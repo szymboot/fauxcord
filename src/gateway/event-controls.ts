@@ -22,6 +22,7 @@ export const CONTROL_EVENTS = [
 
 /** Exact scope and bounded capture policy supplied by a test. */
 export interface EventControlRequest {
+  ownership_key?: string
   guild_id: string
   bot_id: string
   /** Optional exact session; omission requires one unambiguous live owner. */
@@ -40,6 +41,45 @@ export interface EventControlRequest {
 /** Validated policy pinned to one resolved session for its entire lifetime. */
 interface ResolvedEventControlRequest extends EventControlRequest {
   session_id: string
+}
+
+/** Exact public address known before sending a keyed creation request. */
+export interface EventControlOwnership {
+  ownership_key: string
+  bot_id: string
+  guild_id: string
+  session_id: string
+}
+
+/** Bounded lifetime reservation; null IDs permanently prevent resurrection. */
+interface OwnershipReservation extends EventControlOwnership {
+  policy?: string
+  id: string | null
+}
+
+/** Compares the complete immutable public owner address. */
+function sameOwner(
+  owner: EventControlOwnership,
+  scope: EventControlOwnership
+): boolean {
+  return (
+    owner.bot_id === scope.bot_id &&
+    owner.guild_id === scope.guild_id &&
+    owner.session_id === scope.session_id
+  )
+}
+
+/** Normalizes event sets and default policy fields before retry comparison. */
+function policyKey(request: EventControlRequest): string {
+  return JSON.stringify({
+    events: request.events.toSorted((left, right) => left.localeCompare(right)),
+    member_id: request.member_id ?? null,
+    application_ack: request.application_ack ?? false,
+    hold: request.hold,
+    allow_original_sequence: request.allow_original_sequence,
+    limit: request.limit,
+    ttl_ms: request.ttl_ms,
+  })
 }
 
 /** One bounded transport attempt with an independent application barrier. */
@@ -88,6 +128,7 @@ interface EventControl extends ResolvedEventControlRequest {
 /** Manages test captures locally to one assembled Gateway and database. */
 export class GatewayEventControls {
   private readonly controls = new Map<string, EventControl>()
+  private readonly owners = new Map<string, OwnershipReservation>()
   private readonly capturedPayloads = new WeakMap<
     object,
     { controlId: string; eventId: string }
@@ -179,7 +220,10 @@ export class GatewayEventControls {
   }
 
   /** Resolves a guild to its registered bot without exposing credentials. */
-  private hasScope(request: EventControlRequest, session: Session): boolean {
+  private hasScope(
+    request: Pick<EventControlRequest, 'bot_id' | 'guild_id'>,
+    session: Session
+  ): boolean {
     return Boolean(
       this.db
         .prepare(
@@ -196,10 +240,20 @@ export class GatewayEventControls {
   }
 
   /** Creates a capture for one existing session; overlapping captures conflict. */
-  create(
-    request: EventControlRequest
-  ): string | (ResolvedEventControlRequest & { id: string }) {
+  create(request: EventControlRequest): string | object {
     this.prune()
+    if (request.ownership_key !== undefined) {
+      if (!request.session_id) return 'CONFLICT'
+      const owner = this.owners.get(request.ownership_key)
+      if (owner) {
+        return sameOwner(owner, request as EventControlOwnership) &&
+          owner.policy === policyKey(request) &&
+          owner.id
+          ? (this.inspect(owner.id) ?? 'RETIRED')
+          : 'CONFLICT'
+      }
+      if (this.owners.size >= 4096) return 'LIMIT'
+    }
     const candidates =
       request.session_id === undefined
         ? this.manager
@@ -265,7 +319,49 @@ export class GatewayEventControls {
       delivery_observations: 0,
       delivery_observations_skipped: 0,
     })
+    if (request.ownership_key !== undefined) {
+      this.owners.set(request.ownership_key, {
+        ownership_key: request.ownership_key,
+        bot_id: request.bot_id,
+        guild_id: request.guild_id,
+        session_id: session.sessionId,
+        policy: policyKey(request),
+        id,
+      })
+      return this.inspect(id) ?? 'RETIRED'
+    }
     return { ...request, session_id: session.sessionId, id }
+  }
+
+  /** Recovers only the exact owner's live evidence, without exposing credentials. */
+  inspectByKey(scope: EventControlOwnership): object | undefined {
+    this.prune()
+    const owner = this.owners.get(scope.ownership_key)
+    return owner && sameOwner(owner, scope) && owner.id
+      ? this.inspect(owner.id)
+      : undefined
+  }
+
+  /** Atomically closes ownership even when deletion precedes body parsing of POST. */
+  deleteByKey(
+    scope: EventControlOwnership
+  ): 'DELETED' | 'UNKNOWN_SCOPE' | 'LIMIT' {
+    this.prune()
+    const owner = this.owners.get(scope.ownership_key)
+    if (owner) {
+      if (!sameOwner(owner, scope)) return 'UNKNOWN_SCOPE'
+      if (owner.id) this.delete(owner.id)
+      return 'DELETED'
+    }
+    const session = this.manager.get(scope.session_id)
+    if (session?.botId !== scope.bot_id || !this.hasScope(scope, session))
+      return 'UNKNOWN_SCOPE'
+    if (this.owners.size >= 4096) return 'LIMIT'
+    this.owners.set(scope.ownership_key, {
+      ...scope,
+      id: null,
+    })
+    return 'DELETED'
   }
 
   /** Removes stale controls, discarding held events without delivering them. */
@@ -326,6 +422,9 @@ export class GatewayEventControls {
     return control
       ? structuredClone({
           id: control.id,
+          ...(control.ownership_key !== undefined && {
+            ownership_key: control.ownership_key,
+          }),
           guild_id: control.guild_id,
           bot_id: control.bot_id,
           session_id: control.session_id,
@@ -509,6 +608,10 @@ export class GatewayEventControls {
     if (!control) return false
     clearTimeout(control.timer)
     this.controls.delete(id)
+    if (control.ownership_key !== undefined) {
+      const owner = this.owners.get(control.ownership_key)
+      if (owner) owner.id = null
+    }
     if (control.pending_resume) {
       const pending = control.pending_resume
       pending.socket.off('close', pending.onClose)
@@ -533,6 +636,13 @@ export class GatewayEventControls {
       ) {
         this.delete(control.id)
       }
+    }
+  }
+
+  /** Invalidates captures immediately before a deleted guild can be recreated. */
+  deleteGuild(guildId: string): void {
+    for (const control of this.controls.values()) {
+      if (control.guild_id === guildId) this.delete(control.id)
     }
   }
 }
