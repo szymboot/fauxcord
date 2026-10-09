@@ -1,8 +1,13 @@
 import { EventEmitter } from 'node:events'
 import type { Database } from '../db'
+import type { GatewayVoiceStateUpdateDispatchData } from 'discord-api-types/v10'
 
 /** Mapping of event names to their payloads exchanged over gatewayBus */
 export interface GatewayBusEvents {
+  'voice.state.update': {
+    state: GatewayVoiceStateUpdateDispatchData
+    scope: { db: Database; botId: string; token: string }
+  }
   'message.create': {
     /** Originating database for persisted creates; absent on synthetic events. */
     db?: Database
