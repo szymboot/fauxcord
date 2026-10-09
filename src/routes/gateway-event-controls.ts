@@ -1,7 +1,11 @@
 import { Hono } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
+import { isAuditOwnershipKey } from '../validators/audit-log-response'
 import {
   CONTROL_EVENTS,
   type EventControlRequest,
+  type EventControlOwnership,
+  type EventControlSessionScope,
   type GatewayEventControls,
 } from '../gateway/event-controls'
 
@@ -20,6 +24,8 @@ function validateControl(value: unknown): EventControlRequest | undefined {
   if (
     typeof guildId !== 'string' ||
     typeof botId !== 'string' ||
+    (data.ownership_key !== undefined &&
+      (sessionId === undefined || !isAuditOwnershipKey(data.ownership_key))) ||
     !/^[1-9]\d{0,19}$/.test(guildId) ||
     !/^[1-9]\d{0,19}$/.test(botId) ||
     (sessionId !== undefined &&
@@ -63,6 +69,9 @@ function validateControl(value: unknown): EventControlRequest | undefined {
     ttlMs > 60_000
     ? undefined
     : {
+        ...(data.ownership_key !== undefined && {
+          ownership_key: data.ownership_key,
+        }),
         guild_id: guildId,
         bot_id: botId,
         session_id: sessionId,
@@ -76,11 +85,59 @@ function validateControl(value: unknown): EventControlRequest | undefined {
       }
 }
 
+/** Validates discovery scope without collapsing duplicate query values. */
+function validateSessionScope(
+  search: URLSearchParams
+): EventControlSessionScope | undefined {
+  const bot = search.get('bot_id')
+  const guild = search.get('guild_id')
+  const session = search.get('session_id')
+  return bot !== null &&
+    guild !== null &&
+    search.keys().toArray().length === (session === null ? 2 : 3) &&
+    ['bot_id', 'guild_id'].every(
+      (field) => search.getAll(field).length === 1
+    ) &&
+    bot.trim() === bot &&
+    /^[1-9]\d{0,19}$/.test(bot) &&
+    guild.trim() === guild &&
+    /^[1-9]\d{0,19}$/.test(guild) &&
+    (session === null ||
+      (search.getAll('session_id').length === 1 &&
+        session.length === 32 &&
+        /^[\da-f]{32}$/.test(session)))
+    ? {
+        bot_id: bot,
+        guild_id: guild,
+        ...(session !== null && { session_id: session }),
+      }
+    : undefined
+}
+
+/** Validates an exact key address, requiring the already selected session. */
+function validateOwnership(
+  key: string,
+  search: URLSearchParams
+): EventControlOwnership | undefined {
+  const scope = validateSessionScope(search)
+  return scope?.session_id !== undefined && isAuditOwnershipKey(key)
+    ? { ...scope, ownership_key: key, session_id: scope.session_id }
+    : undefined
+}
+
 /** Mounts unauthenticated Fauxcord-only capture, inspection and delivery controls. */
 export function createGatewayEventControlRoutes(
   controls: GatewayEventControls
 ): Hono {
   const app = new Hono()
+  app.use(
+    '/_test/gateway-event-controls',
+    bodyLimit({
+      maxSize: 16_384,
+      onError: (c) =>
+        c.json({ message: '413: Payload Too Large', code: 0 }, 413),
+    })
+  )
   app.post('/_test/gateway-event-controls', async (c) => {
     const request = validateControl(await c.req.json().catch(() => undefined))
     if (!request) return c.json({ message: '400: Bad Request', code: 0 }, 400)
@@ -92,7 +149,43 @@ export function createGatewayEventControlRoutes(
         )
       : c.json(result, 201)
   })
+  app.get('/_test/gateway-event-controls/session', (c) => {
+    c.header('Cache-Control', 'no-store')
+    const scope = validateSessionScope(new URL(c.req.url).searchParams)
+    if (!scope) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    const result = controls.inspectSession(scope)
+    return typeof result === 'string'
+      ? c.json(
+          { message: result, code: 0 },
+          result === 'UNKNOWN_SCOPE' ? 404 : 409
+        )
+      : c.json(result)
+  })
+  app.get('/_test/gateway-event-controls/by-key/:key', (c) => {
+    c.header('Cache-Control', 'no-store')
+    const scope = validateOwnership(
+      c.req.param('key'),
+      new URL(c.req.url).searchParams
+    )
+    if (!scope) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    const result = controls.inspectByKey(scope)
+    return result
+      ? c.json(result)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
+  app.delete('/_test/gateway-event-controls/by-key/:key', (c) => {
+    const scope = validateOwnership(
+      c.req.param('key'),
+      new URL(c.req.url).searchParams
+    )
+    if (!scope) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    const result = controls.deleteByKey(scope)
+    return result === 'DELETED'
+      ? c.body(null, 204)
+      : c.json({ message: result, code: 0 }, result === 'LIMIT' ? 429 : 404)
+  })
   app.get('/_test/gateway-event-controls/:id', (c) => {
+    c.header('Cache-Control', 'no-store')
     const result = controls.inspect(c.req.param('id'))
     return result
       ? c.json(result)

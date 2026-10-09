@@ -176,7 +176,7 @@ export function buildApp(
       prefix,
       createChannelRoutes(db, config.baseUrl, config.uploadPath)
     )
-    app.route(prefix, createGuildRoutes(db))
+    app.route(prefix, createGuildRoutes(db, eventControls))
     app.route(prefix, createUserRoutes(db))
     app.route(prefix, createGatewayRoutes(db, config.baseUrl))
     app.route(prefix, createSoundboardRoutes(db))
