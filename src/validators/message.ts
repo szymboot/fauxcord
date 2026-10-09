@@ -4,7 +4,12 @@
  * Provides validation conforming to Discord API v10 message limits.
  */
 
-import { maxLengthError, requiredError, type ValidationErrors } from './common'
+import {
+  maxLengthError,
+  requiredError,
+  typeError,
+  type ValidationErrors,
+} from './common'
 
 /** Message creation request type */
 export interface MessageCreatePayload {
@@ -22,11 +27,11 @@ export interface MessageCreatePayload {
 
 /** Embed type */
 export interface EmbedPayload {
-  title?: string
-  description?: string
-  fields?: { name: string; value: string; inline?: boolean }[]
-  footer?: { text: string; icon_url?: string }
-  author?: { name: string; url?: string; icon_url?: string }
+  title?: string | null
+  description?: string | null
+  fields?: { name: string; value: string; inline?: boolean | null }[] | null
+  footer?: { text?: string | null; icon_url?: string } | null
+  author?: { name?: string | null; url?: string; icon_url?: string } | null
   url?: string
   color?: number
   timestamp?: string
@@ -49,85 +54,164 @@ export const MESSAGE_LIMITS = {
   EMBED_AUTHOR_NAME_MAX: 256,
 } as const
 
+/** Untrusted message fields read by the shared create/edit validator. */
+interface MessageValidationInput {
+  content?: unknown
+  embeds?: unknown
+}
+
+/** Checks a JSON value before accessing its properties. */
+function isEmbedObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 /**
- * Validates a message creation payload.
- * @param payload - Payload to validate
+ * Validates one budgeted embed string and returns its character count.
+ * Discord trims surrounding whitespace; JSON Schema maxLength counts Unicode
+ * code points, rather than UTF-16 code units or user-perceived graphemes.
+ * Optional strings accept null; field names and values are required strings,
+ * with no minimum length in the official RichEmbedField request schema.
+ */
+function validateEmbedText(
+  value: unknown,
+  path: string,
+  limit: number,
+  errors: ValidationErrors,
+  required = false
+): number {
+  if (value === undefined || (!required && value === null)) {
+    if (required) errors[path] = { _errors: [requiredError()] }
+    return 0
+  }
+  if (typeof value !== 'string') {
+    errors[path] = { _errors: [typeError('string')] }
+    return 0
+  }
+  // Code points are intentional here: grapheme segmentation would disagree
+  // with the official request schema (e.g. combining marks count separately).
+  // eslint-disable-next-line @typescript-eslint/no-misused-spread
+  const length = [...value.trim()].length
+  if (length > limit) errors[path] = { _errors: [maxLengthError(limit)] }
+  return length
+}
+
+/**
+ * Validates embed text, nested text containers, and the message-wide budget.
+ * Reads untrusted JSON without coercion or mutation. Null/omitted collections
+ * and optional objects are empty; embed and field entries must be objects.
+ * @param embeds - Untrusted embed collection
+ * @returns Discord validation errors, keyed by the offending field path
+ */
+export function validateMessageEmbeds(embeds: unknown): ValidationErrors {
+  const errors: ValidationErrors = {}
+  if (embeds === undefined || embeds === null) return errors
+  if (!Array.isArray(embeds)) {
+    return { embeds: { _errors: [typeError('array')] } }
+  }
+  if (embeds.length > MESSAGE_LIMITS.EMBEDS_MAX) {
+    errors.embeds = { _errors: [maxLengthError(MESSAGE_LIMITS.EMBEDS_MAX)] }
+  }
+
+  let total = 0
+  for (const [index, embed] of embeds.entries()) {
+    const path = `embeds.${index}`
+    if (!isEmbedObject(embed)) {
+      errors[path] = { _errors: [typeError('object')] }
+      continue
+    }
+    total += validateEmbedText(
+      embed.title,
+      `${path}.title`,
+      MESSAGE_LIMITS.EMBED_TITLE_MAX,
+      errors
+    )
+    total += validateEmbedText(
+      embed.description,
+      `${path}.description`,
+      MESSAGE_LIMITS.EMBED_DESCRIPTION_MAX,
+      errors
+    )
+    for (const [property, textProperty, limit] of [
+      ['footer', 'text', MESSAGE_LIMITS.EMBED_FOOTER_TEXT_MAX],
+      ['author', 'name', MESSAGE_LIMITS.EMBED_AUTHOR_NAME_MAX],
+    ] as const) {
+      const nested = embed[property]
+      if (nested === undefined || nested === null) continue
+      if (!isEmbedObject(nested)) {
+        errors[`${path}.${property}`] = { _errors: [typeError('object')] }
+        continue
+      }
+      total += validateEmbedText(
+        nested[textProperty],
+        `${path}.${property}.${textProperty}`,
+        limit,
+        errors
+      )
+    }
+    const fields: unknown = embed.fields
+    if (fields === undefined || fields === null) continue
+    if (!Array.isArray(fields)) {
+      errors[`${path}.fields`] = { _errors: [typeError('array')] }
+      continue
+    }
+    if (fields.length > MESSAGE_LIMITS.EMBED_FIELDS_MAX) {
+      errors[`${path}.fields`] = {
+        _errors: [maxLengthError(MESSAGE_LIMITS.EMBED_FIELDS_MAX)],
+      }
+    }
+    for (const [fieldIndex, field] of fields.entries()) {
+      const fieldPath = `${path}.fields.${fieldIndex}`
+      if (!isEmbedObject(field)) {
+        errors[fieldPath] = { _errors: [typeError('object')] }
+        continue
+      }
+      total += validateEmbedText(
+        field.name,
+        `${fieldPath}.name`,
+        MESSAGE_LIMITS.EMBED_FIELD_NAME_MAX,
+        errors,
+        true
+      )
+      total += validateEmbedText(
+        field.value,
+        `${fieldPath}.value`,
+        MESSAGE_LIMITS.EMBED_FIELD_VALUE_MAX,
+        errors,
+        true
+      )
+      if (field.inline != null && typeof field.inline !== 'boolean') {
+        errors[`${fieldPath}.inline`] = { _errors: [typeError('boolean')] }
+      }
+    }
+  }
+  if (total > MESSAGE_LIMITS.EMBED_TOTAL_CHARS) {
+    if (!Object.hasOwn(errors, 'embeds')) errors.embeds = { _errors: [] }
+    errors.embeds._errors.push({
+      code: 'EMBED_SIZE_EXCEEDS_MAX',
+      message: `Embed size exceeds maximum size of ${MESSAGE_LIMITS.EMBED_TOTAL_CHARS}.`,
+    })
+  }
+  return errors
+}
+
+/**
+ * Validates a message creation or edit payload before any mutation.
+ * @param payload - Untrusted message fields to validate
  * @param _hasAttachments - Whether attachments are present (currently unused)
  * @returns Validation error map (empty object if no errors)
  */
 export function validateMessageCreate(
-  payload: MessageCreatePayload,
+  payload: MessageValidationInput,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _hasAttachments = false
 ): ValidationErrors {
-  // Check content length (treat null like undefined; type-safely verify it is a string)
-  // Check embeds count (null is treated the same as an empty array; discordgo etc. always send null)
-  const embedsTooLong =
-    Array.isArray(payload.embeds) &&
-    payload.embeds.length > MESSAGE_LIMITS.EMBEDS_MAX
-
-  const errors: ValidationErrors = {
+  return {
     ...(typeof payload.content === 'string' &&
       payload.content.length > MESSAGE_LIMITS.CONTENT_MAX && {
         content: { _errors: [maxLengthError(MESSAGE_LIMITS.CONTENT_MAX)] },
       }),
-    ...(embedsTooLong && {
-      embeds: {
-        _errors: [
-          {
-            code: 'BASE_TYPE_MAX_LENGTH',
-            message: `Must be ${MESSAGE_LIMITS.EMBEDS_MAX} or fewer in length.`,
-          },
-        ],
-      },
-    }),
+    ...validateMessageEmbeds(payload.embeds),
   }
-
-  // Validate each embed field (Array.isArray safely skips null/undefined)
-  if (Array.isArray(payload.embeds)) {
-    for (let i = 0; i < payload.embeds.length; i++) {
-      const embed = payload.embeds[i]
-      if (embed.title && embed.title.length > MESSAGE_LIMITS.EMBED_TITLE_MAX) {
-        errors[`embeds.${i}.title`] = {
-          _errors: [maxLengthError(MESSAGE_LIMITS.EMBED_TITLE_MAX)],
-        }
-      }
-      if (
-        embed.description &&
-        embed.description.length > MESSAGE_LIMITS.EMBED_DESCRIPTION_MAX
-      ) {
-        errors[`embeds.${i}.description`] = {
-          _errors: [maxLengthError(MESSAGE_LIMITS.EMBED_DESCRIPTION_MAX)],
-        }
-      }
-      if (
-        embed.fields &&
-        embed.fields.length > MESSAGE_LIMITS.EMBED_FIELDS_MAX
-      ) {
-        errors[`embeds.${i}.fields`] = {
-          _errors: [maxLengthError(MESSAGE_LIMITS.EMBED_FIELDS_MAX)],
-        }
-      }
-      if (
-        embed.footer &&
-        embed.footer.text.length > MESSAGE_LIMITS.EMBED_FOOTER_TEXT_MAX
-      ) {
-        errors[`embeds.${i}.footer.text`] = {
-          _errors: [maxLengthError(MESSAGE_LIMITS.EMBED_FOOTER_TEXT_MAX)],
-        }
-      }
-      if (
-        embed.author &&
-        embed.author.name.length > MESSAGE_LIMITS.EMBED_AUTHOR_NAME_MAX
-      ) {
-        errors[`embeds.${i}.author.name`] = {
-          _errors: [maxLengthError(MESSAGE_LIMITS.EMBED_AUTHOR_NAME_MAX)],
-        }
-      }
-    }
-  }
-
-  return errors
 }
 
 /**

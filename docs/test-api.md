@@ -684,6 +684,57 @@ and its history; subsequent requests run normally.
 
 ---
 
+## Message embed validation
+
+The ordinary channel message create/edit routes, webhook execution/followups,
+webhook message edits (including `@original`), and type-4 interaction callbacks
+share embed text validation. This lets nickname-log tests exercise actual invalid
+embed requests without configuring a REST fault. No new control API is needed.
+Human message injection/edit routes model content only and retain their existing
+behavior.
+
+Following [Discord's embed limits](https://docs.discord.com/developers/resources/message#embed-limits),
+limits are inclusive and exclude leading/trailing whitespace in each text value:
+
+| Property                                               | Maximum         |
+| ------------------------------------------------------ | --------------- |
+| Embeds per message                                     | 10              |
+| `title`                                                | 256 characters  |
+| `description`                                          | 4096 characters |
+| Fields per embed                                       | 25              |
+| `fields[].name`                                        | 256 characters  |
+| `fields[].value`                                       | 1024 characters |
+| `footer.text`                                          | 2048 characters |
+| `author.name`                                          | 256 characters  |
+| All of the above text across all embeds in one message | 6000 characters |
+
+Characters are Unicode code points, matching the official OpenAPI request
+schema's JSON Schema `maxLength` semantics. An astral emoji counts as one;
+combining marks count separately. URLs, message content, and other embed
+properties do not contribute to the 6000-character text budget. Counting excludes
+surrounding whitespace; validation does not rewrite stored text.
+
+The [official `RichEmbedField` request schema](https://github.com/discord/discord-api-spec/blob/main/specs/openapi.json)
+requires both `name` and `value` to be strings and specifies no `minLength`.
+Empty strings and whitespace-only strings are therefore accepted; missing or
+null field names/values are rejected. `inline` may be omitted, null, or boolean.
+Optional title/description, author/footer objects and their text properties,
+and the fields collection may be omitted or null. An empty author/footer object
+is accepted by the request schema. Embed/field entries must be objects;
+malformed collections, objects, and text values return deterministic HTTP `400`
+with code `50035` (`Invalid Form Body`) and errors at the affected field paths.
+These text checks do not add URL, timestamp, color, or media validation.
+
+Omitted `embeds` leaves embeds unchanged on edit. `embeds: null` and `embeds: []`
+clear them; on creation both are empty collections (including discordgo's
+`embeds: null` compatibility). Normal empty-message rules still apply.
+Rejected requests persist no message/embed changes and emit no `MESSAGE_CREATE`
+or `MESSAGE_UPDATE`; rejected callbacks do not acknowledge the interaction.
+The validator has no retained state, so requests, channels, and reset cycles
+cannot share a character budget.
+
+---
+
 ## `GET /_test/messages/:channelId` — Inspect a channel's messages
 
 An endpoint for verifying within your tests that messages have actually arrived.

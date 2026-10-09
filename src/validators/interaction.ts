@@ -2,6 +2,7 @@
 
 import type { Locale } from 'discord-api-types/v10'
 import { typeError, type ValidationErrors } from './common'
+import { validateMessageEmbeds } from './message'
 
 /** Discord's supported locales, checked against the installed API types. */
 const DISCORD_LOCALES = {
@@ -121,20 +122,9 @@ export function validateInteractionCallback(
           'data.flags': { _errors: [typeError('integer')] },
         }),
     }
-    if (data.embeds != null) {
-      if (Array.isArray(data.embeds)) {
-        for (const [index, embed] of data.embeds.entries()) {
-          if (
-            typeof embed !== 'object' ||
-            embed === null ||
-            Array.isArray(embed)
-          ) {
-            errors[`data.embeds.${index}`] = { _errors: [typeError('object')] }
-          }
-        }
-      } else {
-        errors['data.embeds'] = { _errors: [typeError('array')] }
-      }
+    const embedErrors = validateMessageEmbeds(data.embeds)
+    for (const [path, error] of Object.entries(embedErrors)) {
+      errors[`data.${path}`] = error
     }
     return errors
   }

@@ -399,6 +399,12 @@ export function createWebhookRoutes(db: Database, baseUrl: string): Hono {
       payload = await c.req.json<Record<string, unknown>>()
     }
 
+    // Validation
+    const errors = validateWebhookExecute(payload)
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
+
     // Empty message check
     if (isEmptyMessage(payload, hasAttachments)) {
       const err = discordError(
@@ -407,12 +413,6 @@ export function createWebhookRoutes(db: Database, baseUrl: string): Hono {
         400
       )
       return c.json(err.body, 400)
-    }
-
-    // Validation
-    const errors = validateWebhookExecute(payload)
-    if (Object.keys(errors).length > 0) {
-      return c.json(validationError(errors).body, 400)
     }
 
     if (!wait) {
@@ -584,6 +584,11 @@ export function createWebhookRoutes(db: Database, baseUrl: string): Hono {
       content?: string
       embeds?: unknown[]
     }>()
+
+    const errors = validateWebhookExecute(payload)
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
 
     const updated = updateMessage(db, messageId, payload, baseUrl)
     if (!updated) {
