@@ -136,6 +136,89 @@ curl -X DELETE "http://localhost:3000/_test/setup/Bot%20mytoken"
 
 ---
 
+## `PATCH /_test/guilds/:guildId/voice-states/:userId` — Prepare a voice state
+
+Create or update the voice state of an existing guild member, without Bot
+Authorization or an active Gateway connection. This dedicated Fauxcord fixture
+API accepts synthetic human/self flags. Discord's ordinary stage voice-state
+PATCH contract does not accept arbitrary self flags such as `self_stream`:
+see the [Discord voice resource](https://docs.discord.com/developers/resources/voice).
+
+```bash
+curl -X PATCH http://localhost:3000/_test/guilds/GUILD_ID/voice-states/USER_ID \
+  -H "Content-Type: application/json" \
+  -d '{"channel_id":"VOICE_CHANNEL_ID","self_stream":true,"emit":false}'
+```
+
+The response is `200` with the stored native voice-state object: `guild_id`,
+`user_id`, `channel_id`, `session_id`, `deaf`, `mute`, `self_deaf`, `self_mute`,
+`self_stream`, `self_video`, `suppress`, and `request_to_speak_timestamp`.
+It has no embedded `member`. Existing authenticated
+`GET /guilds/:guildId/voice-states/:userId` reads the same object (also under
+`/api` and `/api/v10`). Fixture writes preserve users, memberships and other
+members' voice states.
+
+Allowed input fields:
+
+| Field                                                                             | Meaning                                                                                                                                                                      |
+| --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `channel_id`                                                                      | Voice (type 2) or stage (type 13) channel in the same guild, or `null` to disconnect. Required on first creation.                                                            |
+| `deaf`, `mute`, `self_deaf`, `self_mute`, `self_stream`, `self_video`, `suppress` | Strict JSON booleans. Defaults are `false`; omitted fields retain their existing values.                                                                                     |
+| `request_to_speak_timestamp`                                                      | Valid ISO8601 datetime with timezone, normalized to Discord timestamp format, or `null`. Defaults to `null`; omission preserves it.                                          |
+| `emit`                                                                            | Strict boolean, defaults to `true`. Publication policy for the future native dispatch integration; `false` requests silent historical preparation even with active sessions. |
+
+To join, send `{"channel_id":"VOICE_CHANNEL_ID"}`. To stream or stop streaming
+while staying connected, send `{"self_stream":true}` or `{"self_stream":false}`.
+To move, send another same-guild voice/stage `channel_id`; omitted flags survive
+the move. To disconnect, send `{"channel_id":null}`. Disconnect clears
+`self_stream`, `self_video` and `request_to_speak_timestamp` and retains other
+flags. A disconnected state cannot enable streaming/video or set a nonnull
+request timestamp. The session ID stays stable through flag changes, moves and
+the disconnect response; rejoining after disconnect creates a fresh session.
+IDs and session identity are server-owned and cannot be overridden.
+
+Malformed JSON, nonobjects, unsupported fields and invalid values return `400`.
+Missing guild, user, membership or channel returns Discord-style `404`; channels
+in another guild return `404`, and non-voice/stage channels return `400`. All
+validation finishes before mutation. `{}` is a no-op for an existing valid state.
+
+**Current delivery behavior:** this foundation stores and returns state only.
+It does not publish `VOICE_STATE_UPDATE` or populate startup `GUILD_CREATE`
+voice history, including when sessions are active and `emit` is `true`. Those
+are separate integrations. No audio/video transport is provided.
+
+Voice fixtures are cleared by `/_test/reset`: a nonempty token scopes deletion
+to that Bot's guilds, and omission/empty token clears all voice states. Setup,
+guild, channel, user and membership deletion remove affected states. Other
+setups and memberships remain intact.
+
+### Shared service contract for Gateway integrations
+
+`src/services/voice-states.ts` exports:
+
+- `GuildVoiceState`, extending `APIVoiceState` with required `guild_id` and
+  boolean `self_stream`, without embedded `member`.
+- `getGuildVoiceState(db, guildId, userId)`, returning a stored state or `null`,
+  including a retained disconnected state. Also re-exported by `guild-advanced.ts`
+  for the existing REST routes.
+- `getGuildVoiceStates(db, guildId)`, returning all connected states sorted by
+  `user_id`, with no member-count limit. Inner joins exclude missing guilds,
+  users, memberships, channels, cross-guild channels and channels other than
+  voice/stage. Legacy nullable `self_stream` serializes as `false`.
+- `toGuildVoiceState(row)`, the shared SQLite-to-native serializer.
+- `setTestGuildVoiceState(db, guildId, userId, input)`, validating untrusted
+  input and returning `{ state, previous, changed, emit }` after its transaction
+  commits, or `INVALID_INPUT`, `UNKNOWN_GUILD`, `UNKNOWN_USER`, `UNKNOWN_MEMBER`,
+  `UNKNOWN_CHANNEL` before writes. The route returns only `state`. A native
+  publisher can use `changed && emit` after success; this service emits nothing.
+
+`src/validators/voice-state.ts` exports `TestVoiceStatePatch` and
+`validateTestVoiceState(input)`, which returns normalized typed input or `null`.
+The `/_test/*` route is excluded from the Discord spec manifest by the existing
+Fauxcord-only route policy.
+
+---
+
 ## `POST /_test/reset` — Reset posted data, audit logs and REST faults
 
 Deletes only posted data, while keeping Guild, Channel, and Bot registrations intact.  
@@ -151,7 +234,7 @@ curl -X POST http://localhost:3000/_test/reset \
 
 What gets deleted: messages, webhooks, invites, reactions, pins, embeds, attachments,
 retained attachment files and download metadata (including deleted-message uploads),
-audit-log fixtures, audit response controls, and all REST fault controls (including exhausted controls and consumption history).
+voice-state fixtures, audit-log fixtures, audit response controls, and all REST fault controls (including exhausted controls and consumption history).
 
 ### Reset only a specific Bot's data
 
@@ -164,7 +247,7 @@ curl -X POST http://localhost:3000/_test/reset \
 Only messages sent by that Bot and Webhooks/Invites belonging to that Bot's Guilds are deleted.
 REST fault controls in that Bot's Guilds are also deleted, including controls targeting
 human-authored messages. Audit-log fixtures are cleared by the target Guild's Bot token,
-regardless of their actor or target author. Other Bots' Guilds keep their controls and audit history.
+regardless of their actor or target author. Voice states in that Bot's Guilds are also cleared. Other Bots' Guilds keep their controls and audit history.
 
 ---
 

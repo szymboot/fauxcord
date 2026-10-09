@@ -7,6 +7,7 @@
 import type { GatewayEventControls } from '../gateway/event-controls'
 import { Hono } from 'hono'
 import { createAuditLogResponseRoutes } from './audit-log-responses'
+import { createTestVoiceStateRoutes } from './test-voice-states'
 import { generateSnowflake } from '../snowflake'
 import { decodeTestAttachments } from '../validators/attachment'
 import {
@@ -76,6 +77,7 @@ export function createTestRoutes(
 ): Hono {
   const app = new Hono()
   app.route('/', createAuditLogResponseRoutes(db))
+  app.route('/', createTestVoiceStateRoutes(db))
 
   app.post('/_test/guilds/:guildId/audit-logs', async (c) => {
     const guildId = c.req.param('guildId')
