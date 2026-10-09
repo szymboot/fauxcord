@@ -149,16 +149,30 @@ func strPtr(s string) *string { return &s }
 // verifyGateway runs the Gateway connect + dispatch verification for
 // discordgo, reusing the same *discordgo.Session created for REST above but
 // actually opening the Gateway connection via Session.Open().
-func verifyGateway(session *discordgo.Session, channelID string) gatewayResult {
+func verifyGateway(session *discordgo.Session, origin, botID, guildID, channelID string) gatewayResult {
 	steps := []gatewayStep{}
 	ready := make(chan struct{})
 	msgReceived := make(chan struct{})
+	// Every READY session ID and GUILD_CREATE guild ID, in arrival order, for
+	// the forced re-IDENTIFY step below.
+	readies := make(chan string, 8)
+	creates := make(chan string, 32)
 
 	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
+		select {
+		case readies <- r.SessionID:
+		default:
+		}
 		select {
 		case <-ready:
 		default:
 			close(ready)
+		}
+	})
+	session.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
+		select {
+		case creates <- g.ID:
+		default:
 		}
 	})
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -207,6 +221,8 @@ func verifyGateway(session *discordgo.Session, channelID string) gatewayResult {
 			})
 		}
 	}
+
+	steps = append(steps, verifyReidentify(origin, botID, guildID, <-readies, readies, creates))
 
 	status := "pass"
 	for _, s := range steps {
@@ -723,7 +739,7 @@ func main() {
 		results = append(results, result{Endpoint: key, Status: "pass", Note: ""})
 	}
 
-	gw := verifyGateway(sess, CH)
+	gw := verifyGateway(sess, origin, BOT, GUILD, CH)
 
 	out := report{
 		Library:            "discordgo",
@@ -758,4 +774,81 @@ func webhookMsgCall(webhookMsg string, fn func() error) callEntry {
 		return callEntry{note: "not exercised: no message id captured for a webhook-authored message in this run"}
 	}
 	return callEntry{fn: fn}
+}
+
+// verifyReidentify forces a fresh IDENTIFY through Fauxcord's
+// /_test/gateway-session-invalidations control (INVALID_SESSION with
+// d=false, then close 4009) and confirms that discordgo, without a restart or
+// RESUME, receives a new READY session plus GUILD_CREATE for the guild, and
+// that Fauxcord's observation attributes that IDENTIFY to the new session.
+func verifyReidentify(origin, botID, guildID, firstSession string, readies <-chan string, creates <-chan string) gatewayStep {
+	const step = "invalidate-session-reidentify"
+	// Discard the initial GUILD_CREATE dispatches so only replacements count.
+	for drained := false; !drained; {
+		select {
+		case <-creates:
+		default:
+			drained = true
+		}
+	}
+	key := fmt.Sprintf("compat-reidentify-%d", time.Now().UnixNano())
+	scope := fmt.Sprintf("bot_id=%s&guild_id=%s&session_id=%s", botID, guildID, firstSession)
+	address := origin + "/_test/gateway-session-invalidations/by-key/" + key + "?" + scope
+	// Close ownership even if the POST outcome is ambiguous.
+	defer func() {
+		req, err := http.NewRequest(http.MethodDelete, address, nil)
+		if err == nil {
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				resp.Body.Close()
+			}
+		}
+	}()
+	body, _ := json.Marshal(map[string]string{
+		"ownership_key": key, "bot_id": botID, "guild_id": guildID, "session_id": firstSession,
+	})
+	resp, err := http.Post(origin+"/_test/gateway-session-invalidations", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return gatewayStep{Step: step, Status: "fauxcord-fix", Note: err.Error()}
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		return gatewayStep{Step: step, Status: "fauxcord-fix", Note: fmt.Sprintf("invalidation POST returned %d", resp.StatusCode)}
+	}
+
+	var second string
+	select {
+	case second = <-readies:
+	case <-time.After(20 * time.Second):
+		return gatewayStep{Step: step, Status: "lib-issue", Note: "no READY after INVALID_SESSION"}
+	}
+	if second == firstSession {
+		return gatewayStep{Step: step, Status: "lib-issue", Note: "READY reused the invalidated session"}
+	}
+	for found := false; !found; {
+		select {
+		case id := <-creates:
+			found = id == guildID
+		case <-time.After(20 * time.Second):
+			return gatewayStep{Step: step, Status: "lib-issue", Note: "no GUILD_CREATE after re-IDENTIFY"}
+		}
+	}
+
+	observed, err := http.Get(address + "&wait_ms=10000")
+	if err != nil {
+		return gatewayStep{Step: step, Status: "fauxcord-fix", Note: err.Error()}
+	}
+	defer observed.Body.Close()
+	var observation struct {
+		Replacement *struct {
+			SessionID string `json:"session_id"`
+			Complete  bool   `json:"complete"`
+		} `json:"replacement"`
+	}
+	if err := json.NewDecoder(observed.Body).Decode(&observation); err != nil || observed.StatusCode != http.StatusOK {
+		return gatewayStep{Step: step, Status: "fauxcord-fix", Note: fmt.Sprintf("observation status %d: %v", observed.StatusCode, err)}
+	}
+	if observation.Replacement == nil || observation.Replacement.SessionID != second || !observation.Replacement.Complete {
+		return gatewayStep{Step: step, Status: "fauxcord-fix", Note: "observation does not match the replacement READY"}
+	}
+	return gatewayStep{Step: step, Status: "pass"}
 }

@@ -68,14 +68,14 @@ import {
  * @param db - Database
  * @param baseUrl - Base URL (used for injected message attachment URL generation)
  * @param uploadPath - Directory used for fixture uploads and lifecycle cleanup
- * @param eventControls - Gateway captures to clear on reset or setup deletion
+ * @param eventControls - Gateway test controls to clear on reset or setup deletion
  * @returns Hono router instance
  */
 export function createTestRoutes(
   db: Database,
   baseUrl: string,
   uploadPath = '/data/uploads',
-  eventControls?: GatewayEventControls
+  eventControls?: Pick<GatewayEventControls, 'reset'>
 ): Hono {
   const app = new Hono()
   app.route('/', createAuditLogResponseRoutes(db))

@@ -46,6 +46,8 @@ import {
 } from './routes/guild-advanced'
 import { GatewayEventControls } from './gateway/event-controls'
 import { createGatewayEventControlRoutes } from './routes/gateway-event-controls'
+import { GatewaySessionInvalidations } from './gateway/session-invalidations'
+import { createGatewaySessionInvalidationRoutes } from './routes/gateway-session-invalidations'
 import { createTestRoutes } from './routes/test'
 import { createMockRoutes } from './routes/mock'
 import { createGatewayWebSocketHandler } from './gateway/server'
@@ -111,11 +113,27 @@ export function buildApp(
     db,
     gatewayHandler.sessionManager
   )
+  const sessionInvalidations = new GatewaySessionInvalidations(
+    db,
+    gatewayHandler.sessionManager
+  )
+  /** Applies setup/guild lifecycle cleanup to every Gateway test control. */
+  const gatewayControls = {
+    reset: (token?: string): void => {
+      eventControls.reset(token)
+      sessionInvalidations.reset(token)
+    },
+    deleteGuild: (guildId: string): void => {
+      eventControls.deleteGuild(guildId)
+      sessionInvalidations.deleteGuild(guildId)
+    },
+  }
   // Test control APIs require no authentication
   app.route('/', createGatewayEventControlRoutes(eventControls))
+  app.route('/', createGatewaySessionInvalidationRoutes(sessionInvalidations))
   app.route(
     '/',
-    createTestRoutes(db, config.baseUrl, config.uploadPath, eventControls)
+    createTestRoutes(db, config.baseUrl, config.uploadPath, gatewayControls)
   )
 
   // OAuth2 is partially exempt from authentication (its endpoints validate
@@ -144,7 +162,7 @@ export function buildApp(
   )
   /** Removes subscriptions and all pending test captures on shutdown. */
   const unsubscribeGateway = (): void => {
-    eventControls.reset()
+    gatewayControls.reset()
     unsubscribe()
   }
   app.get(
@@ -176,7 +194,7 @@ export function buildApp(
       prefix,
       createChannelRoutes(db, config.baseUrl, config.uploadPath)
     )
-    app.route(prefix, createGuildRoutes(db, eventControls))
+    app.route(prefix, createGuildRoutes(db, gatewayControls))
     app.route(prefix, createUserRoutes(db))
     app.route(prefix, createGatewayRoutes(db, config.baseUrl))
     app.route(prefix, createSoundboardRoutes(db))

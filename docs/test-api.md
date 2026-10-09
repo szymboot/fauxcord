@@ -2329,6 +2329,292 @@ forged dispatches, or general network chaos are modeled by these controls.
 
 ---
 
+## Forced re-IDENTIFY of a live Gateway session
+
+`/_test/gateway-session-invalidations` makes the client of one exact, live
+Gateway session lose that session and log in again with IDENTIFY, without
+restarting or gracefully shutting down the bot process. The client then
+receives a fresh `READY` and a `GUILD_CREATE` per guild built from the state
+current at IDENTIFY time (members, channels and `voice_states`, including
+states prepared with `emit: false` and states changed live). Use it for
+"reconnect and restore state" scenarios that RESUME cannot exercise:
+RESUME replays missed events and never rebuilds `GUILD_CREATE` snapshots.
+`POST /_test/gateway-event-controls/:id/disconnect` is unchanged and still
+produces a RESUME. These Fauxcord-only, unauthenticated routes have no Discord
+OpenAPI manifest entries.
+
+### Protocol behavior
+
+When the invalidation is applied, Fauxcord atomically:
+
+1. records the session's server sequence high-water mark (`sequence`),
+2. removes the session, so it receives no further dispatch, any capture or
+   gate on it from `/_test/gateway-event-controls` is canceled, and any later
+   RESUME naming it receives INVALID_SESSION (op 9, `d: false`),
+3. sends Gateway INVALID_SESSION (op 9) with `d: false` on its socket, and
+4. closes that socket with close code `4009` (Session timed out).
+
+Discord documents `d: false` as "not resumable": the client must discard its
+session ID and sequence and send a new IDENTIFY. `4009` likewise asks for a new
+session, so a client that ignored op 9 still reconnects, and its RESUME is then
+rejected with op 9 `d: false`. DiscordGo handles op 9 by closing its socket,
+clearing `sessionID`, `sequence` and `resumeGatewayURL` when `d` is false, and
+calling `reconnect()`, whose `Open()` sends IDENTIFY when no session is
+retained. This was verified against the `bwmarrin/discordgo` fork
+`github.com/0x00-sys/discordgo v0.0.0-20260923174158-eda8642daf18` (the
+`wsapi.go` op 9 handler and `Open()`); its startup path also treats 4009 as
+a reason to start a new session. Upstream `bwmarrin/discordgo` v0.29.0 has the
+same op 9 handling and is exercised by `compat/go-discordgo`
+(`invalidate-session-reidentify`). Libraries that wait 1–5 seconds before
+re-identifying, as Discord recommends, are supported; observe with `wait_ms`
+instead of sleeping.
+
+### `POST /_test/gateway-session-invalidations` — Invalidate one session
+
+```json
+{
+  "ownership_key": "reidentify-0b8a7d6e",
+  "bot_id": "111111111111111111",
+  "guild_id": "222222222222222222",
+  "session_id": "0123456789abcdef0123456789abcdef",
+  "ttl_ms": 60000
+}
+```
+
+| Field           | Required | Meaning                                                                                                   |
+| --------------- | -------- | --------------------------------------------------------------------------------------------------------- |
+| `ownership_key` | ✅       | Fresh opaque key chosen **before** sending, `[A-Za-z0-9_-]{1,128}`. Never put credentials in it.          |
+| `bot_id`        | ✅       | Registered bot user ID (1–20 digit snowflake).                                                            |
+| `guild_id`      | ✅       | A guild of that bot's setup; proves the session's IDENTIFY token owns it. All of its guilds are affected. |
+| `session_id`    | ✅       | Exact Gateway session to invalidate (32 lowercase hex characters). Never inferred.                        |
+| `ttl_ms`        | —        | Observation lifetime, integer `1`–`120000`, default `60000`. The invalidation itself is permanent.        |
+
+Use the read-only preflight
+`GET /_test/gateway-event-controls/session?bot_id=:bot&guild_id=:guild` to
+discover `session_id` without access to the bot's READY; it returns `409`
+`AMBIGUOUS_SESSION` when the bot has several live sessions for that setup, and
+`404` until a session is open. `voice.session_id` is a voice-state identifier,
+not a Gateway session ID.
+
+Responses:
+
+- `201` with the observation object below, for a new invalidation **and** for a
+  retry with the same key, owner and `ttl_ms` while the observation is live. A
+  retry never invalidates again, never renews TTL and returns the original
+  `sequence`.
+- `400` (`{"message":"400: Bad Request","code":0}`) for malformed JSON, a
+  non-object, unknown fields, missing `ownership_key`/`session_id`, or invalid
+  IDs, key or TTL. `413` for bodies over 16 KiB.
+- `404` `UNKNOWN_SCOPE` when the session is not registered (never existed,
+  already invalidated, heartbeat-expired) or does not belong to that bot and
+  guild setup (including another bot's session or another setup sharing the
+  bot ID). Failed requests reserve no key.
+- `409` `INVALID_STATE` when the session is registered but its socket is not
+  open: a dropped connection retained for RESUME, or an explicit
+  `gateway-event-controls` disconnect awaiting RESUME. Nothing changes and the
+  key stays unused; after the client resumes on a new socket the session is
+  live again and can be invalidated.
+- `409` `CONFLICT` when the key is already reserved with a different owner or
+  `ttl_ms`, has been closed by DELETE, or its observation retired.
+- `409` `BUSY` when another live observation for the same setup token is
+  still open (has no `replacement` yet). A replacement IDENTIFY carries no
+  link to the session it replaces, so only one open observation per setup
+  token is allowed; this keeps attribution exact. Wait for its replacement,
+  or DELETE it, before invalidating another session of that setup. Nothing
+  changes and the key stays unused.
+- `429` `LIMIT` when 32 observations are live or 4096 ownership reservations
+  (active, retired and tombstoned, never evicted) exist in this Gateway
+  instance.
+
+Because `session_id` is mandatory and a removed session is never registered
+again, a duplicated, delayed or retried POST — with the same or a new key —
+can never invalidate the replacement session.
+
+### Observation object
+
+```json
+{
+  "id": "4f0c3c87-5b1e-4f7e-a0e3-7f5bb8a8f0d1",
+  "ownership_key": "reidentify-0b8a7d6e",
+  "bot_id": "111111111111111111",
+  "guild_id": "222222222222222222",
+  "session_id": "0123456789abcdef0123456789abcdef",
+  "sequence": 42,
+  "op": 9,
+  "resumable": false,
+  "close_code": 4009,
+  "transport": "sent",
+  "status": "identified",
+  "replacement": { "session_id": "fedcba9876543210fedcba9876543210", "...": "same shape as identifies[n]" },
+  "ttl_ms": 60000,
+  "invalidated_at": 1791936000000,
+  "expires_at": 1791936060000,
+  "identifies": [
+    {
+      "session_id": "fedcba9876543210fedcba9876543210",
+      "intents": 129,
+      "identified_at": 1791936000150,
+      "guilds_intent": true,
+      "ready": {
+        "sequence": 1,
+        "guild_ids": ["222222222222222222", "232323232323232323"],
+        "transport": "sent"
+      },
+      "guild_creates": [
+        {
+          "guild_id": "222222222222222222",
+          "sequence": 2,
+          "transport": "sent",
+          "member_count": 2,
+          "channel_count": 1,
+          "voice_states": [
+            {
+              "user_id": "888888888888888888",
+              "channel_id": "555555555555555555",
+              "session_id": "c0ffee...",
+              "self_stream": true,
+              "self_video": false
+            }
+          ],
+          "voice_states_total": 1
+        }
+      ],
+      "guild_creates_sent": 1,
+      "guild_creates_skipped": 0,
+      "state": "complete",
+      "complete": true
+    }
+  ],
+  "identifies_skipped": 0,
+  "resumes_rejected": 0
+}
+```
+
+- `session_id`/`sequence`: the invalidated session and its last server
+  sequence (a server high-water mark, not a client receipt).
+- `transport`: socket write progress of the op 9 frame (`queued`, `sent`,
+  `failed`).
+- `status`: `awaiting_identify` while no attempt is in progress (none yet, or
+  all failed), `identifying` while an attempt's frames are still being
+  written, and `identified` once `replacement` is set.
+- `identifies`: replacement attempts, in order. An attempt is a successful
+  IDENTIFY with the invalidated session's setup token on any **other** socket
+  after invalidation, recorded only while the observation has no pending or
+  complete attempt (so after a `failed` attempt the next IDENTIFY is recorded,
+  and after a replacement nothing more is). At most 4 attempts are retained:
+  a new attempt evicts the oldest failed one, counted in `identifies_skipped`,
+  so repeated failures never prevent observing a later replacement. Sessions that existed before the invalidation,
+  other bots and other setups never appear. Each attempt reports the new
+  `session_id`, READY's sequence and guild stubs, `guild_creates_sent`, and
+  one summary per `GUILD_CREATE` written (at most 50 summaries, further ones
+  counted in `guild_creates_skipped`; 100 voice states each, with the full
+  count in `voice_states_total`).
+- `state` per attempt: `complete` when READY and a `GUILD_CREATE` for every
+  READY guild were `sent` (READY alone when the replacement lacks the `Guilds`
+  intent, reported as `guilds_intent: false`); `failed` when one of them could
+  not be written, including a socket that closed before the snapshot was
+  written (`buffered`); otherwise `pending`. `complete` mirrors
+  `state === "complete"`. Completion counts every written GUILD_CREATE, not
+  just the retained summaries.
+- `replacement`: the first `complete` attempt, or `null`.
+- `transport` values on READY/GUILD_CREATE are server socket writes; `sent`
+  means the frame was handed to the OS, not that the client processed it.
+- `resumes_rejected`: RESUME attempts naming the invalidated session that
+  received INVALID_SESSION. DiscordGo normally shows `0` because op 9 `d: false`
+  makes it IDENTIFY directly.
+
+HTTP 2xx from POST only proves the server applied the invalidation. Prove the
+re-login with `status: "identified"` and `replacement.session_id` (different
+from `session_id`); correlate with the bot's own READY session ID when
+available. Attribution is server-side and token-based: if several processes
+or shards share one setup token, any of them may supply the first IDENTIFY
+after the invalidation, so compare `replacement.session_id` with the process
+you expect.
+
+### `GET /_test/gateway-session-invalidations/by-key/:key` — Recover and wait
+
+```text
+GET /_test/gateway-session-invalidations/by-key/:key?bot_id=:bot&guild_id=:guild&session_id=:session
+GET /_test/gateway-session-invalidations/by-key/:key?bot_id=:bot&guild_id=:guild&session_id=:session&wait_ms=10000
+```
+
+Returns `200` with the observation for the exact owner, or `404` for an
+unknown, retired, tombstoned or wrong-scope key (without disclosing another
+owner). Each scope field is required exactly once; unknown/duplicate fields or
+malformed values return `400`. `wait_ms` (optional integer `0`–`30000`) holds
+the response until `replacement` is set or the observation retires, then answers immediately: `200` with the current observation (which
+may still be `awaiting_identify` when the wait elapsed) or `404` if it retired
+meanwhile. At most 64 concurrent waits per Gateway instance (`429` beyond).
+Responses use `Cache-Control: no-store`. `GET /_test/gateway-session-invalidations/:id`
+accepts the same optional `wait_ms` and no other query fields.
+
+### `DELETE /_test/gateway-session-invalidations/by-key/:key` — Close ownership
+
+Same exact query (no `wait_ms`). Returns `204` and retires the observation for
+an existing reservation (live, retired or tombstoned). For an **unused** key it
+reserves a tombstone and returns `204` when the bot/guild setup scope is valid,
+and the named session, if still registered, belongs to it; a later POST with
+that key returns `409` and invalidates nothing. Because `session_id` is never
+reused, a tombstone is also accepted when the session no longer exists. A
+wrong scope returns `404` and changes nothing. DELETE never reconnects or
+restores the invalidated session. `DELETE /_test/gateway-session-invalidations/:id`
+retires by observation ID (`204`/`404`).
+
+### Lifecycle
+
+TTL expiry, DELETE, `/_test/reset` (all, or the matching setup token),
+`DELETE /_test/setup/:token`, deleting the scoped guild and Gateway shutdown
+retire observations; their keys stay closed. Observations and reservations are
+in memory and do not survive restart. Retiring an observation never undoes the
+invalidation, and it does not affect the replacement session.
+
+### Harness flow without sleeps
+
+```typescript
+const discovery = await fetch(
+  `${base}/_test/gateway-event-controls/session?bot_id=${botId}&guild_id=${guildId}`
+)
+if (!discovery.ok) throw new Error(`Session discovery: ${discovery.status}`)
+const { session_id: sessionId } = await discovery.json()
+const key = `reidentify-${crypto.randomUUID()}`
+const query = new URLSearchParams({
+  bot_id: botId,
+  guild_id: guildId,
+  session_id: sessionId,
+})
+const address = `${base}/_test/gateway-session-invalidations/by-key/${key}?${query}`
+try {
+  // A lost or truncated response leaves the outcome unknown; the GET below
+  // recovers it, and a retry with the same key is idempotent.
+  await fetch(`${base}/_test/gateway-session-invalidations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ownership_key: key,
+      bot_id: botId,
+      guild_id: guildId,
+      session_id: sessionId,
+    }),
+  }).catch(() => undefined)
+  const observed = await fetch(`${address}&wait_ms=15000`)
+  if (observed.status !== 200) throw new Error('Invalidation was not applied')
+  const observation = await observed.json()
+  const { replacement } = observation
+  if (!replacement || replacement.session_id === sessionId)
+    throw new Error('No fresh IDENTIFY with GUILD_CREATE was observed')
+  // Assert application state restored from replacement.guild_creates.
+} finally {
+  // Closes the key even if a delayed POST arrives later.
+  const cleanup = await fetch(address, { method: 'DELETE' })
+  if (cleanup.status !== 204) throw new Error(`Cleanup: ${cleanup.status}`)
+}
+```
+
+Focused real HTTP/WS coverage is in
+`src/gateway/session-invalidations.test.ts`.
+
+---
+
 ## Bulk-delete injected messages through Discord REST
 
 Use `POST /api/v10/channels/:channelId/messages/bulk-delete` with the bot's

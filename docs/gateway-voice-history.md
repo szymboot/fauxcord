@@ -41,7 +41,9 @@ connected states, `voice_states` is an empty array.
 A new socket using fresh IDENTIFY receives a new snapshot of saved state,
 including changes prepared while an earlier connection existed. This is
 distinct from RESUME, which follows the existing replay behavior and does not
-rebuild `GUILD_CREATE` snapshots.
+rebuild `GUILD_CREATE` snapshots. To make an already connected client
+re-IDENTIFY without restarting it, use
+[`POST /_test/gateway-session-invalidations`](test-api.md#forced-re-identify-of-a-live-gateway-session).
 
 `POST /_test/reset` clears voice fixtures while retaining bot, guild, channel,
 and member registrations. A nonempty `token` limits cleanup to that setup's

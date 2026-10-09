@@ -2,16 +2,33 @@ import type { GatewayPayload } from './protocol'
 import { GatewayOp } from './opcodes'
 import { encodePayload } from './protocol'
 import { hasIntent } from './intents'
-import type { Session, SessionManager } from './session'
+import type { DispatchTransport, Session, SessionManager } from './session'
+
+/** Combines optional transport observers into one callback. */
+function combineObservers(
+  first: ((status: DispatchTransport) => void) | undefined,
+  second: ((status: DispatchTransport) => void) | undefined
+): ((status: DispatchTransport) => void) | undefined {
+  return !first || !second
+    ? (first ?? second)
+    : (status) => {
+        first(status)
+        second(status)
+      }
+}
 
 /** Writes an envelope and observes socket progress, never application completion. */
 export function writeDispatch(
   manager: SessionManager,
   session: Session,
   payload: GatewayPayload<unknown>,
-  source: 'native' | 'release' | 'replay' | 'resume' = 'native'
+  source: 'native' | 'release' | 'replay' | 'resume' = 'native',
+  onStatus?: (status: DispatchTransport) => void
 ): void {
-  const observe = manager.observeDispatch?.(session, payload, source)
+  const observe = combineObservers(
+    manager.observeDispatch?.(session, payload, source),
+    onStatus
+  )
   if (session.ws.readyState !== 1) {
     observe?.('buffered')
     return
@@ -35,10 +52,11 @@ export function deliverDispatch(
   manager: SessionManager,
   session: Session,
   payload: GatewayPayload<unknown>,
-  source: 'native' | 'release' | 'replay' = 'native'
+  source: 'native' | 'release' | 'replay' = 'native',
+  onStatus?: (status: DispatchTransport) => void
 ): void {
   manager.pushToReplayBuffer(session, payload)
-  writeDispatch(manager, session, payload, source)
+  writeDispatch(manager, session, payload, source, onStatus)
 }
 
 /**
@@ -48,12 +66,16 @@ export function deliverDispatch(
  * @param session - Destination session
  * @param eventName - Dispatch event name (e.g. "MESSAGE_CREATE")
  * @param data - Event data
+ * @param observe - Optional observer of this uncaptured envelope's transport
  */
 export function sendDispatch(
   manager: SessionManager,
   session: Session,
   eventName: string,
-  data: unknown
+  data: unknown,
+  observe?: (
+    payload: GatewayPayload<unknown>
+  ) => ((status: DispatchTransport) => void) | undefined
 ): void {
   const seq = manager.nextSeq(session)
   const payload = {
@@ -63,7 +85,7 @@ export function sendDispatch(
     d: data,
   }
   if (manager.captureDispatch?.(session, payload)) return
-  deliverDispatch(manager, session, payload)
+  deliverDispatch(manager, session, payload, 'native', observe?.(payload))
 }
 
 /**
