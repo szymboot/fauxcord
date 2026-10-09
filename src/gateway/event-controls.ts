@@ -4,10 +4,12 @@ import type { Database } from '../db'
 import type { Session, SessionManager } from './session'
 import type { GatewayPayload } from './protocol'
 import { encodePayload } from './protocol'
-import { deliverDispatch } from './dispatch'
+import { deliverDispatch, writeDispatch } from './dispatch'
+import { sendReconnect } from './server'
 
 /** Native dispatches supported by the narrow test capture control. */
 export const CONTROL_EVENTS = [
+  'GUILD_MEMBER_UPDATE',
   'MESSAGE_CREATE',
   'MESSAGE_DELETE',
   'MESSAGE_DELETE_BULK',
@@ -23,6 +25,10 @@ export interface EventControlRequest {
   bot_id: string
   /** Optional exact session; omission requires one unambiguous live owner. */
   session_id?: string
+  /** Optional exact member selector, only for member update captures. */
+  member_id?: string
+  /** Requires explicit consuming-client acknowledgements for delivery barriers. */
+  application_ack?: boolean
   events: string[]
   hold: boolean
   allow_original_sequence: boolean
@@ -35,6 +41,16 @@ interface ResolvedEventControlRequest extends EventControlRequest {
   session_id: string
 }
 
+/** One bounded transport attempt with an independent application barrier. */
+interface DeliveryObservation {
+  id: string
+  sequence: number | null
+  source: 'native' | 'release' | 'replay' | 'resume'
+  transport: 'buffered' | 'queued' | 'sent' | 'failed'
+  application: 'not_requested' | 'pending' | 'acknowledged'
+  ack_token?: string
+}
+
 /** Immutable native envelope plus its delivery observation. */
 interface CapturedEvent {
   id: string
@@ -42,6 +58,7 @@ interface CapturedEvent {
   state: 'held' | 'delivered' | 'released'
   deliveries: number
   last_sequence: number | null
+  delivery_records: DeliveryObservation[]
 }
 
 /** One live-session capture, with a fixed lifetime and memory budget. */
@@ -55,11 +72,25 @@ interface EventControl extends ResolvedEventControlRequest {
   timer: NodeJS.Timeout
   session: Session
   socket: WebSocket
+  awaiting_resume: boolean
+  pause_resume: boolean
+  pending_resume?: {
+    socket: WebSocket
+    retry: () => void
+    onClose: () => void
+    generation: number
+  }
+  delivery_observations: number
+  delivery_observations_skipped: number
 }
 
 /** Manages test captures locally to one assembled Gateway and database. */
 export class GatewayEventControls {
   private readonly controls = new Map<string, EventControl>()
+  private readonly capturedPayloads = new WeakMap<
+    object,
+    { controlId: string; eventId: string }
+  >()
   private readonly closeListeners = new Map<WebSocket, () => void>()
 
   /** Installs capture and session invalidation hooks on this Gateway only. */
@@ -69,6 +100,61 @@ export class GatewayEventControls {
   ) {
     manager.captureDispatch = (session, envelope) =>
       this.capture(session, envelope)
+    manager.observeDispatch = (session, payload, source) =>
+      this.observeDelivery(session, payload, source)
+    manager.invalidatePendingResume = (socket) => {
+      for (const control of this.controls.values()) {
+        const pending = control.pending_resume
+        if (pending?.socket !== socket) continue
+        socket.off('close', pending.onClose)
+        control.pending_resume = undefined
+      }
+    }
+    manager.gateResume = (session, socket, retry) => {
+      this.prune()
+      const control = this.controls
+        .values()
+        .find(
+          (entry) =>
+            entry.session === session &&
+            entry.awaiting_resume &&
+            entry.pause_resume
+        )
+      if (!control) return false
+      if (
+        control.pending_resume ||
+        manager.getAll().some((owner) => owner.ws === socket)
+      ) {
+        socket.send(encodePayload({ op: 9, d: false }))
+        return true
+      }
+      /** Clears a closed pending connection without opening the resume gate. */
+      const onClose = (): void => {
+        control.pending_resume = undefined
+      }
+      control.pending_resume = {
+        socket,
+        retry,
+        onClose,
+        generation: manager.connectionGeneration(socket),
+      }
+      socket.once('close', onClose)
+      return true
+    }
+    manager.resumeEventControls = (session, socket) => {
+      for (const control of this.controls.values()) {
+        if (control.session !== session) continue
+        if (!control.awaiting_resume || !this.isLive(control)) {
+          this.delete(control.id)
+          continue
+        }
+        const oldSocket = control.socket
+        control.socket = socket
+        control.awaiting_resume = false
+        this.detachUnusedListener(oldSocket)
+        this.attachListener(socket)
+      }
+    }
     manager.invalidateEventControls = (sessionId) => {
       for (const control of this.controls.values()) {
         if (control.session_id === sessionId) this.delete(control.id)
@@ -82,7 +168,8 @@ export class GatewayEventControls {
       control.expires_at > Date.now() &&
       this.manager.get(control.session_id) === control.session &&
       control.session.ws === control.socket &&
-      control.socket.readyState === WebSocket.OPEN &&
+      (control.awaiting_resume ||
+        control.socket.readyState === WebSocket.OPEN) &&
       this.hasScope(control, control.session)
     )
   }
@@ -129,6 +216,15 @@ export class GatewayEventControls {
       !this.hasScope(request, session)
     )
       return 'UNKNOWN_SCOPE'
+    if (
+      request.member_id !== undefined &&
+      !this.db
+        .prepare(
+          'SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ?'
+        )
+        .get(request.guild_id, request.member_id)
+    )
+      return 'UNKNOWN_SCOPE'
     if (this.controls.size >= 32) return 'LIMIT'
     if (
       this.controls
@@ -137,6 +233,9 @@ export class GatewayEventControls {
           (control) =>
             control.session_id === session.sessionId &&
             control.guild_id === request.guild_id &&
+            (control.member_id === undefined ||
+              request.member_id === undefined ||
+              control.member_id === request.member_id) &&
             control.events.some((event) => request.events.includes(event))
         )
     )
@@ -144,17 +243,7 @@ export class GatewayEventControls {
     const id = randomUUID()
     const timer = setTimeout(() => this.delete(id), request.ttl_ms)
     timer.unref()
-    if (!this.closeListeners.has(session.ws)) {
-      const socket = session.ws
-      /** Discards all controls tied to the disconnected connection. */
-      const onClose = (): void => {
-        for (const control of this.controls.values()) {
-          if (control.socket === socket) this.delete(control.id)
-        }
-      }
-      this.closeListeners.set(socket, onClose)
-      socket.once('close', onClose)
-    }
+    this.attachListener(session.ws)
     this.controls.set(id, {
       ...request,
       session_id: session.sessionId,
@@ -167,6 +256,10 @@ export class GatewayEventControls {
       timer,
       session,
       socket: session.ws,
+      awaiting_resume: false,
+      pause_resume: false,
+      delivery_observations: 0,
+      delivery_observations_skipped: 0,
     })
     return { ...request, session_id: session.sessionId, id }
   }
@@ -184,13 +277,18 @@ export class GatewayEventControls {
     envelope: GatewayPayload<unknown>
   ): boolean {
     this.prune()
-    const data = envelope.d as { guild_id?: unknown } | null
+    const data = envelope.d as {
+      guild_id?: unknown
+      user?: { id?: unknown }
+    } | null
     const control = this.controls
       .values()
       .find(
         (candidate) =>
           candidate.session === session &&
           candidate.guild_id === data?.guild_id &&
+          (candidate.member_id === undefined ||
+            candidate.member_id === data.user?.id) &&
           candidate.events.includes(envelope.t ?? '')
       )
     if (!control) return false
@@ -204,12 +302,15 @@ export class GatewayEventControls {
       return false
     }
     control.bytes += bytes
+    const eventId = randomUUID()
+    this.capturedPayloads.set(envelope, { controlId: control.id, eventId })
     control.events_captured.push({
-      id: randomUUID(),
+      id: eventId,
       envelope: JSON.parse(serialized) as GatewayPayload<unknown>,
       state: control.hold ? 'held' : 'delivered',
-      deliveries: control.hold ? 0 : 1,
-      last_sequence: control.hold ? null : (envelope.s ?? null),
+      deliveries: 0,
+      last_sequence: null,
+      delivery_records: [],
     })
     return control.hold
   }
@@ -225,6 +326,12 @@ export class GatewayEventControls {
           bot_id: control.bot_id,
           session_id: control.session_id,
           events: control.events,
+          member_id: control.member_id,
+          application_ack: control.application_ack ?? false,
+          awaiting_resume: control.awaiting_resume,
+          pause_resume: control.pause_resume,
+          pending_resume: control.pending_resume !== undefined,
+          delivery_observations_skipped: control.delivery_observations_skipped,
           hold: control.hold,
           allow_original_sequence: control.allow_original_sequence,
           limit: control.limit,
@@ -248,6 +355,8 @@ export class GatewayEventControls {
     this.prune()
     const control = this.controls.get(id)
     if (!control) return 'UNKNOWN_SCOPE'
+    if (control.awaiting_resume || control.socket.readyState !== WebSocket.OPEN)
+      return 'INVALID_STATE'
     if (original && !control.allow_original_sequence) return 'INVALID_STATE'
     if (control.operations + ids.length > 100) return 'LIMIT'
     const entries = ids.map((eventId) =>
@@ -263,18 +372,131 @@ export class GatewayEventControls {
       return 'INVALID_STATE'
     for (const event of captured) {
       const payload = structuredClone(event.envelope)
+      this.capturedPayloads.set(payload, { controlId: id, eventId: event.id })
+      const source = replay ? 'replay' : 'release'
       if (original) {
-        control.socket.send(encodePayload(payload))
+        writeDispatch(this.manager, control.session, payload, source)
       } else {
         payload.s = this.manager.nextSeq(control.session)
-        deliverDispatch(this.manager, control.session, payload)
+        deliverDispatch(this.manager, control.session, payload, source)
       }
       event.state = replay ? event.state : 'released'
-      event.deliveries += 1
-      event.last_sequence = payload.s ?? null
       control.operations += 1
     }
     return this.inspect(id) ?? 'UNKNOWN_SCOPE'
+  }
+
+  /** Tracks an attempted write; send callbacks cannot acknowledge application work. */
+  private observeDelivery(
+    session: Session,
+    payload: GatewayPayload<unknown>,
+    source: DeliveryObservation['source']
+  ): ((status: DeliveryObservation['transport']) => void) | undefined {
+    this.prune()
+    const reference = this.capturedPayloads.get(payload)
+    const control = reference && this.controls.get(reference.controlId)
+    const event = control?.events_captured.find(
+      (entry) => entry.id === reference?.eventId
+    )
+    if (!event || control?.session !== session) return undefined
+    event.deliveries += 1
+    event.last_sequence = payload.s ?? null
+    if (control.delivery_observations >= 200) {
+      control.delivery_observations_skipped += 1
+      return undefined
+    }
+    control.delivery_observations += 1
+    const delivery: DeliveryObservation = {
+      id: randomUUID(),
+      sequence: payload.s ?? null,
+      source,
+      transport: 'queued',
+      application: control.application_ack ? 'pending' : 'not_requested',
+      ...(control.application_ack && { ack_token: randomUUID() }),
+    }
+    event.delivery_records.push(delivery)
+    return (status) => {
+      delivery.transport = status
+    }
+  }
+
+  /** Explicit client/harness assertion that this exact delivered callback finished. */
+  acknowledge(id: string, deliveryId: string, token: string): string | object {
+    this.prune()
+    const control = this.controls.get(id)
+    if (!control) return 'UNKNOWN_SCOPE'
+    const delivery = control.events_captured
+      .flatMap((event) => event.delivery_records)
+      .find((entry) => entry.id === deliveryId)
+    if (delivery?.ack_token !== token) return 'UNKNOWN_DELIVERY'
+    if (delivery.transport !== 'sent') return 'INVALID_STATE'
+    delivery.application = 'acknowledged'
+    return this.inspect(id) ?? 'UNKNOWN_SCOPE'
+  }
+
+  /** Disconnects one owner deterministically while preserving only this control. */
+  disconnect(id: string, pauseResume = false): string | object {
+    this.prune()
+    const control = this.controls.get(id)
+    if (!control) return 'UNKNOWN_SCOPE'
+    if (control.awaiting_resume || control.socket.readyState !== WebSocket.OPEN)
+      return 'INVALID_STATE'
+    if (control.operations >= 100) return 'LIMIT'
+    control.operations += 1
+    control.awaiting_resume = true
+    control.pause_resume = pauseResume
+    const sequence = control.session.seq
+    sendReconnect(control.session)
+    return {
+      session_id: control.session_id,
+      sequence,
+      awaiting_resume: true,
+      pause_resume: control.pause_resume,
+    }
+  }
+
+  /** Opens the gate and retries one waiting authenticated protocol RESUME. */
+  resume(id: string): string | object {
+    this.prune()
+    const control = this.controls.get(id)
+    if (!control) return 'UNKNOWN_SCOPE'
+    if (!control.awaiting_resume || !control.pause_resume)
+      return 'INVALID_STATE'
+    control.pause_resume = false
+    const pending = control.pending_resume
+    control.pending_resume = undefined
+    if (pending) {
+      pending.socket.off('close', pending.onClose)
+      if (
+        pending.socket.readyState === WebSocket.OPEN &&
+        this.manager.connectionGeneration(pending.socket) === pending.generation
+      )
+        pending.retry()
+    }
+    return this.inspect(id) ?? 'UNKNOWN_SCOPE'
+  }
+
+  /** Installs one bounded listener per controlled socket. */
+  private attachListener(socket: WebSocket): void {
+    if (this.closeListeners.has(socket)) return
+    /** Ordinary disconnect cancels; an explicitly requested resume retains scope. */
+    const onClose = (): void => {
+      for (const control of this.controls.values()) {
+        if (control.socket === socket && !control.awaiting_resume)
+          this.delete(control.id)
+      }
+    }
+    this.closeListeners.set(socket, onClose)
+    socket.once('close', onClose)
+  }
+
+  /** Removes connection listeners as soon as their last control is gone. */
+  private detachUnusedListener(socket: WebSocket): void {
+    if (this.controls.values().some((control) => control.socket === socket))
+      return
+    const listener = this.closeListeners.get(socket)
+    if (listener) socket.off('close', listener)
+    this.closeListeners.delete(socket)
   }
 
   /** Cancels a control and drops its held events and observation history. */
@@ -283,13 +505,16 @@ export class GatewayEventControls {
     if (!control) return false
     clearTimeout(control.timer)
     this.controls.delete(id)
-    if (
-      !this.controls.values().some((other) => other.socket === control.socket)
-    ) {
-      const listener = this.closeListeners.get(control.socket)
-      if (listener) control.socket.off('close', listener)
-      this.closeListeners.delete(control.socket)
+    if (control.pending_resume) {
+      const pending = control.pending_resume
+      pending.socket.off('close', pending.onClose)
+      if (
+        this.manager.connectionGeneration(pending.socket) === pending.generation
+      )
+        pending.socket.close(1000, 'Gateway control canceled')
+      control.pending_resume = undefined
     }
+    this.detachUnusedListener(control.socket)
     return true
   }
 

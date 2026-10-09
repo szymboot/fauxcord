@@ -4,21 +4,41 @@ import { encodePayload } from './protocol'
 import { hasIntent } from './intents'
 import type { Session, SessionManager } from './session'
 
+/** Writes an envelope and observes socket progress, never application completion. */
+export function writeDispatch(
+  manager: SessionManager,
+  session: Session,
+  payload: GatewayPayload<unknown>,
+  source: 'native' | 'release' | 'replay' | 'resume' = 'native'
+): void {
+  const observe = manager.observeDispatch?.(session, payload, source)
+  if (session.ws.readyState !== 1) {
+    observe?.('buffered')
+    return
+  }
+  observe?.('queued')
+  try {
+    if (observe) {
+      session.ws.send(encodePayload(payload), (error) => {
+        observe(error ? 'failed' : 'sent')
+      })
+    } else {
+      session.ws.send(encodePayload(payload))
+    }
+  } catch {
+    observe?.('failed')
+  }
+}
+
 /** Delivers a sequenced envelope without invoking test capture again. */
 export function deliverDispatch(
   manager: SessionManager,
   session: Session,
-  payload: GatewayPayload<unknown>
+  payload: GatewayPayload<unknown>,
+  source: 'native' | 'release' | 'replay' = 'native'
 ): void {
   manager.pushToReplayBuffer(session, payload)
-  try {
-    session.ws.send(encodePayload(payload))
-  } catch {
-    // `ws.send` can throw synchronously when the socket is not OPEN (e.g. a
-    // transient disconnect). The event is already in the replay buffer, so it
-    // will be delivered on RESUME; swallow the error so delivery to the other
-    // sessions is not interrupted.
-  }
+  writeDispatch(manager, session, payload, source)
 }
 
 /**

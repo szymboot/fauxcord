@@ -288,6 +288,25 @@ export interface GuildMemberUpdateParams {
   communication_disabled_until?: string | null
 }
 
+/** Emits a native member snapshot only to its registered guild owner. */
+function emitMemberUpdate(
+  db: Database,
+  guildId: string,
+  member: GuildMemberObject
+): void {
+  const owner = db
+    .prepare(
+      'SELECT b.user_id AS botId, b.token FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ?'
+    )
+    .get(guildId) as { botId: string; token: string } | undefined
+  if (!owner) return
+  gatewayBus.emit('guild.member.update', {
+    guildId,
+    member: member as unknown as Record<string, unknown>,
+    scope: { db, ...owner },
+  })
+}
+
 /**
  * Updates a guild member's nickname, roles, voice mute and/or timeout deadline.
  * @param db - Database
@@ -348,10 +367,7 @@ export function updateGuildMember(
 
   const updated = getGuildMember(db, guildId, userId)
   if (updated) {
-    gatewayBus.emit('guild.member.update', {
-      guildId,
-      member: updated as unknown as Record<string, unknown>,
-    })
+    emitMemberUpdate(db, guildId, updated)
   }
   return updated
 }
@@ -427,10 +443,7 @@ export function addMemberRole(
   // emit in that case so subscribers never spread a null member payload.
   const memberObject = getGuildMember(db, guildId, userId)
   if (memberObject) {
-    gatewayBus.emit('guild.member.update', {
-      guildId,
-      member: memberObject as unknown as Record<string, unknown>,
-    })
+    emitMemberUpdate(db, guildId, memberObject)
   }
   return true
 }
@@ -462,10 +475,7 @@ export function removeMemberRole(
   // emit in that case so subscribers never spread a null member payload.
   const memberObject = getGuildMember(db, guildId, userId)
   if (memberObject) {
-    gatewayBus.emit('guild.member.update', {
-      guildId,
-      member: memberObject as unknown as Record<string, unknown>,
-    })
+    emitMemberUpdate(db, guildId, memberObject)
   }
   return true
 }

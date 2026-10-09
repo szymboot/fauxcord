@@ -240,6 +240,18 @@ export function registerGatewaySubscriptions(
   const onGuildMemberUpdate: Parameters<
     typeof gatewayBus.on<'guild.member.update'>
   >[1] = (payload) => {
+    if (payload.scope) {
+      if (payload.scope.db !== db) return
+      broadcastToBot(
+        manager,
+        payload.scope.botId,
+        'GUILD_MEMBER_UPDATE',
+        { ...payload.member, guild_id: payload.guildId },
+        GatewayIntentBits.GuildMembers,
+        payload.scope.token
+      )
+      return
+    }
     broadcastToAll(
       manager,
       'GUILD_MEMBER_UPDATE',

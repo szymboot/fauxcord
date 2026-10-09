@@ -103,6 +103,7 @@ describe('guild member timeouts', () => {
       expect(listener).toHaveBeenCalledWith({
         guildId,
         member: getGuildMember(context.db, guildId, userId),
+        scope: { db: context.db, botId: '111111111111111111', token },
       })
       await patch({ nick: 'Changed' })
       await patch({ roles: [], mute: false })

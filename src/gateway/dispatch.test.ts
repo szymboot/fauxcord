@@ -4,7 +4,7 @@ import { sendDispatch, broadcastToBot, broadcastToAll } from './dispatch'
 import { GatewayIntentBits } from 'discord-api-types/v10'
 
 function fakeWs() {
-  return { send: vi.fn(), close: vi.fn() }
+  return { readyState: 1, send: vi.fn(), close: vi.fn() }
 }
 
 describe('sendDispatch', () => {
@@ -31,6 +31,7 @@ describe('sendDispatch', () => {
   it('does not throw when ws.send throws, and still advances seq / replay buffer', () => {
     const manager = new SessionManager()
     const ws = {
+      readyState: 1,
       send: vi.fn(() => {
         throw new Error('socket is not open')
       }),
@@ -98,6 +99,7 @@ describe('broadcastToAll', () => {
   it('still delivers to healthy sessions when another session throws on send', () => {
     const manager = new SessionManager()
     const throwingWs = {
+      readyState: 1,
       send: vi.fn(() => {
         throw new Error('socket is not open')
       }),
