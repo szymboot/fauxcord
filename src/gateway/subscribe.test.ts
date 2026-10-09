@@ -7,7 +7,7 @@ import { registerGatewaySubscriptions } from './subscribe'
 describe('registerGatewaySubscriptions', () => {
   it('broadcasts message.create to all connected sessions', () => {
     const manager = new SessionManager()
-    const ws = { send: vi.fn(), close: vi.fn() }
+    const ws = { readyState: 1, send: vi.fn(), close: vi.fn() }
     // Only sessions with GuildMessages receive this event, so the Intent is
     // set explicitly (registerGatewaySubscriptions filters message.create
     // delivery by the GuildMessages Intent).
@@ -45,8 +45,8 @@ describe('registerGatewaySubscriptions', () => {
 
   it('only delivers guild.create to sessions with the Guilds intent', () => {
     const manager = new SessionManager()
-    const wsWithoutIntent = { send: vi.fn(), close: vi.fn() }
-    const wsWithIntent = { send: vi.fn(), close: vi.fn() }
+    const wsWithoutIntent = { readyState: 1, send: vi.fn(), close: vi.fn() }
+    const wsWithIntent = { readyState: 1, send: vi.fn(), close: vi.fn() }
     // No Guilds intent: must not receive GUILD_CREATE.
     manager.create({
       botId: 'bot1',
@@ -78,8 +78,8 @@ describe('registerGatewaySubscriptions', () => {
 
   it('dispatches INTERACTION_CREATE only to the matching bot, regardless of intents', () => {
     const manager = new SessionManager()
-    const wsA = { send: vi.fn(), close: vi.fn() }
-    const wsB = { send: vi.fn(), close: vi.fn() }
+    const wsA = { readyState: 1, send: vi.fn(), close: vi.fn() }
+    const wsB = { readyState: 1, send: vi.fn(), close: vi.fn() }
     manager.create({
       botId: 'bot-a',
       token: 'Bot tokenA',

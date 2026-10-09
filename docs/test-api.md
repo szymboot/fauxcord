@@ -1595,13 +1595,15 @@ no open owning session, or a stale explicit session returns `404`. Omitting
 No candidate list, token, or credentials are returned. Sessions for another
 setup sharing the same bot user ID do not qualify. Closed sessions retained for
 normal resume are excluded. Resolution happens once when arming: every control
-is pinned to the resolved session and socket and never follows a replacement.
-After disconnect/replacement, create a fresh control; the returned ID identifies
+is pinned to the resolved session and socket and never follows a replacement. The explicit `disconnect` action below is the
+only exception: it can retain this exact session through one controlled RESUME.
+After an ordinary disconnect/replacement, create a fresh control; the returned ID identifies
 the newly resolved session.
 
 `events` is a nonempty, unique subset of `MESSAGE_CREATE`, `MESSAGE_DELETE`,
 `MESSAGE_DELETE_BULK`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
-`MESSAGE_REACTION_REMOVE_ALL`, and `MESSAGE_REACTION_REMOVE_EMOJI`. Only events
+`MESSAGE_REACTION_REMOVE_ALL`, `MESSAGE_REACTION_REMOVE_EMOJI`, and
+`GUILD_MEMBER_UPDATE`. Only events
 that the native producer actually emits are captured. Message creation (including
 human messages via `POST /_test/channels/:channelId/messages`), single deletion,
 native bulk deletion through the REST endpoint below, reaction addition (including
@@ -1643,7 +1645,12 @@ current records or recreate a deleted message.
 
 `limit` is an integer from 1–100 (default 20); `ttl_ms` is an integer from
 1–60000 (default 30000). Each control also has a fixed 256 KiB serialized payload
-budget and a maximum of 100 total release/replay deliveries. There are at most
+budget and a maximum of 100 total release/replay/disconnect operations. Each disconnect
+consumes one operation; releasing several events consumes one per event.
+Transport observation retains at most 200 delivery records per control, including
+RESUME attempts; overflow increments `delivery_observations_skipped` and leaves
+normal protocol delivery running. Check both skipped counters when complete
+observation matters. There are at most
 32 controls per assembled Gateway. Global capacity returns `429`. Overlapping
 event selectors for the same guild/session return `409`. Invalid policy,
 malformed JSON and explicit null policy values return `400`.
@@ -1656,7 +1663,8 @@ Expiry does not extend when a control is inspected or used.
 ### `GET /_test/gateway-event-controls/:id` — Inspect capture state
 
 Returns `200` with the policy, `expires_at` (epoch milliseconds), `bytes`,
-`skipped`, `operations`, and `events_captured` in native observation order:
+`skipped`, `operations`, `delivery_observations_skipped`, `awaiting_resume`,
+`pause_resume`, `pending_resume`, and `events_captured` in native observation order:
 
 ```json
 {
@@ -1683,8 +1691,10 @@ Returns `200` with the policy, `expires_at` (epoch milliseconds), `bytes`,
 
 Each captured event has its own UUID. `state` is `held`, `delivered` (ordinary
 native delivery), or `released`. `deliveries` counts server delivery attempts,
-not client acknowledgements or completed callbacks. `last_sequence` is the last
-attempted sequence. Inspection has no delivery side effects and exposes no bot
+not client acknowledgements or completed callbacks. Buffered dispatches and
+RESUME writes count as separate attempts. `last_sequence` is the last attempted
+sequence. `delivery_records` supplies the separate transport/application
+observations described below. Inspection has no delivery side effects and exposes no bot
 token. An unknown, expired, canceled or invalidated control returns `404`.
 
 ### `POST /_test/gateway-event-controls/:id/release` — Send held events
@@ -1733,12 +1743,162 @@ sequence. Use `new` when testing duplicate callbacks rather than client sequence
 handling. Malformed action JSON, duplicate IDs or invalid sequence mode returns
 `400`; each successful action returns updated observation.
 
+### Native member updates and cache preparation
+
+Arm `events: ["GUILD_MEMBER_UPDATE"]` and optionally `member_id` to select one
+existing guild member. `member_id` uses the same positive 1–20 digit string
+format as the scope IDs; null/malformed selectors return `400`, a missing member
+returns `404`. A member selector requires exactly this one event type. Different
+member selectors can coexist for one guild/session; an all-member selector or
+the same member overlaps and returns `409`.
+
+Use the production `PATCH /guilds/:guildId/members/:userId` with `{"nick":"New"}`
+or `{"nick":null}`. Unchanged nickname PATCHes also emit a native update, as does
+clearing an already-null nickname. The existing `/api/v10` and `/api` prefixes
+and `PATCH .../members/@me` work too. Rejected PATCHes produce no capture.
+Native member updates (including role mutations) are addressed to the originating
+app/database and the guild's registered bot setup token, with Guild Members
+intent. Another session for the same setup receives its own ordinary dispatch;
+only the selected session is held. Missing Guild Members intent produces no
+update or capture, regardless of fixture membership.
+
+Capture stores the full member/user snapshot: nickname, roles, dates, mute/deaf,
+user ID, username, `global_name`, avatar and boolean `bot`. Changed, unchanged,
+empty-string and cleared nicknames retain their native values. Release/replay
+uses this immutable snapshot even after member removal or profile/role changes;
+it neither reloads fixtures nor updates the DB again. Use real member REST reads
+or the initial `GUILD_CREATE.members` to prepare/assert a client's old cache.
+`GUILD_CREATE` requires Guilds intent. Fauxcord sends its existing member list;
+client cache policies can still exclude members or discard updates. These
+controls do not set a discord-bot cache or run its handlers.
+
+### Transport observation and explicit application acknowledgement
+
+Set `application_ack: true` when arming (default `false`; non-booleans return
+`400`) to request an acknowledgement barrier for each captured delivery. Each
+`delivery_records` entry has a unique `id`, the attempted `sequence`, a `source`
+(`native`, `release`, `replay`, or `resume`), `transport`, and `application`:
+
+- `buffered`: no write was attempted on a closed/closing socket; normal session
+  replay history retains the event. A subsequent RESUME gets a new record.
+- `queued`: the server started a socket write and its callback has not finished.
+- `sent`: the WebSocket write callback succeeded. This means a successful local
+  socket write, **not** client receipt, handler invocation, or callback completion.
+- `failed`: a write threw or its callback reported an error. Buffered history
+  still follows the existing session replay rules for native/new-sequence writes.
+
+`application` is `not_requested` without a barrier, otherwise `pending` until an
+explicit consuming-client/harness assertion changes it to `acknowledged`.
+Requested records expose their own `ack_token`. Inspecting a capture, releasing
+it, replaying it, successful writes and heartbeat sequences **never** acknowledge
+application work. Buffered/failed attempts cannot be acknowledged; select the
+subsequent successfully sent RESUME delivery instead. Each repeat has its own
+ID/token even if `sequence: "original"` repeats the same sequence.
+
+`POST /_test/gateway-event-controls/:id/ack` accepts:
+
+```json
+{ "delivery_id": "DELIVERY_UUID", "ack_token": "THIS_DELIVERY_ACK_TOKEN" }
+```
+
+Returns `200` with updated observation. Repeating that exact acknowledgement is
+idempotent. Malformed/missing UUIDs return `400`; unknown/cross-control delivery
+IDs, wrong tokens, or a delivery without a requested barrier return `404`;
+a non-sent delivery returns `409`. Cancellation, expiry, reset and invalidation
+remove acknowledgement records/tokens; acknowledgements afterwards return `404`.
+Acknowledging one delivery cannot satisfy another replay or unrelated event.
+Poll **the selected delivery's** `application` for its completion barrier;
+there is no automatic whole-control completion claim. Overflowed observations
+cannot supply a barrier, so assert `delivery_observations_skipped === 0`.
+
+The consuming application or harness must correlate the native event with the
+captured event and delivery (using the session, native payload, sequence and
+attempt order), await the actual handler/callback completion, then submit this
+explicit assertion using that delivery's token. Tokens are carried by the test
+HTTP API, never injected into Discord Gateway payloads. For repeated original
+sequences, a harness must track the occurrence order; a client can discard those
+frames and no acknowledgement should then be sent. These unauthenticated test
+APIs trust the harness assertion; Fauxcord cannot independently inspect callback
+execution. **Unmodified discord-bot does not provide this acknowledgement.** A
+downstream harness/application completion hook is necessary to observe
+`NicknameChangeLogHandler` completion; this task supplies only Fauxcord
+prerequisites and does not establish complete bot integration coverage.
+
+### `POST /_test/gateway-event-controls/:id/disconnect` — Deterministic reconnect
+
+Send `{}` for an immediate protocol reconnect, or `{"pause_resume":true}` to
+also close a resume gate. `pause_resume` defaults to `false`; invalid values,
+unknown fields or malformed JSON return `400`. The action sends Gateway
+RECONNECT (op7), closes the current socket, and retains only this control bound
+to its original session, ownership, capture policy, TTL and budgets. Returns
+`200` with `session_id`, the server's `sequence` checkpoint, `awaiting_resume`
+and `pause_resume`. The checkpoint is the server high-water sequence, not a
+client receipt or application completion assertion. Resume with the client's
+actual last received sequence; a cooperating harness may explicitly checkpoint
+before generating buffered updates.
+
+With `hold: false`, production PATCHes during this disconnect enter normal
+bounded session history and are captured with `transport: "buffered"`. With
+`hold: true`, they stay held and never enter normal resume history. Release and
+replay return `409` while awaiting resume. A repeated disconnect returns `409`;
+operation-budget exhaustion returns `429`; unknown/expired scope returns `404`.
+Ownership and intent filtering still apply throughout the gap.
+
+With `pause_resume: true`, an authenticated, structurally valid RESUME attempt
+waits at the gate without receiving a fabricated success or invalid-session
+response. Inspection exposes `pending_resume: true`. One pending connection is
+retained per control, and one socket can belong to only one pending gate across
+all controls. A second RESUME attempt on an already-pending socket (including
+another session/control) receives ordinary INVALID_SESSION (op9, false) without
+changing the first pending owner or the second gate. Canceling/expiring the
+rejected gate cannot close the first owner's socket. Opening the rejected gate
+only opens its policy; it does not replay or bind the first owner's connection.
+Use separate fresh sockets to wait on two gates simultaneously.
+A socket already bound to an existing session also receives INVALID_SESSION
+without admission to the gate, so cancellation/expiry cannot disrupt that
+session or its controls. Use a fresh connection for a gated RESUME.
+A closed pending socket clears the pending slot without opening the gate.
+A successful IDENTIFY or RESUME on that socket clears its deferred attempts
+before binding the new session; opening or canceling the old gate cannot
+restore the old session or close the repurposed connection.
+No credentials or sockets are exposed through inspection. Native updates can be
+PATCHed and observed deterministically while an automatically reconnecting client
+waits. Cancellation/expiry/reset/session removal closes a pending socket and
+cleans its listener; the original native replay buffer remains subject to
+ordinary session lifetime. Cancellation does not retract previously delivered
+or normally buffered native events.
+
+### `POST /_test/gateway-event-controls/:id/resume` — Open the resume gate
+
+Send `{}`. Returns `200` with observation, opens the gate, and retries the one
+waiting RESUME through the production protocol/session machinery. If no client
+has arrived yet, the next valid RESUME can proceed. An unopened gate is required
+(`409` otherwise); malformed/nonempty JSON returns `400`; stale scope returns
+`404`. This does not forge a session or bypass token/cursor validation.
+
+Successful RESUME retains the exact session sequence and replays buffered native
+updates in normal buffer order with their original sequences, then emits a fresh
+`RESUMED`. The control rebinds to that connection and records separate `resume`
+write attempts. No DB mutation repeats. Further ordinary connection replacement
+invalidates it; use another explicit disconnect for a second controlled gap.
+Bad credentials/cursors never steal scope. Negative, fractional, future or
+unavailable cursors get INVALID_SESSION before admission to the gate. A gated
+cursor is revalidated when the gate opens, since the replay buffer can expire
+while it waits. An invalid cursor after gate opening
+leaves the original disconnected session/control available for a valid retry.
+The existing 100-entry replay buffer, heartbeat session lifetime and fixed
+control TTL still apply; the gate does not guarantee retention beyond them.
+
 ### `DELETE /_test/gateway-event-controls/:id` — Cancel and discard
 
 Returns `204` for a known control and `404` otherwise. Cancellation drops all
 held payloads and observation history without flushing them; already sent
 frames remain sent. Expiry, socket disconnect, session removal/replacement,
-resume onto a different socket, setup deletion, and `/_test/reset` do the same.
+ordinary resume onto a different socket, setup deletion, and `/_test/reset`
+do the same. An explicit `disconnect` preserves only its selected control for
+that exact session; other controls on that connection are canceled. A retained
+control still expires, is canceled by DELETE/reset/session removal, and is
+invalidated by any subsequent ordinary disconnect or session replacement.
 A nonempty-token reset clears only that setup's controls; an omitted/empty-token reset and
 Gateway shutdown clear all. Controls are in memory and do not survive restart.
 Deleted guild/bot scope is also invalidated before further capture or actions.

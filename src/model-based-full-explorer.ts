@@ -390,7 +390,7 @@ async function runGatewayEventCatalog(
     registerBot.status === 201,
     `Gateway bot setup returned ${registerBot.status}`
   )
-  const observer = await connectFullGateway(server, gatewayToken)
+  let observer = await connectFullGateway(server, gatewayToken)
   let lastSequence = 0
 
   const expectDispatch = async (
@@ -471,6 +471,10 @@ async function runGatewayEventCatalog(
     )
     await expectDispatch('GUILD_CREATE', { id: guildId })
     await expectDispatch('GUILD_MEMBER_ADD', { guild_id: guildId })
+    // Native member updates require the actual guild owner's setup token.
+    await observer.close()
+    observer = await connectFullGateway(server, token)
+    lastSequence = 0
 
     const channelPath = `${API_PREFIX}/guilds/${guildId}/channels`
     const channelResponse = await call(

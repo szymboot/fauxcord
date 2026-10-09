@@ -77,7 +77,12 @@ export interface GatewayBusEvents {
   }
   'channel.delete': { channel: Record<string, unknown> }
   'guild.member.add': { guildId: string; member: Record<string, unknown> }
-  'guild.member.update': { guildId: string; member: Record<string, unknown> }
+  'guild.member.update': {
+    guildId: string
+    member: Record<string, unknown>
+    /** Exact producer scope; omitted only by legacy bus callers. */
+    scope?: { db: Database; botId: string; token: string }
+  }
   'guild.member.remove': {
     guildId: string
     userId: string
