@@ -16,7 +16,7 @@ import { SessionManager, type Session } from './session'
 import { GatewayOp, GatewayCloseCode } from './opcodes'
 import { encodePayload, decodePayload } from './protocol'
 import type { IdentifyData, ResumeData } from './protocol'
-import { sendDispatch } from './dispatch'
+import { sendDispatch, writeDispatch } from './dispatch'
 import { hasIntent } from './intents'
 
 /** Heartbeat interval (ms) announced in HELLO; matches real Discord's default. */
@@ -127,7 +127,9 @@ function isResumeData(d: unknown): d is ResumeData {
     d !== null &&
     typeof (d as { token?: unknown }).token === 'string' &&
     typeof (d as { session_id?: unknown }).session_id === 'string' &&
-    typeof (d as { seq?: unknown }).seq === 'number'
+    typeof (d as { seq?: unknown }).seq === 'number' &&
+    Number.isSafeInteger((d as { seq: number }).seq) &&
+    (d as { seq: number }).seq >= 0
   )
 }
 
@@ -254,6 +256,7 @@ function handleIdentify(
     return
   }
 
+  sessionManager.establishConnection(ws.raw as never)
   const previousSessionId = sessionIdByWs.get(ws)
   if (
     previousSessionId &&
@@ -388,6 +391,13 @@ function handleResume(
     ws.send(encodePayload({ op: GatewayOp.InvalidSession, d: false }))
     return
   }
+  if (
+    sessionManager.gateResume?.(session, ws.raw as never, () => {
+      handleResume(sessionManager, sessionIdByWs, ws, data)
+    })
+  )
+    return
+  sessionManager.establishConnection(ws.raw as never)
   const previousSessionId = sessionIdByWs.get(ws)
   if (
     previousSessionId &&
@@ -396,12 +406,16 @@ function handleResume(
   ) {
     sessionManager.remove(previousSessionId)
   }
-  sessionManager.invalidateEventControls?.(session.sessionId)
+  if (sessionManager.resumeEventControls) {
+    sessionManager.resumeEventControls(session, ws.raw as never)
+  } else {
+    sessionManager.invalidateEventControls?.(session.sessionId)
+  }
   session.ws = ws.raw as never
   sessionIdByWs.set(ws, session.sessionId)
   armHeartbeatTimeout(sessionManager, ws, session.sessionId)
   for (const entry of replay) {
-    ws.send(encodePayload(entry.event))
+    writeDispatch(sessionManager, session, entry.event, 'resume')
   }
   // RESUMED is itself a Dispatch, so it consumes a distinct sequence number
   // after every replayed dispatch and is retained for any subsequent resume.

@@ -40,6 +40,40 @@ export class SessionManager {
   /** Clears captures when a session is removed or its connection is replaced. */
   invalidateEventControls?: (sessionId: string) => void
 
+  /** Clears a socket's deferred resumes when it establishes another session. */
+  invalidatePendingResume?: (socket: WebSocket) => void
+
+  /** Rebinds explicitly reconnecting controls; ordinary replacement invalidates. */
+  resumeEventControls?: (session: Session, socket: WebSocket) => void
+  /** Defers a validated RESUME while a test deliberately buffers native updates. */
+  gateResume?: (
+    session: Session,
+    socket: WebSocket,
+    retry: () => void
+  ) => boolean
+  /** Records transport progress separately from consuming application completion. */
+  observeDispatch?: (
+    session: Session,
+    payload: GatewayPayload<unknown>,
+    source: 'native' | 'release' | 'replay' | 'resume'
+  ) => ((status: 'buffered' | 'queued' | 'sent' | 'failed') => void) | undefined
+
+  private readonly connectionGenerations = new WeakMap<WebSocket, number>()
+
+  /** Returns the socket's session generation for deferred-operation ownership. */
+  connectionGeneration(socket: WebSocket): number {
+    return this.connectionGenerations.get(socket) ?? 0
+  }
+
+  /** Invalidates deferred attempts before a successful IDENTIFY or RESUME binds. */
+  establishConnection(socket: WebSocket): void {
+    this.connectionGenerations.set(
+      socket,
+      this.connectionGeneration(socket) + 1
+    )
+    this.invalidatePendingResume?.(socket)
+  }
+
   private readonly sessionsById = new Map<string, Session>()
   private readonly sessionIdsByBotId = new Map<string, Set<string>>()
 
@@ -150,6 +184,8 @@ export class SessionManager {
     session: Session,
     seq: number
   ): { seq: number; event: GatewayPayload<unknown> }[] | undefined {
+    if (!Number.isSafeInteger(seq) || seq < 0 || seq > session.seq)
+      return undefined
     if (session.replayBuffer.length === 0) {
       return seq === session.seq ? [] : undefined
     }

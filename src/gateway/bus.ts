@@ -1,8 +1,13 @@
 import { EventEmitter } from 'node:events'
 import type { Database } from '../db'
+import type { GatewayVoiceStateUpdateDispatchData } from 'discord-api-types/v10'
 
 /** Mapping of event names to their payloads exchanged over gatewayBus */
 export interface GatewayBusEvents {
+  'voice.state.update': {
+    state: GatewayVoiceStateUpdateDispatchData
+    scope: { db: Database; botId: string; token: string }
+  }
   'message.create': {
     /** Originating database for persisted creates; absent on synthetic events. */
     db?: Database
@@ -72,7 +77,12 @@ export interface GatewayBusEvents {
   }
   'channel.delete': { channel: Record<string, unknown> }
   'guild.member.add': { guildId: string; member: Record<string, unknown> }
-  'guild.member.update': { guildId: string; member: Record<string, unknown> }
+  'guild.member.update': {
+    guildId: string
+    member: Record<string, unknown>
+    /** Exact producer scope; omitted only by legacy bus callers. */
+    scope?: { db: Database; botId: string; token: string }
+  }
   'guild.member.remove': {
     guildId: string
     userId: string

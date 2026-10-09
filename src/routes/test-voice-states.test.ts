@@ -77,10 +77,12 @@ describe('Test voice-state fixtures', () => {
     ].map((table) => context.db.prepare(`SELECT * FROM ${table}`).all())
   }
 
-  it('joins, streams, stops, moves, disconnects and rejoins with stable session identity', async () => {
+  it('silently prepares joins, streams, stops, moves, disconnects and rejoins with stable session identity', async () => {
     const identities = snapshot().slice(1)
     const emit = vi.spyOn(gatewayBus, 'emit')
-    const joined = await patch(JSON.stringify({ channel_id: channel }))
+    const joined = await patch(
+      JSON.stringify({ channel_id: channel, emit: false })
+    )
     expect(joined.status).toBe(200)
     const initial = (await joined.json()) as GuildVoiceState
     expect(initial).toEqual({
@@ -102,7 +104,7 @@ describe('Test voice-state fixtures', () => {
       { self_stream: false },
       { channel_id: stage, self_stream: true, self_video: true },
     ]) {
-      const response = await patch(JSON.stringify(update))
+      const response = await patch(JSON.stringify({ ...update, emit: false }))
       expect(response.status).toBe(200)
       expect(await response.json()).toMatchObject({
         ...update,
@@ -122,7 +124,7 @@ describe('Test voice-state fixtures', () => {
       expect(response.status).toBe(200)
       expect(await response.json()).toEqual(moved)
     }
-    const disconnected = await patch('{"channel_id":null}')
+    const disconnected = await patch('{"channel_id":null,"emit":false}')
     expect(disconnected.status).toBe(200)
     expect(await disconnected.json()).toMatchObject({
       channel_id: null,
@@ -133,7 +135,9 @@ describe('Test voice-state fixtures', () => {
       session_id: initial.session_id,
     })
     expect(getGuildVoiceStates(context.db, guild)).toEqual([])
-    const rejoined = await patch(JSON.stringify({ channel_id: channel }))
+    const rejoined = await patch(
+      JSON.stringify({ channel_id: channel, emit: false })
+    )
     const next = (await rejoined.json()) as GuildVoiceState
     expect(next.session_id).not.toBe(initial.session_id)
     expect(snapshot().slice(1)).toEqual(identities)

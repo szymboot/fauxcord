@@ -63,6 +63,7 @@ import {
   updateScheduledEventException,
 } from '../services/guild-advanced'
 import { generateSnowflake } from '../snowflake'
+import { publishGuildVoiceStateMutation } from '../services/voice-state-events'
 
 type JsonObject = Record<string, unknown>
 
@@ -200,6 +201,38 @@ function registerGuildSnowflakeValidation(app: Hono<AppEnv>): void {
       allowedValues: ['@me'],
     })
   )
+}
+
+/** Publishes only successful committed stage writes, using native error codes. */
+async function patchGuildVoiceState(
+  c: Context<AppEnv>,
+  db: Database,
+  guildId: string,
+  userId: string
+): Promise<Response> {
+  const payload = await c.req.json<unknown>().catch(() => undefined)
+  const result = setGuildVoiceState(db, guildId, userId, payload)
+  if (typeof result !== 'string') {
+    publishGuildVoiceStateMutation(db, result)
+    return c.body(null, 204)
+  }
+  if (result === 'INVALID_INPUT')
+    return c.json(
+      validationError({
+        voice_state: {
+          _errors: [{ code: 'BASE_TYPE_BAD', message: 'Invalid voice state' }],
+        },
+      }).body,
+      400
+    )
+  const errors = {
+    UNKNOWN_GUILD: [DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild'],
+    UNKNOWN_USER: [DiscordErrorCode.UNKNOWN_USER, 'Unknown User'],
+    UNKNOWN_MEMBER: [DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member'],
+    UNKNOWN_CHANNEL: [DiscordErrorCode.UNKNOWN_CHANNEL, 'Unknown Channel'],
+  } as const
+  const [code, message] = errors[result]
+  return unknown(c, code, message)
 }
 
 function requireGuildAccess(
@@ -1064,14 +1097,9 @@ export function createGuildAdvancedRoutes(db: Database): Hono<AppEnv> {
   app.patch('/guilds/:guildId/voice-states/@me', async (c) => {
     const { guildId } = c.req.param()
     const access = requireGuildAccess(c, db, guildId)
-    if (access instanceof Response) return access
-    setGuildVoiceState(
-      db,
-      guildId,
-      c.get('bot')?.user_id ?? '',
-      await parseJsonBody(c)
-    )
-    return c.body(null, 204)
+    return access instanceof Response
+      ? access
+      : patchGuildVoiceState(c, db, guildId, c.get('bot')?.user_id ?? '')
   })
   app.get('/guilds/:guildId/voice-states/:userId', (c) => {
     const { guildId, userId } = c.req.param()
@@ -1086,10 +1114,9 @@ export function createGuildAdvancedRoutes(db: Database): Hono<AppEnv> {
     const { guildId, userId } = c.req.param()
     const access = requireGuildAccess(c, db, guildId)
     if (access instanceof Response) return access
-    if (!getGuildMember(db, guildId, userId))
-      return unknown(c, DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member')
-    setGuildVoiceState(db, guildId, userId, await parseJsonBody(c))
-    return c.body(null, 204)
+    return getGuildMember(db, guildId, userId)
+      ? patchGuildVoiceState(c, db, guildId, userId)
+      : unknown(c, DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member')
   })
 
   app.get('/guilds/:guildId/welcome-screen', (c) => {

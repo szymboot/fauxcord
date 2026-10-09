@@ -20,6 +20,19 @@ export function registerGatewaySubscriptions(
   manager: SessionManager,
   db?: Database
 ): () => void {
+  const onVoiceStateUpdate: Parameters<
+    typeof gatewayBus.on<'voice.state.update'>
+  >[1] = (payload) => {
+    if (payload.scope.db !== db) return
+    broadcastToBot(
+      manager,
+      payload.scope.botId,
+      'VOICE_STATE_UPDATE',
+      payload.state,
+      GatewayIntentBits.GuildVoiceStates,
+      payload.scope.token
+    )
+  }
   const onMessageCreate: Parameters<
     typeof gatewayBus.on<'message.create'>
   >[1] = (payload) => {
@@ -241,6 +254,18 @@ export function registerGatewaySubscriptions(
   const onGuildMemberUpdate: Parameters<
     typeof gatewayBus.on<'guild.member.update'>
   >[1] = (payload) => {
+    if (payload.scope) {
+      if (payload.scope.db !== db) return
+      broadcastToBot(
+        manager,
+        payload.scope.botId,
+        'GUILD_MEMBER_UPDATE',
+        { ...payload.member, guild_id: payload.guildId },
+        GatewayIntentBits.GuildMembers,
+        payload.scope.token
+      )
+      return
+    }
     broadcastToAll(
       manager,
       'GUILD_MEMBER_UPDATE',
@@ -301,6 +326,7 @@ export function registerGatewaySubscriptions(
     )
   }
 
+  gatewayBus.on('voice.state.update', onVoiceStateUpdate)
   gatewayBus.on('message.create', onMessageCreate)
   gatewayBus.on('message.update', onMessageUpdate)
   gatewayBus.on('message.delete', onMessageDelete)
@@ -322,6 +348,7 @@ export function registerGatewaySubscriptions(
   gatewayBus.on('interaction.create', onInteractionCreate)
 
   return () => {
+    gatewayBus.off('voice.state.update', onVoiceStateUpdate)
     gatewayBus.off('message.create', onMessageCreate)
     gatewayBus.off('message.update', onMessageUpdate)
     gatewayBus.off('message.delete', onMessageDelete)
