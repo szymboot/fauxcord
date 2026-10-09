@@ -1747,7 +1747,8 @@ only exception: it can retain this exact session through one controlled RESUME.
 After an ordinary disconnect/replacement, create a fresh control; the returned ID identifies
 the newly resolved session.
 
-`events` is a nonempty, unique subset of `MESSAGE_CREATE`, `MESSAGE_DELETE`,
+`events` is a nonempty, unique subset of `VOICE_STATE_UPDATE`, `MESSAGE_CREATE`,
+`MESSAGE_DELETE`,
 `MESSAGE_DELETE_BULK`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
 `MESSAGE_REACTION_REMOVE_ALL`, `MESSAGE_REACTION_REMOVE_EMOJI`, and
 `GUILD_MEMBER_UPDATE`. Only events
@@ -1756,6 +1757,27 @@ human messages via `POST /_test/channels/:channelId/messages`), single deletion,
 native bulk deletion through the REST endpoint below, reaction addition (including
 human additions through the control above), single reaction removal, and both
 reaction-clear DELETE endpoints have native producers.
+
+For voice, arm the same control API with
+`"events": ["VOICE_STATE_UPDATE"]` and drive real transitions through
+`PATCH /_test/guilds/:guildId/voice-states/:userId` (or the existing stage PATCH
+routes). The selected session must have the Guild Voice States intent; filtering
+happens before capture. Silent `emit: false` fixtures, no-op writes, rejected
+requests, and changes to an already disconnected state produce no event to
+capture. Voice dispatches follow the guild's registered bot, exact setup token,
+and app database; a capture never holds another session's delivery.
+
+A voice capture includes all users and voice/stage channels in the selected
+guild. Inspect `envelope.d.user_id` and `channel_id` to choose event UUIDs;
+disconnects have `channel_id: null`. The envelope retains the native voice
+session ID, flags (including `self_stream`), and member/user snapshot. For
+example, hold stream start and stop, then disconnect the user through the typed
+route. Releasing the earlier start after disconnect still sends the captured
+`self_stream: true` and original channel; replay duplicates that same snapshot.
+Neither operation reads current voice/member records, reconnects the user,
+starts a stream, or mutates SQLite. Capture without hold, requested release
+order, duplicate replay, `sequence: "original"` opt-in, limits, expiry and
+cleanup all use the existing control semantics below.
 
 `DELETE /channels/:channelId/messages/:messageId/reactions` returns `204` and
 emits one `MESSAGE_REACTION_REMOVE_ALL` with `channel_id`, `message_id` and
@@ -1779,9 +1801,10 @@ Capture/hold happens after the SQLite deletion. Release/replay delivers the
 native snapshot even after source-message deletion and never restores reactions.
 
 Capture runs after native intent filtering: missing Guild Messages / Guild
-Message Reactions intent means no corresponding capture or delivery. Unrelated
-event types, guilds, bots and other sessions keep their existing delivery
-behavior. `hold` defaults to `false`: observe while delivering normally. With
+Message Reactions / Guild Voice States intent means no corresponding capture or
+delivery. Unrelated event types, guilds, bots and other sessions keep their
+existing delivery behavior. `hold` defaults to `false`: observe while delivering
+normally. With
 `hold: true`, matching events are retained without sending or entering the
 normal resume buffer. The database operation still completes immediately.
 Payloads are copied at capture time, so message removal cannot invalidate a
@@ -1843,6 +1866,11 @@ RESUME writes count as separate attempts. `last_sequence` is the last attempted
 sequence. `delivery_records` supplies the separate transport/application
 observations described below. Inspection has no delivery side effects and exposes no bot
 token. An unknown, expired, canceled or invalidated control returns `404`.
+
+For voice events too, capture proves server observation and delivery counters
+prove send attempts. Even receipt of a frame by a test client does not prove
+that the application's voice handler completed; assert its side effects or use
+an application/harness completion signal separately.
 
 ### `POST /_test/gateway-event-controls/:id/release` — Send held events
 

@@ -17,6 +17,7 @@ export const CONTROL_EVENTS = [
   'MESSAGE_REACTION_REMOVE',
   'MESSAGE_REACTION_REMOVE_ALL',
   'MESSAGE_REACTION_REMOVE_EMOJI',
+  'VOICE_STATE_UPDATE',
 ] as const
 
 /** Exact scope and bounded capture policy supplied by a test. */
