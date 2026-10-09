@@ -4,6 +4,7 @@
  * Handles test environment setup and reset.
  */
 
+import { getRestFaultRuntime, pruneRestFaults } from './rest-faults'
 import { getRestPageHolds } from './rest-page-holds'
 import { randomBytes } from 'node:crypto'
 import type { Database } from '../db'
@@ -297,6 +298,7 @@ export function setupTestEnvironment(
   })
 
   const result = setup()
+  pruneRestFaults(db)
   // Emit only after the transaction has committed successfully.
   for (const emit of pendingEvents) emit()
   return result
@@ -322,6 +324,7 @@ export function deleteTestSetup(db: Database, token: string): boolean {
   // (there is no applications table), so they are cleaned up explicitly.
   db.prepare('DELETE FROM bots WHERE token = ?').run(token)
   getRestPageHolds(db).reset(token)
+  getRestFaultRuntime(db).prune()
   db.prepare(
     'DELETE FROM application_commands WHERE application_id = ? AND guild_id IS NULL'
   ).run(bot.user_id)

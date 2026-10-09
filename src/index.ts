@@ -19,7 +19,8 @@ const config = loadConfig()
 
 const db = initializeDatabase(config.dbPath)
 
-const { app, wss, sessionManager, shutdownRestPageHolds } = buildApp(db, config)
+const { app, wss, sessionManager, shutdownRestPageHolds, shutdownRestFaults } =
+  buildApp(db, config)
 
 // Load SEED_FILE
 if (config.seedFile) {
@@ -67,6 +68,7 @@ const SHUTDOWN_TIMEOUT_MS = 5000
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     shutdownRestPageHolds()
+    shutdownRestFaults()
     for (const session of sessionManager.getAll()) {
       sendReconnect(session)
     }

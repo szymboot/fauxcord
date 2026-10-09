@@ -4,6 +4,7 @@
  * Provides CRUD operations for channels.
  */
 
+import { getRestFaultRuntime } from './rest-faults'
 import type { Database } from '../db'
 // Used for compile-time type drift detection.
 import type { APIGuildTextChannel, APIOverwrite } from 'discord-api-types/v10'
@@ -460,6 +461,7 @@ export function deleteChannel(
   // channel_overwrites, so overwrites must be read first.
   const result = toChannelObject(row, getChannelOverwrites(db, row.id))
   db.prepare('DELETE FROM channels WHERE id = ?').run(channelId)
+  getRestFaultRuntime(db).prune()
 
   gatewayBus.emit('channel.delete', {
     channel: result as unknown as Record<string, unknown>,

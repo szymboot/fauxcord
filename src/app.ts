@@ -6,6 +6,7 @@
  * (src/index.ts) and the test harness (src/test-helpers.ts).
  */
 
+import { getRestFaultRuntime } from './services/rest-faults'
 import { Hono } from 'hono'
 import { upgradeWebSocket } from '@hono/node-server'
 import { WebSocketServer } from 'ws'
@@ -86,6 +87,8 @@ export function buildApp(
   unsubscribeGateway: () => void
   /** Disarms page holds before closing the HTTP server. */
   shutdownRestPageHolds: () => void
+  /** Cancels transport delays before HTTP shutdown. */
+  shutdownRestFaults: () => void
 } {
   const app = new Hono<AppEnv>()
   // `noServer: true` is required because `@hono/node-server`'s
@@ -207,6 +210,9 @@ export function buildApp(
     wss,
     sessionManager: gatewayHandler.sessionManager,
     unsubscribeGateway,
+    shutdownRestFaults: () => {
+      getRestFaultRuntime(db).shutdown()
+    },
     shutdownRestPageHolds: () => {
       getRestPageHolds(db).shutdown()
     },
