@@ -215,6 +215,17 @@ export function createChannelMessageRoutes(
     if (!stickerItems)
       return c.json(validationError(unusableMessageStickersError()).body, 400)
 
+    const errors = validateMessageCreate(payload, hasAttachments)
+    if (hasPoll) {
+      Object.assign(
+        errors,
+        validatePollCreate(payload.poll as PollCreatePayloadField)
+      )
+    }
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
+
     if (
       !hasPoll &&
       isEmptyMessage(payload, hasAttachments, stickerItems.length > 0)
@@ -225,17 +236,6 @@ export function createChannelMessageRoutes(
         400
       )
       return c.json(err.body, 400)
-    }
-
-    const errors = validateMessageCreate(payload, hasAttachments)
-    if (hasPoll) {
-      Object.assign(
-        errors,
-        validatePollCreate(payload.poll as PollCreatePayloadField)
-      )
-    }
-    if (Object.keys(errors).length > 0) {
-      return c.json(validationError(errors).body, 400)
     }
 
     const messageId = generateSnowflake()

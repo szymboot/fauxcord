@@ -48,6 +48,7 @@ import {
 } from './test-helpers'
 import { closeDatabase } from './db'
 import { validateAuditLogQuery } from './validators/audit-log'
+import { validateMessageEmbeds } from './validators/message'
 import { MANIFEST } from '../spec/manifest'
 import type { SpecEndpoint, SpecSuccessBranch } from '../spec/manifest'
 import '../spec/manifest.test'
@@ -76,6 +77,83 @@ ajv.addFormat('nonce', true)
 // Register the entire spec document so internal $ref resolution works without
 // a separate dereference step. Ajv resolves "#/components/schemas/Foo" automatically.
 ajv.addSchema(spec, 'https://discord.com/spec')
+
+describe('Message embed request schema contract', () => {
+  const validate = ajv.compile({
+    $ref: 'https://discord.com/spec#/components/schemas/RichEmbed',
+  })
+
+  it.each([
+    [{}, true],
+    [
+      {
+        title: null,
+        description: null,
+        author: null,
+        footer: null,
+        fields: null,
+      },
+      true,
+    ],
+    [{ author: {}, footer: {} }, true],
+    [{ author: { name: null }, footer: { text: null } }, true],
+    [{ fields: [{ name: '', value: '', inline: null }] }, true],
+    [
+      {
+        title: '🐝'.repeat(256),
+        fields: [{ name: '🐝'.repeat(256), value: '🐝'.repeat(1024) }],
+      },
+      true,
+    ],
+    [{ description: '🐝'.repeat(4096) }, true],
+    [
+      {
+        footer: { text: '🐝'.repeat(2048) },
+        author: { name: '🐝'.repeat(256) },
+      },
+      true,
+    ],
+    [
+      { fields: Array.from({ length: 25 }, () => ({ name: '', value: '' })) },
+      true,
+    ],
+    [null, false],
+    [[], false],
+    [{ title: 123 }, false],
+    [{ title: '🐝'.repeat(257) }, false],
+    [{ description: '🐝'.repeat(4097) }, false],
+    [{ fields: [{ name: 'x'.repeat(257), value: '' }] }, false],
+    [{ fields: [{ name: '', value: 'x'.repeat(1025) }] }, false],
+    [{ footer: { text: 'x'.repeat(2049) } }, false],
+    [{ author: { name: 'x'.repeat(257) } }, false],
+    [
+      { fields: Array.from({ length: 26 }, () => ({ name: '', value: '' })) },
+      false,
+    ],
+    [{ fields: [{}] }, false],
+    [{ fields: [{ name: null, value: '' }] }, false],
+    [{ fields: [{ name: '', value: false }] }, false],
+    [{ fields: [{ name: '', value: '', inline: 1 }] }, false],
+    [{ footer: [] }, false],
+    [{ author: { name: {} } }, false],
+  ])('matches the official RichEmbed schema (case %#)', (embed, accepted) => {
+    expect(validate(embed)).toBe(accepted)
+    expect(Object.keys(validateMessageEmbeds([embed])).length === 0).toBe(
+      accepted
+    )
+  })
+
+  it('adds the documented aggregate limit missing from the request schema', () => {
+    const embeds = [
+      { description: 'x'.repeat(3000) },
+      { description: 'x'.repeat(3001) },
+    ]
+    expect(embeds.every((embed) => validate(embed))).toBe(true)
+    expect(validateMessageEmbeds(embeds).embeds._errors[0].code).toBe(
+      'EMBED_SIZE_EXCEEDS_MAX'
+    )
+  })
+})
 
 describe('Discord custom schema formats', () => {
   it('matches the schema snowflake representation', () => {
