@@ -45,6 +45,7 @@ import {
   seedBot,
   seedGuild,
   seedChannel,
+  seedMember,
 } from './test-helpers'
 import { closeDatabase } from './db'
 import { validateAuditLogQuery } from './validators/audit-log'
@@ -163,6 +164,76 @@ describe('Discord custom schema formats', () => {
     expect(validate('1')).toBe(true)
     expect(validate('01')).toBe(false)
     expect(validate('not-a-snowflake')).toBe(false)
+  })
+})
+
+describe('message-send permission response contracts', () => {
+  it('returns the committed create-message success and client-error schemas', async () => {
+    const { db, app, cleanup } = createFullTestApp()
+    try {
+      const token = seedBot(db)
+      const guildId = seedGuild(db, token)
+      const channelId = seedChannel(db, guildId)
+      const ownerId = seedMember(db, guildId)
+      const bot = db
+        .prepare('SELECT user_id FROM bots WHERE token = ?')
+        .get(token) as { user_id: string }
+      db.prepare('UPDATE guilds SET owner_id = ? WHERE id = ?').run(
+        ownerId,
+        guildId
+      )
+      db.prepare(
+        'INSERT INTO guild_members (guild_id, user_id) VALUES (?, ?)'
+      ).run(guildId, bot.user_id)
+      db.prepare(
+        "INSERT INTO roles (id, guild_id, name, permissions) VALUES (?, ?, '@everyone', '19456')"
+      ).run(guildId, guildId)
+      const validateMessage = ajv.compile({
+        $ref: 'https://discord.com/spec#/components/schemas/MessageResponse',
+      })
+      const validateError = ajv.compile({
+        $ref: 'https://discord.com/spec#/components/schemas/ErrorResponse',
+      })
+      for (const [deny, status, code] of [
+        ['0', 200, undefined],
+        ['1024', 403, 50_001],
+        ['2048', 403, 50_013],
+        ['16384', 403, 50_013],
+      ] as const) {
+        const overwrite = await app.request(
+          `/api/v10/channels/${channelId}/permissions/${bot.user_id}`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: token,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ type: 1, deny }),
+          }
+        )
+        expect(overwrite.status).toBe(204)
+        const response = await app.request(
+          `/api/v10/channels/${channelId}/messages`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: token,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              embeds: [{ type: 'rich', title: 'Nickname changed' }],
+            }),
+          }
+        )
+        expect(response.status).toBe(status)
+        const body: unknown = await response.json()
+        const validate = status === 200 ? validateMessage : validateError
+        expect(validate(body), JSON.stringify(validate.errors)).toBe(true)
+        if (code !== undefined) expect(body).toMatchObject({ code })
+      }
+    } finally {
+      cleanup()
+    }
   })
 })
 

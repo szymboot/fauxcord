@@ -23,6 +23,7 @@ export function registerGatewaySubscriptions(
   const onMessageCreate: Parameters<
     typeof gatewayBus.on<'message.create'>
   >[1] = (payload) => {
+    if (payload.db && payload.db !== db) return
     broadcastToAll(
       manager,
       'MESSAGE_CREATE',

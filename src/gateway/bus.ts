@@ -4,6 +4,8 @@ import type { Database } from '../db'
 /** Mapping of event names to their payloads exchanged over gatewayBus */
 export interface GatewayBusEvents {
   'message.create': {
+    /** Originating database for persisted creates; absent on synthetic events. */
+    db?: Database
     guildId: string | undefined
     channelId: string
     message: Record<string, unknown>
