@@ -1872,10 +1872,58 @@ normally** and increment `skipped`; no entries are evicted and no more events
 are held. Assertions should check `skipped === 0` when complete capture matters.
 Expiry does not extend when a control is inspected or used.
 
+### `GET /_test/gateway-event-controls/session` — Read-only session preflight
+
+A harness controlling a separate bot process can discover its current Gateway
+session without reading the bot's READY, creating an unkeyed capture, emitting
+unrelated events, or accessing application Redis:
+
+```text
+GET /_test/gateway-event-controls/session?bot_id=:bot&guild_id=:guild
+GET /_test/gateway-event-controls/session?bot_id=:bot&guild_id=:guild&session_id=:session
+```
+
+`bot_id` and `guild_id` are required positive numeric strings of 1–20 digits.
+Optional `session_id` must be exactly 32 lowercase hexadecimal characters. Each
+field must appear exactly once when supplied. Missing required fields, unknown
+fields (including `ownership_key`), duplicates, empty, whitespace-padded or
+malformed IDs return `400` with `{"message":"400: Bad Request","code":0}`.
+
+Returns `200` and **only** `{ "bot_id": "...", "guild_id": "...",
+"session_id": "..." }`. With no explicit session, there must be exactly one
+open session for that bot whose IDENTIFY token matches the guild's registered
+setup token. Sessions for another setup sharing that bot ID do not qualify.
+With an explicit session, only that exact open owner is considered, even when
+other sessions exist. Selection uses the same resolver and scope checks as
+capture creation. Unknown/wrong bot/guild/setup/session or no open owning
+session returns `404` with `{"message":"UNKNOWN_SCOPE","code":0}`. Multiple
+qualifying sessions without an explicit selection return `409` with
+`{"message":"AMBIGUOUS_SESSION","code":0}`. Neither error discloses a candidate
+list or foreign session identity. All responses use `Cache-Control: no-store`.
+
+This trusted, unauthenticated test-control GET is strictly read-only: it creates
+no capture or ownership reservation, emits no event, changes no sequence,
+replay buffer, persisted application state or capture evidence, and does not
+prune existing captures. It works independently of capture/reservation capacity.
+Retained disconnected sessions are excluded, including an explicitly controlled
+disconnect while awaiting RESUME. Retry the read-only `404` while waiting for the
+bot process to establish its session; resolve `409` by deliberately selecting a
+known exact owner rather than guessing among candidates.
+
+Discovery is a point-in-time observation, not a reservation. Retain its complete
+scope and use that `session_id` in keyed POST and by-key GET/DELETE. If that
+session closes or is removed before POST, creation returns `404`; if its key was
+already retired, POST returns `409`. POST never falls back to a replacement
+session. A later deliberate discovery can begin a new attempt with a fresh key.
+A protocol RESUME that retains the same session identity remains that owner;
+existing controlled capture/RESUME rules still apply. `voice.session_id` is a
+voice-state identifier and cannot be used as this Gateway `session_id`.
+
 ### Recoverable capture ownership (optional)
 
 Send an optional `ownership_key` with POST, together with an **explicit**
-`session_id` from `READY.d.session_id`. Keys are case-sensitive, URL-safe opaque
+`session_id` from the read-only session preflight above (or `READY.d.session_id`
+when available). Keys are case-sensitive, URL-safe opaque
 strings matching `[A-Za-z0-9_-]{1,128}`. Generate a fresh random key per capture
 attempt and retain its complete address before sending the request. Do not put
 credentials in keys. The exact owner is `(ownership_key, bot_id, guild_id,
@@ -1941,14 +1989,29 @@ no ownership eviction endpoint. Restart/reassemble the Gateway for fresh
 capacity only after all old HTTP attempts have settled. Controls and reservations
 are in memory; restart ends this recovery contract and does not restore holds.
 
-Example harness flow for an ambiguous creation response:
+Example harness flow without access to READY, including ambiguous creation:
 
 ```typescript
+const discoveryQuery = new URLSearchParams({ bot_id: botId, guild_id: guildId })
+const discovery = await fetch(
+  `${base}/_test/gateway-event-controls/session?${discoveryQuery}`
+)
+// Retry read-only 404 while the separate bot process starts; 409 is ambiguous.
+if (!discovery.ok) throw new Error(`Session discovery: ${discovery.status}`)
+const scope = await discovery.json()
+if (
+  scope.bot_id !== botId ||
+  scope.guild_id !== guildId ||
+  typeof scope.session_id !== 'string' ||
+  !/^[\da-f]{32}$/.test(scope.session_id)
+)
+  throw new Error('Invalid session discovery response')
+// Discovery parsing failure requires no cleanup: it created nothing.
 const ownership = {
   ownership_key: crypto.randomUUID(),
   bot_id: botId,
   guild_id: guildId,
-  session_id: ready.session_id,
+  session_id: scope.session_id,
 }
 const query = new URLSearchParams({
   bot_id: ownership.bot_id,
@@ -1966,6 +2029,7 @@ try {
       hold: true,
     }),
   })
+  // Retain this exact ownership even if the bot reconnects while POST is in flight.
   // A lost, truncated, malformed or undecodable response leaves outcome unknown.
   // GET address recovers the installed UUID and exact native evidence if needed.
   if (!response.ok) throw new Error(`Capture create: ${response.status}`)

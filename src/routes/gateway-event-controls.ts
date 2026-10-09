@@ -5,6 +5,7 @@ import {
   CONTROL_EVENTS,
   type EventControlRequest,
   type EventControlOwnership,
+  type EventControlSessionScope,
   type GatewayEventControls,
 } from '../gateway/event-controls'
 
@@ -84,26 +85,43 @@ function validateControl(value: unknown): EventControlRequest | undefined {
       }
 }
 
-/** Validates an exact key address, rejecting extra or duplicate query fields. */
-function validateOwnership(
-  key: string,
+/** Validates discovery scope without collapsing duplicate query values. */
+function validateSessionScope(
   search: URLSearchParams
-): EventControlOwnership | undefined {
+): EventControlSessionScope | undefined {
   const bot = search.get('bot_id')
   const guild = search.get('guild_id')
   const session = search.get('session_id')
   return bot !== null &&
     guild !== null &&
-    session !== null &&
-    isAuditOwnershipKey(key) &&
-    search.keys().toArray().length === 3 &&
-    ['bot_id', 'guild_id', 'session_id'].every(
+    search.keys().toArray().length === (session === null ? 2 : 3) &&
+    ['bot_id', 'guild_id'].every(
       (field) => search.getAll(field).length === 1
     ) &&
+    bot.trim() === bot &&
     /^[1-9]\d{0,19}$/.test(bot) &&
+    guild.trim() === guild &&
     /^[1-9]\d{0,19}$/.test(guild) &&
-    /^[\da-f]{32}$/.test(session)
-    ? { ownership_key: key, bot_id: bot, guild_id: guild, session_id: session }
+    (session === null ||
+      (search.getAll('session_id').length === 1 &&
+        session.length === 32 &&
+        /^[\da-f]{32}$/.test(session)))
+    ? {
+        bot_id: bot,
+        guild_id: guild,
+        ...(session !== null && { session_id: session }),
+      }
+    : undefined
+}
+
+/** Validates an exact key address, requiring the already selected session. */
+function validateOwnership(
+  key: string,
+  search: URLSearchParams
+): EventControlOwnership | undefined {
+  const scope = validateSessionScope(search)
+  return scope?.session_id !== undefined && isAuditOwnershipKey(key)
+    ? { ...scope, ownership_key: key, session_id: scope.session_id }
     : undefined
 }
 
@@ -130,6 +148,18 @@ export function createGatewayEventControlRoutes(
           result === 'UNKNOWN_SCOPE' ? 404 : result === 'LIMIT' ? 429 : 409
         )
       : c.json(result, 201)
+  })
+  app.get('/_test/gateway-event-controls/session', (c) => {
+    c.header('Cache-Control', 'no-store')
+    const scope = validateSessionScope(new URL(c.req.url).searchParams)
+    if (!scope) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    const result = controls.inspectSession(scope)
+    return typeof result === 'string'
+      ? c.json(
+          { message: result, code: 0 },
+          result === 'UNKNOWN_SCOPE' ? 404 : 409
+        )
+      : c.json(result)
   })
   app.get('/_test/gateway-event-controls/by-key/:key', (c) => {
     c.header('Cache-Control', 'no-store')

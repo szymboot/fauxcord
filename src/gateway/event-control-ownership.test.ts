@@ -192,9 +192,191 @@ describe('recoverable Gateway capture ownership', () => {
     return response.json() as Promise<Record<string, unknown>>
   }
 
+  /** Builds a read-only discovery address without access to the bot's READY. */
+  function preflight(bot = BOT_ID, guildId = guild, session?: string) {
+    const search = new URLSearchParams({ bot_id: bot, guild_id: guildId })
+    if (session !== undefined) search.set('session_id', session)
+    return `${ROOT}/session?${search}`
+  }
+
+  it('discovers the unique owning session over unauthenticated HTTP without side effects', async () => {
+    await transition({ channel_id: channel, self_stream: true, emit: false })
+    await fence()
+    const database = server.db.serialize()
+    const owner = server.sessionManager.get(client.sessionId)
+    const sequence = owner?.seq
+    const replay = structuredClone(owner?.replayBuffer)
+    const listeners = owner?.ws.listenerCount('close')
+    const frames = structuredClone(client.frames)
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const response = await fetch(base + preflight())
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Cache-Control')).toBe('no-store')
+      expect(await response.json()).toEqual({
+        bot_id: BOT_ID,
+        guild_id: guild,
+        session_id: client.sessionId,
+      })
+    }
+    expect(server.db.serialize()).toEqual(database)
+    expect(owner?.seq).toBe(sequence)
+    expect(owner?.replayBuffer).toEqual(replay)
+    expect(owner?.ws.listenerCount('close')).toBe(listeners)
+    expect(client.frames).toEqual(frames)
+    expect(await status(address())).toBe(404)
+    const future = await transition({ self_stream: false })
+    await fence()
+    expect(voices()).toHaveLength(1)
+    expect(voices()[0].d).toMatchObject(future)
+  })
+
+  it('reads session scope without modifying an existing hold or its evidence', async () => {
+    await read(ROOT, 'POST', payload())
+    await transition({ channel_id: channel, self_stream: true })
+    const evidence = await read()
+    await read(preflight())
+    await read(preflight(BOT_ID, guild, client.sessionId))
+    expect(await read()).toEqual(evidence)
+    await fence()
+    expect(voices()).toHaveLength(0)
+  })
+
+  it('isolates discovery by bot, guild and exact setup token without disclosing candidates', async () => {
+    const token = 'Bot preflight-other'
+    seedBot(server.db, token, BOT_ID)
+    const foreignGuild = seedGuild(server.db, token, '333333333333333333')
+    const foreign = await connect(token)
+    expect(await read(preflight())).toEqual({
+      bot_id: BOT_ID,
+      guild_id: guild,
+      session_id: client.sessionId,
+    })
+    expect(await read(preflight(BOT_ID, foreignGuild))).toEqual({
+      bot_id: BOT_ID,
+      guild_id: foreignGuild,
+      session_id: foreign.sessionId,
+    })
+    for (const path of [
+      preflight('999'),
+      preflight(BOT_ID, '999'),
+      preflight(BOT_ID, guild, foreign.sessionId),
+      preflight(BOT_ID, foreignGuild, client.sessionId),
+    ]) {
+      const response = await request(path)
+      expect(response.status).toBe(404)
+      expect(await response.json()).toEqual({
+        message: 'UNKNOWN_SCOPE',
+        code: 0,
+      })
+    }
+    const second = await connect()
+    const ambiguous = await request(preflight())
+    expect(ambiguous.status).toBe(409)
+    expect(ambiguous.headers.get('Cache-Control')).toBe('no-store')
+    expect(await ambiguous.json()).toEqual({
+      message: 'AMBIGUOUS_SESSION',
+      code: 0,
+    })
+    expect(await read(preflight(BOT_ID, guild, second.sessionId))).toEqual({
+      bot_id: BOT_ID,
+      guild_id: guild,
+      session_id: second.sessionId,
+    })
+    expect(
+      await status(
+        ROOT,
+        'POST',
+        payload({ ownership_key: undefined, session_id: undefined })
+      )
+    ).toBe(409)
+  })
+
+  it('returns 404 for disconnected or absent owning sessions and wrong registered setup', async () => {
+    const closed = once(client.ws, 'close')
+    client.ws.close()
+    await closed
+    await expect.poll(() => status(preflight())).toBe(404)
+    expect(await status(preflight(BOT_ID, guild, client.sessionId))).toBe(404)
+    expect(await status(preflight(BOT_ID, guild, 'a'.repeat(32)))).toBe(404)
+    client = await connect()
+    seedBot(server.db, 'Bot replacement-setup', BOT_ID)
+    server.db
+      .prepare('UPDATE guilds SET bot_token = ? WHERE id = ?')
+      .run('Bot replacement-setup', guild)
+    expect(await status(preflight())).toBe(404)
+    expect(await status(preflight(BOT_ID, guild, client.sessionId))).toBe(404)
+  })
+
+  it('does not prune a capture when a read-only preflight discovers stale setup scope', async () => {
+    await read(ROOT, 'POST', payload())
+    const socket = server.sessionManager.get(client.sessionId)?.ws
+    const listeners = socket?.listenerCount('close')
+    seedBot(server.db, 'Bot replaced-preflight', BOT_ID)
+    server.db
+      .prepare('UPDATE guilds SET bot_token = ? WHERE id = ?')
+      .run('Bot replaced-preflight', guild)
+    expect(await status(preflight())).toBe(404)
+    expect(socket?.listenerCount('close')).toBe(listeners)
+    // The ordinary capture action performs its existing invalidation later.
+    expect(await status(address())).toBe(404)
+    expect(socket?.listenerCount('close')).toBe((listeners ?? 0) - 1)
+  })
+
+  it('rejects malformed, duplicate and unexpected preflight query fields', async () => {
+    const valid = new URLSearchParams({
+      bot_id: BOT_ID,
+      guild_id: guild,
+    }).toString()
+    for (const search of [
+      '',
+      `bot_id=${BOT_ID}`,
+      `guild_id=${guild}`,
+      `bot_id=0&guild_id=${guild}`,
+      `bot_id=${BOT_ID}&guild_id=wrong`,
+      `bot_id=${BOT_ID}%0A&guild_id=${guild}`,
+      `bot_id=${BOT_ID}&guild_id=${guild}%0A`,
+      `${valid}&session_id=${client.sessionId}%0A`,
+      `${valid}&session_id=`,
+      `${valid}&session_id=${'a'.repeat(31)}`,
+      `${valid}&bot_id=${BOT_ID}`,
+      `${valid}&guild_id=${guild}`,
+      `${valid}&session_id=${client.sessionId}&session_id=${client.sessionId}`,
+      `${valid}&ownership_key=unused`,
+      `${valid}&extra=1`,
+    ]) {
+      expect(await status(`${ROOT}/session?${search}`)).toBe(400)
+    }
+    expect(await status(preflight())).toBe(200)
+    expect(await status(ROOT, 'POST', payload())).toBe(201)
+  })
+
+  it('never retargets keyed creation after the discovered connection is replaced', async () => {
+    const discovered = await read(preflight())
+    const closed = once(client.ws, 'close')
+    client.ws.close()
+    await closed
+    client = await connect()
+    const stale = payload({ ...discovered })
+    expect(await status(ROOT, 'POST', stale)).toBe(404)
+    expect(
+      await status(preflight(BOT_ID, guild, String(discovered.session_id)))
+    ).toBe(404)
+    const state = await transition({ channel_id: channel, self_stream: true })
+    await fence()
+    expect(voices()).toHaveLength(1)
+    expect(voices()[0].d).toMatchObject(state)
+    expect(await status(address())).toBe(404)
+    // No POST succeeded, so no key was reserved. A deliberate new discovery
+    // and new attempt can choose the replacement; the stale request never did.
+    const replacement = await read(preflight())
+    expect(replacement.session_id).not.toBe(discovered.session_id)
+    expect(await status(ROOT, 'POST', payload({ ...replacement }))).toBe(201)
+  })
+
   it('recovers a lost response and cleans only its hold while preserving voice state and future delivery', async () => {
+    const discovered = await read(preflight())
     const other = await arm({ events: ['MESSAGE_CREATE'] })
-    const response = await request(ROOT, 'POST', payload())
+    const response = await request(ROOT, 'POST', payload({ ...discovered }))
     expect(response.status).toBe(201)
     await response.body?.cancel()
     const state = await transition({ channel_id: channel, self_stream: true })
@@ -514,6 +696,14 @@ describe('recoverable Gateway capture ownership', () => {
 
   it('bounds reservations without evicting tombstones, including after reset', () => {
     const controls = new GatewayEventControls(server.db, server.sessionManager)
+    for (let attempt = 0; attempt < 3; attempt++)
+      expect(
+        controls.inspectSession({ bot_id: BOT_ID, guild_id: guild })
+      ).toEqual({
+        bot_id: BOT_ID,
+        guild_id: guild,
+        session_id: client.sessionId,
+      })
     for (let index = 0; index < 4096; index++)
       expect(
         controls.deleteByKey({
@@ -524,6 +714,9 @@ describe('recoverable Gateway capture ownership', () => {
         })
       ).toBe('DELETED')
     controls.reset()
+    expect(
+      controls.inspectSession({ bot_id: BOT_ID, guild_id: guild })
+    ).toEqual({ bot_id: BOT_ID, guild_id: guild, session_id: client.sessionId })
     const extra = {
       ownership_key: 'overflow',
       bot_id: BOT_ID,

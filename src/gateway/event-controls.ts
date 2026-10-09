@@ -51,6 +51,13 @@ export interface EventControlOwnership {
   session_id: string
 }
 
+/** Public bot/guild scope with an optional exact owning Gateway session. */
+export interface EventControlSessionScope {
+  bot_id: string
+  guild_id: string
+  session_id?: string
+}
+
 /** Bounded lifetime reservation; null IDs permanently prevent resurrection. */
 interface OwnershipReservation extends EventControlOwnership {
   policy?: string
@@ -239,6 +246,45 @@ export class GatewayEventControls {
     )
   }
 
+  /** Selects one open registered setup owner without mutating Gateway state. */
+  private resolveSession(
+    request: EventControlSessionScope
+  ): Session | 'UNKNOWN_SCOPE' | 'AMBIGUOUS_SESSION' {
+    const candidates =
+      request.session_id === undefined
+        ? this.manager
+            .getByBotId(request.bot_id)
+            .filter(
+              (candidate) =>
+                candidate.ws.readyState === WebSocket.OPEN &&
+                this.hasScope(request, candidate)
+            )
+        : [this.manager.get(request.session_id)].filter(
+            (candidate): candidate is Session => candidate !== undefined
+          )
+    if (candidates.length > 1) return 'AMBIGUOUS_SESSION'
+    const session = candidates.at(0)
+    return session?.botId !== request.bot_id ||
+      session.ws.readyState !== WebSocket.OPEN ||
+      !this.hasScope(request, session)
+      ? 'UNKNOWN_SCOPE'
+      : session
+  }
+
+  /** Reads only public identity; discovery creates no control or reservation. */
+  inspectSession(
+    scope: EventControlSessionScope
+  ): (EventControlSessionScope & { session_id: string }) | string {
+    const session = this.resolveSession(scope)
+    return typeof session === 'string'
+      ? session
+      : {
+          bot_id: scope.bot_id,
+          guild_id: scope.guild_id,
+          session_id: session.sessionId,
+        }
+  }
+
   /** Creates a capture for one existing session; overlapping captures conflict. */
   create(request: EventControlRequest): string | object {
     this.prune()
@@ -254,26 +300,8 @@ export class GatewayEventControls {
       }
       if (this.owners.size >= 4096) return 'LIMIT'
     }
-    const candidates =
-      request.session_id === undefined
-        ? this.manager
-            .getByBotId(request.bot_id)
-            .filter(
-              (candidate) =>
-                candidate.ws.readyState === WebSocket.OPEN &&
-                this.hasScope(request, candidate)
-            )
-        : [this.manager.get(request.session_id)].filter(
-            (candidate): candidate is Session => candidate !== undefined
-          )
-    if (candidates.length > 1) return 'AMBIGUOUS_SESSION'
-    const session = candidates.at(0)
-    if (
-      session?.botId !== request.bot_id ||
-      session.ws.readyState !== WebSocket.OPEN ||
-      !this.hasScope(request, session)
-    )
-      return 'UNKNOWN_SCOPE'
+    const session = this.resolveSession(request)
+    if (typeof session === 'string') return session
     if (
       request.member_id !== undefined &&
       !this.db
