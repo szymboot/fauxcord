@@ -10,6 +10,9 @@ import {
   seedVoiceChannel,
 } from '../test-helpers'
 import type { GatewayPayload } from './protocol'
+import { initializeDatabase } from '../db'
+import { SessionManager, type Session } from './session'
+import { GatewaySessionInvalidations } from './session-invalidations'
 
 /** Real Gateway connection and every frame it received. */
 interface Client {
@@ -39,7 +42,9 @@ interface IdentifyObservation {
     }[]
     voice_states_total: number
   }[]
+  guild_creates_sent: number
   guild_creates_skipped: number
+  state: string
   complete: boolean
 }
 
@@ -56,6 +61,7 @@ interface Invalidation {
   close_code: number
   transport: string
   status: string
+  replacement: IdentifyObservation | null
   ttl_ms: number
   expires_at: number
   invalidated_at: number
@@ -351,6 +357,7 @@ describe('Gateway session invalidation (forced re-IDENTIFY)', () => {
     expect(observed.headers.get('cache-control')).toBe('no-store')
     const body = (await observed.json()) as Invalidation
     expect(body.status).toBe('identified')
+    expect(body.replacement?.session_id).toBe(replacement.sessionId)
     expect(body.resumes_rejected).toBe(1)
     expect(body.identifies).toHaveLength(1)
     const [identify] = body.identifies
@@ -735,10 +742,8 @@ describe('Gateway session invalidation (forced re-IDENTIFY)', () => {
   })
 
   it('bounds live observations per Gateway instance', async () => {
-    const sessions = [client]
-    for (let index = 1; index < 33; index += 1)
-      sessions.push(await connect(TOKEN, GatewayIntentBits.GuildVoiceStates))
-    for (const [index, target] of sessions.entries()) {
+    let target = client
+    for (let index = 0; index < 33; index += 1) {
       const response = await request(ROOT, 'POST', {
         ownership_key: `bounded-${index}`,
         bot_id: BOT_ID,
@@ -746,9 +751,177 @@ describe('Gateway session invalidation (forced re-IDENTIFY)', () => {
         session_id: target.sessionId,
       })
       expect(response.status).toBe(index < 32 ? 201 : 429)
+      if (index === 32) break
+      await target.closed
+      // Each replacement satisfies its observation and is the next target.
+      target = await connect(TOKEN, GatewayIntentBits.GuildVoiceStates)
     }
-    const last = sessions.at(-1)
-    expect(last && server.sessionManager.get(last.sessionId)).toBeDefined()
-    expect(await status(address('bounded-32', last?.sessionId))).toBe(404)
+    expect(server.sessionManager.get(target.sessionId)).toBeDefined()
+    expect(await status(address('bounded-32', target.sessionId))).toBe(404)
+  })
+
+  it('refuses a second open invalidation for the same setup token', async () => {
+    const sibling = await connect()
+    await invalidate()
+    await client.closed
+    const busy = await request(ROOT, 'POST', {
+      ownership_key: 'reidentify-sibling',
+      bot_id: BOT_ID,
+      guild_id: GUILD_A,
+      session_id: sibling.sessionId,
+    })
+    expect(busy.status).toBe(409)
+    expect(await busy.json()).toEqual({ message: 'BUSY', code: 0 })
+    await fence(sibling)
+    expect(sibling.frames.some((entry) => entry.op === 9)).toBe(false)
+    expect(await status(address('reidentify-sibling', sibling.sessionId))).toBe(
+      404
+    )
+
+    // Once the first observation has its replacement, the sibling can go.
+    const replacement = await connect()
+    const replaced = await observe()
+    expect(replaced.replacement?.session_id).toBe(replacement.sessionId)
+    const second = await request(ROOT, 'POST', {
+      ownership_key: 'reidentify-sibling',
+      bot_id: BOT_ID,
+      guild_id: GUILD_A,
+      session_id: sibling.sessionId,
+    })
+    expect(second.status).toBe(201)
+    const pending = (await second.json()) as Invalidation
+    // The earlier replacement is never attributed to the new observation.
+    expect(pending.status).toBe('awaiting_identify')
+    expect(pending.identifies).toEqual([])
+    await sibling.closed
+    const siblingReplacement = await connect()
+    const settled = await observe(
+      address(
+        'reidentify-sibling',
+        sibling.sessionId,
+        undefined,
+        undefined,
+        '&wait_ms=5000'
+      )
+    )
+    expect(settled.replacement?.session_id).toBe(siblingReplacement.sessionId)
+    // A later IDENTIFY is not appended to an already replaced observation.
+    const first = await observe()
+    expect(first.identifies).toHaveLength(1)
+  })
+})
+
+describe('Gateway session invalidation attempt accounting', () => {
+  const db = initializeDatabase(':memory:')
+  const guilds = Array.from({ length: 51 }, (_, index) =>
+    String(300_000_000_000_000_000n + BigInt(index))
+  )
+  seedBot(db, TOKEN, BOT_ID)
+  for (const guild of guilds) seedGuild(db, TOKEN, guild)
+
+  /** Creates a registered session whose socket accepts every write. */
+  function session(manager: SessionManager): Session {
+    return manager.create({
+      botId: BOT_ID,
+      token: 'reidentify',
+      intents: INTENTS,
+      ws: {
+        readyState: WebSocket.OPEN,
+        send: (_data: string, callback?: (error?: Error) => void) => {
+          callback?.()
+        },
+        close: () => undefined,
+      } as never,
+    })
+  }
+
+  /** Invalidates a fresh session and returns its observation ID. */
+  function setup(): {
+    manager: SessionManager
+    controls: GatewaySessionInvalidations
+    id: string
+  } {
+    const manager = new SessionManager()
+    const controls = new GatewaySessionInvalidations(db, manager)
+    const target = session(manager)
+    const created = controls.create({
+      ownership_key: 'accounting',
+      bot_id: BOT_ID,
+      guild_id: guilds[0] ?? '',
+      session_id: target.sessionId,
+      ttl_ms: 60_000,
+    }) as Invalidation
+    return { manager, controls, id: created.id }
+  }
+
+  /** Simulates the observed writes of one replacement IDENTIFY. */
+  function identify(
+    manager: SessionManager,
+    ready: 'sent' | 'failed',
+    guildStatus: 'sent' | 'failed' | 'buffered' = 'sent'
+  ): Session {
+    const replacement = session(manager)
+    const observer = manager.observeIdentify?.(replacement, {
+      readySequence: 1,
+      guildIds: guilds,
+      guildsIntent: true,
+    })
+    observer?.ready(ready)
+    for (const [index, guild] of guilds.entries()) {
+      observer?.guildCreate({
+        op: 0,
+        t: 'GUILD_CREATE',
+        s: index + 2,
+        d: { id: guild, member_count: 0, channels: [], voice_states: [] },
+      })?.(guildStatus)
+    }
+    return replacement
+  }
+
+  it('completes beyond the summary cap using delivery tracking', () => {
+    const { manager, controls, id } = setup()
+    const replacement = identify(manager, 'sent')
+    const body = controls.inspect(id) as Invalidation
+    expect(body.status).toBe('identified')
+    expect(body.replacement).toMatchObject({
+      session_id: replacement.sessionId,
+      complete: true,
+      guild_creates_sent: 51,
+      guild_creates_skipped: 1,
+    })
+    expect(body.replacement?.guild_creates).toHaveLength(50)
+  })
+
+  it('accepts a successful retry after a failed first attempt', async () => {
+    const { manager, controls, id } = setup()
+    identify(manager, 'failed')
+    const failed = controls.inspect(id) as Invalidation
+    expect(failed.status).toBe('awaiting_identify')
+    expect(failed.identifies[0]?.state).toBe('failed')
+
+    const waiting = controls.wait(id, 5000)
+    identify(manager, 'sent', 'buffered')
+    const second = identify(manager, 'sent')
+    const body = (await waiting) as Invalidation
+    expect(body.identifies.map((attempt) => attempt.state)).toEqual([
+      'failed',
+      'failed',
+      'complete',
+    ])
+    expect(body.replacement?.session_id).toBe(second.sessionId)
+  })
+
+  it('reports a pending attempt as identifying', () => {
+    const { manager, controls, id } = setup()
+    const replacement = session(manager)
+    manager.observeIdentify?.(replacement, {
+      readySequence: 1,
+      guildIds: guilds,
+      guildsIntent: true,
+    })
+    const body = controls.inspect(id) as Invalidation
+    expect(body.status).toBe('identifying')
+    expect(body.replacement).toBeNull()
+    expect(body.identifies[0]?.state).toBe('pending')
   })
 })

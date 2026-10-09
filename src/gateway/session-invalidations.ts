@@ -75,6 +75,17 @@ interface IdentifyObservation {
   guild_creates_skipped: number
 }
 
+/** Internal attempt state; delivery is tracked independently of summaries. */
+interface IdentifyAttempt extends IdentifyObservation {
+  /** Guild IDs whose GUILD_CREATE write completed, beyond the summary cap. */
+  sentGuildIds: Set<string>
+  /** Whether any GUILD_CREATE could not be written to this socket. */
+  guildCreateFailed: boolean
+}
+
+/** Progress of one replacement attempt. */
+type AttemptState = 'pending' | 'complete' | 'failed'
+
 /** One applied invalidation and its bounded replacement evidence. */
 interface InvalidationRecord extends SessionInvalidationRequest {
   id: string
@@ -87,7 +98,7 @@ interface InvalidationRecord extends SessionInvalidationRequest {
   invalidated_at: number
   expires_at: number
   timer: NodeJS.Timeout
-  identifies: IdentifyObservation[]
+  identifies: IdentifyAttempt[]
   identifies_skipped: number
   resumes_rejected: number
 }
@@ -115,16 +126,45 @@ function sameOwner(
   )
 }
 
-/** Whether a replacement's first IDENTIFY wrote READY and every GUILD_CREATE. */
-function isComplete(identify: IdentifyObservation): boolean {
-  if (identify.ready.transport !== 'sent') return false
-  return identify.guilds_intent
-    ? identify.ready.guild_ids.every((guildId) =>
-        identify.guild_creates.some(
-          (entry) => entry.guild_id === guildId && entry.transport === 'sent'
-        )
-      )
-    : true
+/**
+ * Classifies an attempt: complete once READY and a GUILD_CREATE for every
+ * READY guild were written; failed when any of them could not be written
+ * (including a socket that closed before the snapshot finished).
+ */
+function attemptState(attempt: IdentifyAttempt): AttemptState {
+  if (attempt.ready.transport === 'failed' || attempt.guildCreateFailed)
+    return 'failed'
+  if (attempt.ready.transport !== 'sent') return 'pending'
+  return !attempt.guilds_intent ||
+    attempt.ready.guild_ids.every((guildId) =>
+      attempt.sentGuildIds.has(guildId)
+    )
+    ? 'complete'
+    : 'pending'
+}
+
+/** Whether an observation still awaits its replacement IDENTIFY. */
+function isOpen(record: InvalidationRecord): boolean {
+  return record.identifies.every(
+    (attempt) => attemptState(attempt) !== 'complete'
+  )
+}
+
+/** Projects an attempt to its public, credential-free shape. */
+function publicAttempt(attempt: IdentifyAttempt): object {
+  const state = attemptState(attempt)
+  return {
+    session_id: attempt.session_id,
+    intents: attempt.intents,
+    identified_at: attempt.identified_at,
+    guilds_intent: attempt.guilds_intent,
+    ready: attempt.ready,
+    guild_creates: attempt.guild_creates,
+    guild_creates_sent: attempt.sentGuildIds.size,
+    guild_creates_skipped: attempt.guild_creates_skipped,
+    state,
+    complete: state === 'complete',
+  }
 }
 
 /** Copies only bounded public facts from a GUILD_CREATE envelope. */
@@ -234,6 +274,15 @@ export class GatewaySessionInvalidations {
     if (!session || !this.inScope(session, request)) return 'UNKNOWN_SCOPE'
     if (session.ws.readyState !== WebSocket.OPEN) return 'INVALID_STATE'
     if (this.records.size >= MAX_LIVE) return 'LIMIT'
+    // A replacement IDENTIFY carries no link to the session it replaces, so
+    // only one open observation per setup token keeps attribution exact.
+    const token = normalizeToken(session.token)
+    if (
+      this.records
+        .values()
+        .some((record) => record.token === token && isOpen(record))
+    )
+      return 'BUSY'
 
     const id = randomUUID()
     const now = Date.now()
@@ -242,7 +291,7 @@ export class GatewaySessionInvalidations {
     const record: InvalidationRecord = {
       ...request,
       id,
-      token: normalizeToken(session.token),
+      token,
       socket: session.ws,
       sequence: session.seq,
       transport: 'queued',
@@ -280,73 +329,76 @@ export class GatewaySessionInvalidations {
     return this.inspect(id) ?? 'CONFLICT'
   }
 
-  /** Records IDENTIFYs by the invalidated setup token on any other socket. */
+  /**
+   * Attributes a successful IDENTIFY by the invalidated setup token on another
+   * socket to the open observation, unless a pending or complete attempt
+   * already exists (failed attempts allow a retry to be attributed).
+   */
   private observeIdentify(
     session: Session,
     facts: IdentifyFacts
   ): IdentifyObserver | undefined {
     const token = normalizeToken(session.token)
-    const entries: IdentifyObservation[] = []
-    for (const record of this.records.values()) {
-      if (
-        record.token !== token ||
-        record.bot_id !== session.botId ||
-        record.socket === session.ws
+    const record = this.records
+      .values()
+      .find(
+        (candidate) =>
+          candidate.token === token &&
+          candidate.bot_id === session.botId &&
+          candidate.socket !== session.ws &&
+          candidate.identifies.every(
+            (attempt) => attemptState(attempt) === 'failed'
+          )
       )
-        continue
-      if (record.identifies.length >= MAX_IDENTIFIES) {
-        record.identifies_skipped += 1
-        continue
-      }
-      const entry: IdentifyObservation = {
-        session_id: session.sessionId,
-        intents: session.intents,
-        identified_at: Date.now(),
-        guilds_intent: facts.guildsIntent,
-        ready: {
-          sequence: facts.readySequence,
-          guild_ids: [...facts.guildIds],
-          transport: 'queued',
-        },
-        guild_creates: [],
-        guild_creates_skipped: 0,
-      }
-      record.identifies.push(entry)
-      entries.push(entry)
-      this.notify(record.id)
+    if (!record) return undefined
+    if (record.identifies.length >= MAX_IDENTIFIES) {
+      record.identifies_skipped += 1
+      return undefined
     }
-    return entries.length === 0
-      ? undefined
-      : {
-          ready: (status) => {
-            for (const entry of entries) entry.ready.transport = status
-            this.notifyAll()
-          },
-          guildCreate: (payload) => {
-            const observations: GuildCreateObservation[] = []
-            for (const entry of entries) {
-              if (entry.guild_creates.length >= MAX_GUILD_CREATES) {
-                entry.guild_creates_skipped += 1
-                continue
-              }
-              const observation = summarizeGuildCreate(payload)
-              entry.guild_creates.push(observation)
-              observations.push(observation)
-            }
-            return observations.length === 0
-              ? undefined
-              : (status) => {
-                  for (const observation of observations)
-                    observation.transport = status
-                  this.notifyAll()
-                }
-          },
+    const attempt: IdentifyAttempt = {
+      session_id: session.sessionId,
+      intents: session.intents,
+      identified_at: Date.now(),
+      guilds_intent: facts.guildsIntent,
+      ready: {
+        sequence: facts.readySequence,
+        guild_ids: [...facts.guildIds],
+        transport: 'queued',
+      },
+      guild_creates: [],
+      guild_creates_skipped: 0,
+      sentGuildIds: new Set(),
+      guildCreateFailed: false,
+    }
+    record.identifies.push(attempt)
+    this.notify(record.id)
+    return {
+      ready: (status) => {
+        attempt.ready.transport = status
+        this.notify(record.id)
+      },
+      guildCreate: (payload) => {
+        const summary = summarizeGuildCreate(payload)
+        if (attempt.guild_creates.length < MAX_GUILD_CREATES)
+          attempt.guild_creates.push(summary)
+        else attempt.guild_creates_skipped += 1
+        return (status) => {
+          summary.transport = status
+          if (status === 'sent') attempt.sentGuildIds.add(summary.guild_id)
+          else if (status === 'failed' || status === 'buffered')
+            attempt.guildCreateFailed = true
+          this.notify(record.id)
         }
+      },
+    }
   }
 
   /** Returns public evidence only; never a token or socket. */
   inspect(id: string): object | undefined {
     const record = this.records.get(id)
+    const replacement = record?.identifies.find(
+      (attempt) => attemptState(attempt) === 'complete'
+    )
     return record
       ? structuredClone({
           id: record.id,
@@ -359,15 +411,20 @@ export class GatewaySessionInvalidations {
           resumable: false,
           close_code: GatewayCloseCode.SessionTimedOut,
           transport: record.transport,
-          status:
-            record.identifies.length > 0 ? 'identified' : 'awaiting_identify',
+          status: replacement
+            ? 'identified'
+            : record.identifies.some(
+                  (attempt) => attemptState(attempt) === 'pending'
+                )
+              ? 'identifying'
+              : 'awaiting_identify',
+          replacement: replacement ? publicAttempt(replacement) : null,
           ttl_ms: record.ttl_ms,
           invalidated_at: record.invalidated_at,
           expires_at: record.expires_at,
-          identifies: record.identifies.map((entry) => ({
-            ...entry,
-            complete: isComplete(entry),
-          })),
+          identifies: record.identifies.map((attempt) =>
+            publicAttempt(attempt)
+          ),
           identifies_skipped: record.identifies_skipped,
           resumes_rejected: record.resumes_rejected,
         })
@@ -381,8 +438,8 @@ export class GatewaySessionInvalidations {
   }
 
   /**
-   * Waits (bounded) until the first replacement IDENTIFY wrote READY and
-   * every GUILD_CREATE, or the observation retires, then inspects it.
+   * Waits (bounded) until a replacement IDENTIFY wrote READY and every
+   * GUILD_CREATE, or the observation retires, then inspects it.
    */
   async wait(
     id: string | null,
@@ -390,11 +447,10 @@ export class GatewaySessionInvalidations {
   ): Promise<object | undefined | 'LIMIT'> {
     const record = id ? this.records.get(id) : undefined
     if (!record) return undefined
-    /** Whether the observation retired or its first replacement settled. */
+    /** Whether the observation retired or has a complete replacement. */
     const settled = (): boolean => {
       const current = this.records.get(record.id)
-      const first = current?.identifies.at(0)
-      return !current || (first !== undefined && isComplete(first))
+      return !current || !isOpen(current)
     }
     if (waitMs === 0 || settled()) return this.inspect(record.id)
     if (this.waiterCount >= MAX_WAITERS) return 'LIMIT'
@@ -427,12 +483,6 @@ export class GatewaySessionInvalidations {
   private notify(id: string): void {
     const checks = this.waiters.get(id) ?? []
     for (const check of checks) check()
-  }
-
-  /** Wakes every waiter; transport callbacks may be shared across records. */
-  private notifyAll(): void {
-    const ids = this.waiters.keys().toArray()
-    for (const id of ids) this.notify(id)
   }
 
   /** Retires an observation by ID; the invalidation itself is irreversible. */

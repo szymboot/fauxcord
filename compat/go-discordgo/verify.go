@@ -839,15 +839,15 @@ func verifyReidentify(origin, botID, guildID, firstSession string, readies <-cha
 	}
 	defer observed.Body.Close()
 	var observation struct {
-		Identifies []struct {
+		Replacement *struct {
 			SessionID string `json:"session_id"`
 			Complete  bool   `json:"complete"`
-		} `json:"identifies"`
+		} `json:"replacement"`
 	}
 	if err := json.NewDecoder(observed.Body).Decode(&observation); err != nil || observed.StatusCode != http.StatusOK {
 		return gatewayStep{Step: step, Status: "fauxcord-fix", Note: fmt.Sprintf("observation status %d: %v", observed.StatusCode, err)}
 	}
-	if len(observation.Identifies) == 0 || observation.Identifies[0].SessionID != second || !observation.Identifies[0].Complete {
+	if observation.Replacement == nil || observation.Replacement.SessionID != second || !observation.Replacement.Complete {
 		return gatewayStep{Step: step, Status: "fauxcord-fix", Note: "observation does not match the replacement READY"}
 	}
 	return gatewayStep{Step: step, Status: "pass"}

@@ -2416,6 +2416,12 @@ Responses:
   live again and can be invalidated.
 - `409` `CONFLICT` when the key is already reserved with a different owner or
   `ttl_ms`, has been closed by DELETE, or its observation retired.
+- `409` `BUSY` when another live observation for the same setup token is
+  still open (has no `replacement` yet). A replacement IDENTIFY carries no
+  link to the session it replaces, so only one open observation per setup
+  token is allowed; this keeps attribution exact. Wait for its replacement,
+  or DELETE it, before invalidating another session of that setup. Nothing
+  changes and the key stays unused.
 - `429` `LIMIT` when 32 observations are live or 4096 ownership reservations
   (active, retired and tombstoned, never evicted) exist in this Gateway
   instance.
@@ -2439,6 +2445,7 @@ can never invalidate the replacement session.
   "close_code": 4009,
   "transport": "sent",
   "status": "identified",
+  "replacement": { "session_id": "fedcba9876543210fedcba9876543210", "...": "same shape as identifies[n]" },
   "ttl_ms": 60000,
   "invalidated_at": 1791936000000,
   "expires_at": 1791936060000,
@@ -2472,7 +2479,9 @@ can never invalidate the replacement session.
           "voice_states_total": 1
         }
       ],
+      "guild_creates_sent": 1,
       "guild_creates_skipped": 0,
+      "state": "complete",
       "complete": true
     }
   ],
@@ -2485,28 +2494,41 @@ can never invalidate the replacement session.
   sequence (a server high-water mark, not a client receipt).
 - `transport`: socket write progress of the op 9 frame (`queued`, `sent`,
   `failed`).
-- `status`: `awaiting_identify` until a replacement IDENTIFY succeeds, then
-  `identified`.
-- `identifies`: successful IDENTIFYs with the invalidated session's setup token
-  on any **other** socket after invalidation, in order (at most 4, then
-  `identifies_skipped` counts). Sessions that existed before the invalidation,
-  other bots and other setups never appear. Each entry reports the new
-  `session_id`, READY's sequence and guild stubs, and one summary per
-  `GUILD_CREATE` actually written (at most 50 guilds; 100 voice states each,
-  with the full count in `voice_states_total`).
+- `status`: `awaiting_identify` while no attempt is in progress (none yet, or
+  all failed), `identifying` while an attempt's frames are still being
+  written, and `identified` once `replacement` is set.
+- `identifies`: replacement attempts, in order. An attempt is a successful
+  IDENTIFY with the invalidated session's setup token on any **other** socket
+  after invalidation, recorded only while the observation has no pending or
+  complete attempt (so after a `failed` attempt the next IDENTIFY is recorded,
+  and after a replacement nothing more is). At most 4 attempts, then
+  `identifies_skipped` counts. Sessions that existed before the invalidation,
+  other bots and other setups never appear. Each attempt reports the new
+  `session_id`, READY's sequence and guild stubs, `guild_creates_sent`, and
+  one summary per `GUILD_CREATE` written (at most 50 summaries, further ones
+  counted in `guild_creates_skipped`; 100 voice states each, with the full
+  count in `voice_states_total`).
+- `state` per attempt: `complete` when READY and a `GUILD_CREATE` for every
+  READY guild were `sent` (READY alone when the replacement lacks the `Guilds`
+  intent, reported as `guilds_intent: false`); `failed` when one of them could
+  not be written, including a socket that closed before the snapshot was
+  written (`buffered`); otherwise `pending`. `complete` mirrors
+  `state === "complete"`. Completion counts every written GUILD_CREATE, not
+  just the retained summaries.
+- `replacement`: the first `complete` attempt, or `null`.
 - `transport` values on READY/GUILD_CREATE are server socket writes; `sent`
   means the frame was handed to the OS, not that the client processed it.
-- `complete`: READY and a `GUILD_CREATE` for every READY guild were `sent`
-  (READY alone when the replacement lacks the `Guilds` intent, reported as
-  `guilds_intent: false`).
 - `resumes_rejected`: RESUME attempts naming the invalidated session that
   received INVALID_SESSION. DiscordGo normally shows `0` because op 9 `d: false`
   makes it IDENTIFY directly.
 
 HTTP 2xx from POST only proves the server applied the invalidation. Prove the
-re-login with `status: "identified"`, the new `identifies[0].session_id`
-(different from `session_id`) and `complete: true`; correlate with the bot's own
-READY session ID when available.
+re-login with `status: "identified"` and `replacement.session_id` (different
+from `session_id`); correlate with the bot's own READY session ID when
+available. Attribution is server-side and token-based: if several processes
+or shards share one setup token, any of them may supply the first IDENTIFY
+after the invalidation, so compare `replacement.session_id` with the process
+you expect.
 
 ### `GET /_test/gateway-session-invalidations/by-key/:key` — Recover and wait
 
@@ -2519,8 +2541,7 @@ Returns `200` with the observation for the exact owner, or `404` for an
 unknown, retired, tombstoned or wrong-scope key (without disclosing another
 owner). Each scope field is required exactly once; unknown/duplicate fields or
 malformed values return `400`. `wait_ms` (optional integer `0`–`30000`) holds
-the response until `identifies[0].complete` is true or the observation
-retires, then answers immediately: `200` with the current observation (which
+the response until `replacement` is set or the observation retires, then answers immediately: `200` with the current observation (which
 may still be `awaiting_identify` when the wait elapsed) or `404` if it retired
 meanwhile. At most 64 concurrent waits per Gateway instance (`429` beyond).
 Responses use `Cache-Control: no-store`. `GET /_test/gateway-session-invalidations/:id`
@@ -2577,8 +2598,8 @@ try {
   const observed = await fetch(`${address}&wait_ms=15000`)
   if (observed.status !== 200) throw new Error('Invalidation was not applied')
   const observation = await observed.json()
-  const [replacement] = observation.identifies
-  if (!replacement?.complete || replacement.session_id === sessionId)
+  const { replacement } = observation
+  if (!replacement || replacement.session_id === sessionId)
     throw new Error('No fresh IDENTIFY with GUILD_CREATE was observed')
   // Assert application state restored from replacement.guild_creates.
 } finally {
