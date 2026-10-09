@@ -14,6 +14,7 @@ import { gatewayBus } from '../gateway/bus'
 import { buildGuildCreatePayload } from './guilds'
 import { getGuildMember, type GuildMemberObject } from './guild-members'
 import { getChannel } from './channels'
+import { getUser, type UserObject } from './users'
 import { resetAuditLogResponses } from './audit-log-responses'
 import { resetRestFaults } from './rest-faults'
 import {
@@ -488,6 +489,35 @@ export function createTestUser(
   )
 
   return { id, username: request.username, discriminator }
+}
+
+/** Validated global-name-only fixture for an existing human. */
+export interface TestUserGlobalNameRequest {
+  /** Omission preserves; null clears; strings are stored exactly as supplied. */
+  global_name?: string | null
+}
+
+/**
+ * Silently prepares an existing human's global name without changing identity.
+ * @param db - Database containing the global user profile
+ * @param userId - Existing non-bot user ID
+ * @param request - Validated narrow fixture
+ * @returns Native user object or an explicit target error, without creation
+ */
+export function prepareTestUserGlobalName(
+  db: Database,
+  userId: string,
+  request: TestUserGlobalNameRequest
+): UserObject | 'UNKNOWN_USER' | 'BOT_USER' {
+  const user = getUser(db, userId)
+  if (!user) return 'UNKNOWN_USER'
+  if (user.bot) return 'BOT_USER'
+  if (request.global_name === undefined) return user
+  db.prepare('UPDATE users SET global_name = ? WHERE id = ?').run(
+    request.global_name,
+    userId
+  )
+  return { ...user, global_name: request.global_name }
 }
 
 /** Result of joining a registered non-bot user to an existing guild. */

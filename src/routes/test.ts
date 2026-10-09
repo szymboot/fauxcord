@@ -29,6 +29,7 @@ import {
   resetTestData,
   getTestMessages,
   createTestUser,
+  prepareTestUserGlobalName,
   joinTestGuildMember,
   prepareMemberDateFixture,
   injectTestMessage,
@@ -46,6 +47,7 @@ import { injectPollVote } from '../services/polls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { validateGuildMemberUpdate } from '../validators/guild'
 import { validateMemberDateFixture } from '../validators/member-dates'
+import { validateTestUserGlobalName } from '../validators/test-user-global-name'
 import { validateRestFault } from '../validators/rest-fault'
 import { validateTestReaction } from '../validators/test-reaction'
 import { validateMessageCreate } from '../validators/message'
@@ -281,6 +283,35 @@ export function createTestRoutes(
       }
       throw err
     }
+  })
+
+  // PATCH /_test/users/:userId — Prepare an existing human's global name silently
+  app.patch('/_test/users/:userId', async (c) => {
+    const parsed: unknown = await c.req.json().catch(() => undefined)
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
+    const payload = parsed as Record<string, unknown>
+    const errors = validateTestUserGlobalName(payload)
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
+    const result = prepareTestUserGlobalName(db, c.req.param('userId'), {
+      global_name: payload.global_name as string | null | undefined,
+    })
+    if (result === 'UNKNOWN_USER') {
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404).body,
+        404
+      )
+    }
+    return result === 'BOT_USER'
+      ? c.json({ message: 'User must not be a bot', code: 0 }, 400)
+      : c.json(result)
   })
 
   // POST /_test/guilds/:guildId/members/:userId — Join an existing non-bot user

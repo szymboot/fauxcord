@@ -1021,6 +1021,48 @@ continues to contain only `id`, `username` and `discriminator`.
 
 ---
 
+## `PATCH /_test/users/:userId` — Prepare a human global name silently
+
+Updates only `global_name` on an **existing non-bot user**. Like other test
+controls, this endpoint requires no Authorization header. It returns `200` with
+the native user object (the same shape as `GET /users/:userId`).
+
+```bash
+curl -X PATCH http://localhost:3000/_test/users/555555555555555555 \
+  -H "Content-Type: application/json" \
+  -d '{"global_name":"New Display Name"}'
+```
+
+`global_name` accepts a string, stored exactly as supplied (including an empty
+string), or explicit `null` to clear it. Omission (`{}`) preserves the current
+value and returns the existing user. An empty body, malformed JSON, non-object
+JSON, unsupported fields (including `username`, `avatar`, and `bot`), or a
+non-string/non-null name returns `400` without any mutation. Field validation
+errors use code `50035`; malformed bodies use code `0`. Unknown users return
+`404` / `10013`; bots return `400` / `0` with `User must not be a bot`, even for
+`{}`. No user is created or converted, and registration still returns `409`
+for an existing ID.
+
+The fixture changes the database's global user profile, shared by every Guild
+membership of that human in this Fauxcord instance. It preserves the user ID,
+`bot: false`, username, discriminator, avatar, memberships, roles, nicknames,
+member dates, and all unrelated state. Other users and separate Fauxcord
+instances are unaffected. `PATCH /users/@me` retains its bot-only behavior.
+
+**No Gateway events are emitted by this fixture.** Existing client cache inputs
+and captured historical envelopes keep their old profile. For a display-name
+change scenario, first register and join the human, let the consuming client
+receive its initial `GUILD_CREATE` or a native member update, then call this
+fixture. Follow it with authenticated `PATCH /guilds/:guildId/members/:userId`
+containing `{"nick":"New nickname"}`. The native `GUILD_MEMBER_UPDATE` contains
+that same human ID, the prepared `user.global_name`, and the new nickname,
+subject to ordinary Guild/Bot/session scope and intents. Explicit null clearing
+works through the same sequence. This lets a client's prior member snapshot
+hold the old global name until the native update arrives. Socket delivery alone
+does not prove that the consuming bot's callback has completed.
+
+---
+
 ## `PATCH /_test/guilds/:guildId/members/:userId` — Prepare member dates
 
 Silently sets `joined_at` and/or `premium_since` on an **existing** Guild
