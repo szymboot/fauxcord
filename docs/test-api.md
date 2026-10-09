@@ -183,9 +183,13 @@ in another guild return `404`, and non-voice/stage channels return `400`. All
 validation finishes before mutation. `{}` is a no-op for an existing valid state.
 
 **Current delivery behavior:** this foundation stores and returns state only.
-It does not publish `VOICE_STATE_UPDATE` or populate startup `GUILD_CREATE`
-voice history, including when sessions are active and `emit` is `true`. Those
-are separate integrations. No audio/video transport is provided.
+It does not publish `VOICE_STATE_UPDATE`, including when sessions are active
+and `emit` is `true`. Prepared connected states appear in `GUILD_CREATE` after
+initial or fresh IDENTIFY, with active members included for identity lookup.
+Use `emit: false` for silent historical preparation. See
+[Discovering prepared voice states on connection](gateway-voice-history.md)
+for setup, payload shape, reconnect and cleanup behavior. No audio/video
+transport is provided.
 
 Voice fixtures are cleared by `/_test/reset`: a nonempty token scopes deletion
 to that Bot's guilds, and omission/empty token clears all voice states. Setup,
