@@ -218,7 +218,9 @@ describe('recoverable Gateway capture ownership', () => {
         session_id: client.sessionId,
       })
     }
-    expect(server.db.serialize()).toEqual(database)
+    // Compare every SQLite image byte natively; deep object equality enumerates
+    // hundreds of thousands of Buffer entries and can starve WS fences in CI.
+    expect(server.db.serialize().equals(database)).toBe(true)
     expect(owner?.seq).toBe(sequence)
     expect(owner?.replayBuffer).toEqual(replay)
     expect(owner?.ws.listenerCount('close')).toBe(listeners)
