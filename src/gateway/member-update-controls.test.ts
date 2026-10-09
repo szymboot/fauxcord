@@ -283,9 +283,10 @@ describe('native member update controls HTTP/WS contract', () => {
       expect(updates(peer)).toHaveLength(3)
       expect(updates()).toHaveLength(0)
       // Change fixtures after capture; release/replay must never reload or mutate them.
-      server.db
-        .prepare('UPDATE users SET global_name = ?, avatar = ? WHERE id = ?')
-        .run('Later', 'later', HUMAN)
+      const prepared = await request(`/_test/users/${HUMAN}`, 'PATCH', {
+        global_name: 'Later',
+      })
+      expect(prepared.status).toBe(200)
       const result2 = await request(
         `/guilds/${guild}/members/${HUMAN}/roles/${role}`,
         'DELETE'
@@ -325,12 +326,79 @@ describe('native member update controls HTTP/WS contract', () => {
       expect(await current.json()).toMatchObject({
         nick: null,
         roles: [],
-        user: { global_name: 'Later', avatar: 'later', bot: false },
+        user: { global_name: 'Later', avatar: 'a_original', bot: false },
       })
       const result5 = await observe(id)
       expect(result5.events_captured[2].deliveries).toBe(3)
     }
   )
+
+  it('silently prepares the same human before native nickname updates and preserves old cache inputs and captures', async () => {
+    const initial = client.frames.find((frame) => frame.t === 'GUILD_CREATE')?.d
+      ?.members as GuildMemberObject[]
+    const cached = initial.find((member) => member.user.id === HUMAN)
+    assert.ok(cached)
+    const oldCache = structuredClone(cached)
+    const peer = await connect()
+    const id = await arm({ member_id: HUMAN, hold: false })
+    await patch('Before fixture')
+    await Promise.all([fence(), fence(peer)])
+    const oldWire = structuredClone(updates()[0])
+    const observedBefore = await observe(id)
+    const oldCapture = observedBefore.events_captured[0].envelope
+    expect(oldWire.d?.user).toMatchObject({
+      id: HUMAN,
+      bot: false,
+      global_name: 'Display name',
+    })
+
+    for (const globalName of ['New display', null]) {
+      const counts = [client.frames.length, peer.frames.length]
+      const prepared = await request(`/_test/users/${HUMAN}`, 'PATCH', {
+        global_name: globalName,
+      })
+      expect(prepared.status).toBe(200)
+      expect(await prepared.json()).toMatchObject({
+        id: HUMAN,
+        bot: false,
+        username: 'Member human',
+        avatar: 'a_original',
+        global_name: globalName,
+      })
+      await Promise.all([fence(), fence(peer)])
+      // Heartbeat ACKs fence transport only; no dispatch should accompany preparation.
+      expect(
+        client.frames.slice(counts[0]).every((frame) => frame.op === 11)
+      ).toBe(true)
+      expect(
+        peer.frames.slice(counts[1]).every((frame) => frame.op === 11)
+      ).toBe(true)
+      const beforeNative = await observe(id)
+      expect(beforeNative.events_captured).toHaveLength(
+        globalName === null ? 2 : 1
+      )
+      const nick = globalName === null ? 'Cleared profile' : 'New nickname'
+      const member = await patch(nick)
+      expect(member.user).toMatchObject({
+        id: HUMAN,
+        bot: false,
+        global_name: globalName,
+      })
+      await Promise.all([fence(), fence(peer)])
+      for (const target of [client, peer]) {
+        expect(updates(target).at(-1)?.d).toEqual({
+          ...member,
+          guild_id: guild,
+        })
+      }
+      expect(cached).toEqual(oldCache)
+      expect(updates()[0]).toEqual(oldWire)
+      const observedAfter = await observe(id)
+      expect(observedAfter.events_captured[0].envelope).toEqual(oldCapture)
+    }
+    expect(updates()).toHaveLength(3)
+    expect(updates(peer)).toHaveLength(3)
+  })
 
   it('uses initial native GUILD_CREATE and REST member snapshots as cache inputs, including bot true', async () => {
     const initial = client.frames.find((frame) => frame.t === 'GUILD_CREATE')?.d
@@ -394,6 +462,17 @@ describe('native member update controls HTTP/WS contract', () => {
     try {
       seedBot(isolated.db, TOKEN)
       seedGuild(isolated.db, TOKEN, guild)
+      const isolatedBase = isolated.url.replace('ws:', 'http:')
+      const registered = await fetch(isolatedBase + '/_test/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: HUMAN,
+          username: 'Isolated',
+          global_name: 'Isolated name',
+        }),
+      })
+      expect(registered.status).toBe(201)
       const ws = new WebSocket(isolated.url)
       const seen: string[] = []
       ws.on('message', (raw: Buffer) => {
@@ -404,6 +483,10 @@ describe('native member update controls HTTP/WS contract', () => {
       const ready = once(ws, 'message')
       ws.send(JSON.stringify({ op: 2, d: { token: TOKEN, intents: INTENTS } }))
       await ready
+      const prepared = await request(`/_test/users/${HUMAN}`, 'PATCH', {
+        global_name: 'Scoped name',
+      })
+      expect(prepared.status).toBe(200)
       await patch('First member')
       await patch('Second member', otherHuman)
       await patch('Other guild', HUMAN, otherGuild)
@@ -416,6 +499,15 @@ describe('native member update controls HTTP/WS contract', () => {
       ws.send(JSON.stringify({ op: 1, d: null }))
       await once(ws, 'message')
       expect(seen).not.toContain('GUILD_MEMBER_UPDATE')
+      const isolatedUser = await fetch(isolatedBase + `/users/${HUMAN}`, {
+        headers: { Authorization: TOKEN },
+      })
+      expect(isolatedUser.status).toBe(200)
+      expect(await isolatedUser.json()).toMatchObject({
+        id: HUMAN,
+        bot: false,
+        global_name: 'Isolated name',
+      })
       ws.terminate()
       for (const session of isolated.sessionManager.getAll())
         isolated.sessionManager.remove(session.sessionId)
@@ -436,6 +528,17 @@ describe('native member update controls HTTP/WS contract', () => {
     expect(updates(foreign)).toEqual([])
     expect(updates()).toHaveLength(1)
     expect(updates()[0].d?.guild_id).toBe(otherGuild)
+    expect(updates()[0].d?.user).toMatchObject({
+      id: HUMAN,
+      bot: false,
+      global_name: 'Scoped name',
+    })
+    expect(result8.events_captured[0].envelope.d.user.global_name).toBe(
+      'Scoped name'
+    )
+    expect(result9.events_captured[0].envelope.d.user.global_name).toBe(
+      'Display name'
+    )
   })
 
   it('requires explicit acknowledgement for each unique delivery, including duplicate original sequences', async () => {
