@@ -4,6 +4,10 @@
  * Uses better-sqlite3 and runs in WAL mode.
  */
 
+import {
+  getRestFaultRuntime,
+  recoverRestFaultOutcomes,
+} from './services/rest-faults'
 import { getRestPageHolds } from './services/rest-page-holds'
 import BetterSqlite3 from 'better-sqlite3'
 import type { Database } from 'better-sqlite3'
@@ -146,6 +150,16 @@ function migrateRestFaultSelectors(db: Database): void {
       db.exec(
         "ALTER TABLE test_rest_faults ADD COLUMN query TEXT NOT NULL DEFAULT ''"
       )
+    for (const [name, definition] of [
+      ['options', "TEXT NOT NULL DEFAULT '{}'"],
+      ['outcomes', "TEXT NOT NULL DEFAULT '{}'"],
+      ['expires_at', 'INTEGER NOT NULL DEFAULT 0'],
+      ['owner_token', 'TEXT'],
+      ['pending_owners', "TEXT NOT NULL DEFAULT '{}'"],
+    ]) {
+      if (columns.every((column) => column.name !== name))
+        db.exec(`ALTER TABLE test_rest_faults ADD COLUMN ${name} ${definition}`)
+    }
     db.exec(`
       DROP INDEX IF EXISTS idx_active_rest_fault;
       CREATE UNIQUE INDEX idx_active_rest_fault
@@ -995,6 +1009,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateInteractionLocale(db)
   migrateInteractionCallbackType(db)
   migrateRestFaultSelectors(db)
+  recoverRestFaultOutcomes(db)
 
   return db
 }
@@ -1029,6 +1044,7 @@ export function runInTransaction<T>(
  */
 export function closeDatabase(db: Database): void {
   getRestPageHolds(db).shutdown()
+  getRestFaultRuntime(db).shutdown(false)
   if (db.open) {
     db.close()
   }

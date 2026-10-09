@@ -15,6 +15,7 @@ export const rateLimitMiddleware = async (
   next: Next
 ): Promise<void> => {
   await next()
+  if (c.res.headers.get('X-RateLimit-Remaining') === '0') return
 
   const resetTime = Math.floor(Date.now() / 1000) + 1
 

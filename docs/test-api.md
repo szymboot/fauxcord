@@ -617,7 +617,8 @@ role assignment, or corresponding Gateway mutation event happens. Authentication
 the normal latency and rate-limit headers still apply. After exhaustion, requests
 use the ordinary REST behavior, including ordinary validation and 404 responses.
 Automatic library retries count as separate attempts. The control provides the
-two-field Discord error body; specialized rate-limit retry fields are not modeled.
+two-field Discord error body when `mode` is omitted, including legacy status `429`.
+Use the explicit `rate_limit` mode below for retry semantics.
 
 All three request prefixes (`/api/v10`, `/api`, and bare) match the same control.
 Legacy selectors (all mutations, audit logs, individual members and global users)
@@ -695,6 +696,151 @@ them; Channel deletion also removes message-send, message-delete and message-pag
 that Channel. Exhausted records remain inspectable until cleared, and a fresh control may then
 be armed for the same selector.
 
+### Rate limits and transport failures
+
+The same endpoint, selectors, count, conflicts, inspection and deletion API also
+support `mode: "rate_limit"`, `"delay"`, or `"disconnect"`. These explicit modes
+capture the guild's owning Bot token for **every** method. Another Bot or Bearer
+caller cannot consume them; reassigned/deleted ownership invalidates them.
+Moving a Channel into another Guild through `/_test/setup` also cancels its old
+explicit controls and pending waits immediately after setup commits.
+Legacy mode-omitted mutation controls retain their existing cross-token behavior.
+Fault selection runs after authentication and before route permission checks or
+mutation. A non-owner Bot with denied send permissions still receives its armed
+failure. Once that control is exhausted, the next attempt uses the current
+permissions and may return `403`; granting permissions allows a normal retry.
+
+```json
+{
+  "method": "POST",
+  "path": "/channels/333333333333333333/messages",
+  "mode": "rate_limit",
+  "retry_after": 0.25,
+  "global": false,
+  "times": 2,
+  "timeout_ms": 30000
+}
+```
+
+`rate_limit` returns HTTP `429` with `message`, numeric `retry_after` (seconds),
+and boolean `global`. `retry_after` is required, finite, greater than zero and at
+most 60; `global` defaults to `false`. `status`, if supplied, must be `429`.
+The response uses the [Discord rate-limit format](https://docs.discord.com/developers/topics/rate-limits):
+`Retry-After` rounds `retry_after` up to whole seconds, as required by
+[HTTP semantics](https://www.rfc-editor.org/rfc/rfc9110.html#name-retry-after).
+`X-RateLimit-Reset-After` equals the precise `retry_after`,
+`X-RateLimit-Reset` is the response-time epoch in seconds plus that interval,
+`X-RateLimit-Remaining` is `0`, `X-RateLimit-Limit` is `1`, and the stable bucket
+is `fault-{controlId}`. Scope is `user` or `global`; only global responses include
+`X-RateLimit-Global: true`. Dummy headers never overwrite these values.
+`global: true` tells the client to apply its global backoff; the server still
+fails only the exact selector. It does not block other routes or health/control
+APIs. Each matching attempt consumes one count even if it arrives before the
+advertised retry interval; this models a deterministic response sequence rather
+than an elapsed-time quota.
+
+For a client deadline failure, replace the mode and retry fields with:
+
+```json
+{
+  "method": "POST",
+  "path": "/channels/333333333333333333/messages",
+  "mode": "delay",
+  "delay_ms": 5000,
+  "timeout_ms": 10000,
+  "times": 1
+}
+```
+
+`delay_ms` is a required integer from 1 to 60000. The selected attempt waits
+before response headers, then returns an error (`504`, code `0`, message
+`"Transport failure"` by default). Optional `status`/`code`/`message` use the
+legacy validation rules. A client deadline shorter than `delay_ms` can abort the
+real connection. The abort immediately clears the timer and listener. Further
+attempts proceed normally once the count is consumed, even while earlier
+attempts are still delayed; an exhausted selector can also be rearmed then.
+At most 256 delayed attempts may be live per database. Further selected delays
+consume their count and return their configured error immediately, recording a
+canceled outcome without creating a timer.
+
+`mode: "disconnect"` needs no retry/delay fields. It destroys the real Node HTTP
+socket before any response headers; clients see a connection error, not a
+fabricated HTTP status. Using an in-process `app.request` without Node bindings
+instead returns `501` and records a canceled attempt. Use a real server to test
+transport behavior. This mode does not simulate termination after mutation or
+partial response delivery.
+
+**Every mode fails before the ordinary route runs.** Delays always terminate
+with an error or disconnect; they never resume message creation, even after
+client cancellation, control deletion, reset, or scope deletion. No message,
+attachment, file upload, poll or `MESSAGE_CREATE` is produced by a selected
+failed attempt. A retry after exhaustion is a new ordinary request and can
+persist and dispatch exactly once. These controls do not depend on channel
+permission enforcement. Pagination page holds remain separate controls; when
+both select a GET, the page hold runs first.
+
+`timeout_ms` is an integer from 1 to 60000, default 30000, for explicit modes
+only. Its deadline starts at arming and never extends on inspection/consumption.
+Unused counts expire; a pending delay is bounded by the earlier of its delay
+and this deadline. Expiry returns the configured error for a still-connected
+delayed client and records cancellation. Expired controls retain evidence and
+permit rearming. Null policy values and fields belonging to another mode are
+invalid (`400`). Existing count limits and `404`/`409` errors still apply.
+
+Explicit-mode responses add `expires_at` (ISO timestamp), `state`, and `outcomes`:
+
+```json
+{
+  "state": "exhausted",
+  "remaining": 0,
+  "consumed": 1,
+  "outcomes": {
+    "pending": 0,
+    "delayed": 1,
+    "responded": 0,
+    "cancelled": 0,
+    "disconnected": 1
+  }
+}
+```
+
+`consumed` counts selected arrivals. `delayed` counts attempts that entered a
+wait; `pending` counts currently live waits. `responded` counts planned error
+response attempts (not client acknowledgements), `disconnected` counts explicit
+socket terminations and client aborts during waits, and `cancelled` counts waits
+ended by lifetime/shutdown/capacity cancellation. State is `delaying` while a
+wait is pending, otherwise `expired` after the deadline, `exhausted` when no
+counts remain, or `armed`. Mode-omitted responses keep their legacy shape.
+Inspection is uncached (`Cache-Control: no-store`) and never consumes a request.
+
+Deletion and reset remove controls and retained evidence as before (`404` on
+later inspection), releasing pending handlers with their configured
+error. Invalidation is immediate within one process; another process serving the
+same SQLite file observes it on a bounded 25 ms check while waits are live.
+These unreferenced checks stop when the last wait finishes. Scoped reset preserves other bots' controls and delays. Channel/guild/setup
+deletion cancels only the removed scope. `buildApp().shutdownRestFaults()` cancels
+live waits and disarms explicit controls before HTTP drain; call it alongside
+`shutdownRestPageHolds()` when embedding the app. Production and the real-server
+helper do this automatically. `closeDatabase` cancels waits owned by that
+connection without disarming controls used by another connection to the same
+file. Timers/listeners are
+removed on every completion path. Configuration, expiry and counters persist
+in SQLite. Private runtime/process ownership distinguishes live waits on other
+connections from abandoned waits; reopening preserves live evidence and recovers
+abandoned waits as canceled outcomes. Inspection, pruning and capacity
+reservation also reconcile abandoned owners on already-open surviving
+connections, so a crashed process cannot permanently consume delay capacity.
+Controls cannot extend their original
+arming deadline across a restart.
+
+`src/rest-transport-faults.test.ts` verifies these public contracts with real
+HTTP and WebSocket clients: coherent rate-limit headers, automatic bounded
+retries, native socket errors, client cancellation, concurrency, isolation,
+lifetime expiry, reset/deletion/shutdown and recovery, including absence of
+persistence/uploads/Gateway dispatch before failure. The retry client is a small
+HTTP test client; discord-bot's library configuration and handler integration
+remain downstream work.
+
 ## `GET /_test/rest-faults/:id` — Inspect consumption
 
 Returns the control object, including `remaining` and `consumed`, or `404` for
@@ -704,7 +850,8 @@ a one-shot fault was exercised. Inspection does not consume a fault.
 ## `DELETE /_test/rest-faults/:id` — Cancel and remove a control
 
 Returns `204` when removed, or `404` if unknown. Removes both the active failure
-and its history; subsequent requests run normally.
+and its history; subsequent requests run normally. Pending transport delays
+finish with their configured error and never enter the ordinary route.
 
 ---
 

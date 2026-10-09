@@ -660,6 +660,7 @@ export async function createRealServer(
           },
           () => {
             built.shutdownRestPageHolds()
+            built.shutdownRestFaults()
           },
           () => closeNodeServer(server),
           () => {

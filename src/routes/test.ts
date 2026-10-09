@@ -159,6 +159,7 @@ export function createTestRoutes(
   })
 
   app.get('/_test/rest-faults/:id', (c) => {
+    c.header('Cache-Control', 'no-store')
     const fault = getRestFault(db, c.req.param('id'))
     return fault
       ? c.json(fault)
