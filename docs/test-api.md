@@ -681,6 +681,10 @@ caller cannot consume them; reassigned/deleted ownership invalidates them.
 Moving a Channel into another Guild through `/_test/setup` also cancels its old
 explicit controls and pending waits immediately after setup commits.
 Legacy mode-omitted mutation controls retain their existing cross-token behavior.
+Fault selection runs after authentication and before route permission checks or
+mutation. A non-owner Bot with denied send permissions still receives its armed
+failure. Once that control is exhausted, the next attempt uses the current
+permissions and may return `403`; granting permissions allows a normal retry.
 
 ```json
 {

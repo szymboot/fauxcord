@@ -210,20 +210,31 @@ async function prepareWorker(
 async function workerArrival(
   worker: HttpWorker,
   id: string,
-  count = 1
+  count = 1,
+  timeoutMs = 2000
 ): Promise<void> {
-  await expect
-    .poll(
-      async () => {
-        const response = await fetch(
-          worker.baseUrl + `/_test/rest-faults/${id}`
-        )
-        const value: unknown = await response.json()
-        return value
-      },
-      { timeout: 2000 }
+  let observed: unknown
+  const signal = AbortSignal.timeout(timeoutMs)
+  try {
+    await expect
+      .poll(
+        async () => {
+          const response = await fetch(
+            worker.baseUrl + `/_test/rest-faults/${id}`,
+            { signal }
+          )
+          observed = await response.json()
+          return observed
+        },
+        { timeout: timeoutMs }
+      )
+      .toMatchObject({ consumed: count, outcomes: { pending: count } })
+  } catch (error) {
+    throw new Error(
+      `Awaiting ${count} live attempts for ${id}; last observed: ${JSON.stringify(observed)}`,
+      { cause: error }
     )
-    .toMatchObject({ consumed: count, outcomes: { pending: count } })
+  }
 }
 
 /** Identifies a real Gateway session and exposes ordered heartbeat barriers. */
@@ -279,6 +290,9 @@ describe('bounded REST transport control contracts over real HTTP', () => {
     const attempts: Promise<number | string>[] = []
     try {
       const faults: RestFault[] = [await prepareWorker(first, 100)]
+      const setupDeadline = Date.now() + 10_000
+      // Outlives the whole 20-second test, not just each arrival barrier.
+      const signal = AbortSignal.timeout(30_000)
       for (let group = 0; group < 3; group++) {
         const count = group === 2 ? 56 : 100
         if (group > 0) {
@@ -302,22 +316,43 @@ describe('bounded REST transport control contracts over real HTTP', () => {
               method: 'POST',
               headers: { Authorization: TOKEN },
               body: '{}',
-              signal: AbortSignal.timeout(15_000),
+              signal,
             }).then(
               (response) => response.status,
               () => 'disconnected'
             )
           )
+          // Fill every slot without queueing 100 new sockets ahead of the
+          // observation request on shared CI runners. All waits remain live.
+          if ((i + 1) % 10 !== 0 && i !== count - 1) continue
+          const budget = setupDeadline - Date.now()
+          expect(
+            budget,
+            'Saturation setup exceeded its 10-second budget'
+          ).toBeGreaterThan(0)
+          await workerArrival(
+            first,
+            faults[group].id,
+            i + 1,
+            Math.min(2000, budget)
+          )
         }
-        await workerArrival(first, faults[group].id, count)
       }
       second = await httpWorker()
-      const live = await fetch(
-        second.baseUrl + `/_test/rest-faults/${faults[0].id}`
-      )
-      await expect(live.json()).resolves.toMatchObject({
-        outcomes: { pending: 100, cancelled: 0 },
-      })
+      for (const fault of faults) {
+        const live = await fetch(
+          second.baseUrl + `/_test/rest-faults/${fault.id}`
+        )
+        await expect(live.json()).resolves.toMatchObject({
+          consumed: fault.times,
+          outcomes: {
+            pending: fault.times,
+            cancelled: 0,
+            disconnected: 0,
+            responded: 0,
+          },
+        })
+      }
       await first.stop(true)
       expect(await Promise.all(attempts)).toEqual(
         Array.from({ length: 256 }, () => 'disconnected')
@@ -540,7 +575,9 @@ describe('bounded REST transport control contracts over real HTTP', () => {
       expect(server.db.prepare('SELECT * FROM messages').all()).toEqual([])
       const replacement = await arm('rate_limit')
       expect(replacement.guild_id).toBe('222222222222222223')
-      expect(await select(send(), (res) => res.status)).toBe(200)
+      const oldOwner = await send()
+      expect(oldOwner.status).toBe(403)
+      expect(await oldOwner.json()).toMatchObject({ code: 50_001 })
       expect(await status(replacement.id)).toMatchObject({
         consumed: 0,
         remaining: 1,
@@ -706,8 +743,51 @@ describe('bounded REST transport control contracts over real HTTP', () => {
   )
 
   it.each(['rate_limit', 'delay', 'disconnect'] as const)(
-    'fails %s multipart sends before persistence, uploads or Gateway dispatch, then recovers',
+    'fails %s before non-owner permissions or multipart mutation, then recovers',
     async (mode) => {
+      expect(
+        await select(
+          request(`/_test/setup/${encodeURIComponent(TOKEN)}`, {
+            method: 'DELETE',
+          }),
+          (value) => value.status
+        )
+      ).toBe(204)
+      const human = await request('/_test/users', {
+        method: 'POST',
+        body: JSON.stringify({ username: 'Human owner' }),
+      })
+      expect(human.status).toBe(201)
+      const owner = (await human.json()) as { id: string }
+      expect(
+        await select(
+          request('/_test/setup', {
+            method: 'POST',
+            body: JSON.stringify({
+              token: TOKEN,
+              guilds: [
+                {
+                  id: guild,
+                  name: 'Non-owner transport',
+                  owner_id: owner.id,
+                  channels: [{ id: channel, name: 'Nickname log' }],
+                },
+              ],
+            }),
+          }),
+          (value) => value.status
+        )
+      ).toBe(201)
+      const view = 1n << 10n
+      /** Changes permissions on the real route without owner/admin bypass. */
+      async function permissions(value: bigint): Promise<void> {
+        const response = await request(`/guilds/${guild}/roles/${guild}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ permissions: String(value) }),
+        })
+        expect(response.status).toBe(200)
+      }
+      await permissions(view)
       const fault = await arm(mode, {
         ...(mode === 'delay' && { delay_ms: 30 }),
       })
@@ -717,6 +797,7 @@ describe('bounded REST transport control contracts over real HTTP', () => {
         'payload_json',
         JSON.stringify({
           content: 'failed log',
+          embeds: [{ description: 'Nickname changed' }],
           poll: {
             question: { text: 'Test?' },
             answers: [
@@ -735,6 +816,13 @@ describe('bounded REST transport control contracts over real HTTP', () => {
         expect(
           await select(send({ body: form }), (value) => value.status)
         ).toBe(mode === 'delay' ? 504 : 429)
+      // Exhaustion exposes the persisted permission denial on the next retry.
+      const denied = await send({ body: form })
+      expect(denied.status).toBe(403)
+      expect(await denied.json()).toMatchObject({
+        code: 50_013,
+        message: 'Missing Permissions',
+      })
       for (const table of ['messages', 'attachments', 'polls', 'poll_answers'])
         expect(server.db.prepare(`SELECT * FROM ${table}`).all()).toEqual([])
       expect(
@@ -754,10 +842,17 @@ describe('bounded REST transport control contracts over real HTTP', () => {
           ...(mode === 'disconnect' ? { disconnected: 1 } : { responded: 1 }),
         },
       })
-      expect(await select(send(), (value) => value.status)).toBe(200)
+      await permissions(view | (1n << 11n) | (1n << 14n))
+      expect(await select(send({ body: form }), (value) => value.status)).toBe(
+        200
+      )
       await observer.barrier()
       expect(observer.events).toHaveLength(1)
       expect(server.db.prepare('SELECT * FROM messages').all()).toHaveLength(1)
+      expect(server.db.prepare('SELECT * FROM attachments').all()).toHaveLength(
+        1
+      )
+      expect(server.db.prepare('SELECT * FROM polls').all()).toHaveLength(1)
     }
   )
 
@@ -1016,12 +1111,9 @@ describe('bounded REST transport control contracts over real HTTP', () => {
     async (mode) => {
       seedBot(server.db, OTHER, '111111111111111112')
       const fault = await arm(mode)
-      expect(
-        await select(
-          send({ headers: { Authorization: OTHER } }),
-          (value) => value.status
-        )
-      ).toBe(200)
+      const nonMember = await send({ headers: { Authorization: OTHER } })
+      expect(nonMember.status).toBe(403)
+      expect(await nonMember.json()).toMatchObject({ code: 50_001 })
       expect(
         await select(
           send({ headers: { Authorization: 'Bot invalid' } }),
