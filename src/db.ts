@@ -944,6 +944,13 @@ export function initializeDatabase(dbPath: string): Database {
     CREATE INDEX IF NOT EXISTS idx_guild_voice_states_channel
       ON guild_voice_states(channel_id);
 
+    CREATE TRIGGER IF NOT EXISTS trg_member_delete_voice_state
+    AFTER DELETE ON guild_members
+    BEGIN
+      DELETE FROM guild_voice_states
+      WHERE guild_id = OLD.guild_id AND user_id = OLD.user_id;
+    END;
+
     CREATE TABLE IF NOT EXISTS guild_onboarding_settings (
       guild_id            TEXT PRIMARY KEY REFERENCES guilds(id) ON DELETE CASCADE,
       prompts             TEXT NOT NULL DEFAULT '[]',

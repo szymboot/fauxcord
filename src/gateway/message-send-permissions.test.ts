@@ -189,6 +189,52 @@ describe('message-send permissions over real HTTP and WebSocket', () => {
     }
   )
 
+  it.each(['/api/v10', '/api', ''])(
+    'combines embed validation and permission recovery through %s',
+    async (prefix) => {
+      const { request, next, noCreate } = await start()
+      const path = `${prefix}/channels/${CHANNEL}/messages`
+      await request(
+        `/channels/${CHANNEL}/permissions/${BOT}`,
+        { type: 1, deny: '16384' },
+        'PUT'
+      )
+      for (const embeds of [
+        'not-an-array',
+        [null],
+        [{ description: 'x'.repeat(3001) }, { description: 'y'.repeat(3000) }],
+      ]) {
+        const invalid = await request(path, { embeds })
+        expect(invalid.status).toBe(400)
+        expect(await invalid.json()).toMatchObject({ code: 50_035 })
+        await noCreate()
+      }
+      const embeds = [
+        { description: 'x'.repeat(3000) },
+        { description: 'y'.repeat(3000) },
+      ]
+      const denied = await request(path, { embeds })
+      expect(denied.status).toBe(403)
+      expect(await denied.json()).toEqual({
+        code: 50_013,
+        message: 'Missing Permissions',
+      })
+      await noCreate()
+      await request(
+        `/channels/${CHANNEL}/permissions/${BOT}`,
+        undefined,
+        'DELETE'
+      )
+      const accepted = await request(path, { embeds })
+      expect(accepted.status).toBe(200)
+      expect(await accepted.json()).toMatchObject({ embeds })
+      expect(await next()).toMatchObject({
+        t: 'MESSAGE_CREATE',
+        d: { embeds },
+      })
+    }
+  )
+
   it('isolates identically named fixtures across server databases', async () => {
     const blocked = await start()
     const allowed = await start()

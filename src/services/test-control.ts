@@ -342,6 +342,15 @@ export function resetTestData(db: Database, token?: string): void {
   resetAuditLogResponses(db, token)
   if (token) {
     db.prepare(
+      `DELETE FROM guild_voice_states WHERE guild_id IN (
+         SELECT id FROM guilds WHERE bot_token = ?
+       )`
+    ).run(token)
+  } else {
+    db.exec('DELETE FROM guild_voice_states')
+  }
+  if (token) {
+    db.prepare(
       `DELETE FROM guild_audit_log_entries WHERE guild_id IN (
          SELECT id FROM guilds WHERE bot_token = ?
        )`
