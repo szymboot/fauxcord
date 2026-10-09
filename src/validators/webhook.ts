@@ -5,6 +5,7 @@
  */
 
 import { maxLengthError, typeError, type ValidationErrors } from './common'
+import { validateMessageEmbeds } from './message'
 
 /** Webhook limit values */
 export const WEBHOOK_LIMITS = {
@@ -126,10 +127,7 @@ export function validateWebhookExecute(
       payload.username.length > WEBHOOK_LIMITS.USERNAME_MAX && {
         username: { _errors: [maxLengthError(WEBHOOK_LIMITS.USERNAME_MAX)] },
       }),
-    ...(Array.isArray(payload.embeds) &&
-      payload.embeds.length > WEBHOOK_LIMITS.EMBEDS_MAX && {
-        embeds: { _errors: [maxLengthError(WEBHOOK_LIMITS.EMBEDS_MAX)] },
-      }),
+    ...validateMessageEmbeds(payload.embeds),
   }
 
   return errors

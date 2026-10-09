@@ -2,6 +2,9 @@
 import type { Database } from '../db'
 import { runInTransaction } from '../db'
 import { generateSnowflake } from '../snowflake'
+import { getGuildVoiceState } from './voice-states'
+
+export { getGuildVoiceState } from './voice-states'
 
 type JsonObject = Record<string, unknown>
 
@@ -1066,54 +1069,6 @@ export function setGuildVoiceState(
       ? (existing?.request_to_speak_timestamp ?? null)
       : payload.request_to_speak_timestamp
   )
-}
-
-/** Gets a guild voice state. */
-export function getGuildVoiceState(
-  db: Database,
-  guildId: string,
-  userId: string
-):
-  | (JsonObject & {
-      channel_id: unknown
-      session_id: string
-      suppress: boolean
-    })
-  | null {
-  const row = db
-    .prepare(
-      'SELECT * FROM guild_voice_states WHERE guild_id = ? AND user_id = ?'
-    )
-    .get(guildId, userId) as
-    | {
-        channel_id: string | null
-        session_id: string
-        deaf: number
-        mute: number
-        self_deaf: number
-        self_mute: number
-        self_stream: number | null
-        self_video: number
-        suppress: number
-        request_to_speak_timestamp: string | null
-      }
-    | undefined
-  return row
-    ? {
-        channel_id: row.channel_id,
-        deaf: row.deaf === 1,
-        guild_id: guildId,
-        mute: row.mute === 1,
-        request_to_speak_timestamp: row.request_to_speak_timestamp,
-        suppress: row.suppress === 1,
-        self_stream: row.self_stream === null ? false : row.self_stream === 1,
-        self_deaf: row.self_deaf === 1,
-        self_mute: row.self_mute === 1,
-        self_video: row.self_video === 1,
-        session_id: row.session_id,
-        user_id: userId,
-      }
-    : null
 }
 
 /** Gets or updates welcome-screen settings. */

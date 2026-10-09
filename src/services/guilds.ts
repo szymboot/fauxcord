@@ -9,10 +9,15 @@ import { getRestPageHolds } from './rest-page-holds'
 import type { Database } from '../db'
 import { getGuildRoles, type RoleObject } from './guild-roles'
 import { getGuildChannels } from './channels'
-import { getGuildMembers } from './guild-members'
+import { getGuildMember, getGuildMembers } from './guild-members'
+import { getGuildVoiceStates } from './voice-states'
 import { toDiscordTimestamp } from '../timestamp'
 // Used for compile-time type drift detection.
-import type { GatewayGuildCreateDispatchData } from 'discord-api-types/v10'
+import type {
+  APIBaseVoiceState,
+  APIVoiceState,
+  GatewayGuildCreateDispatchData,
+} from 'discord-api-types/v10'
 
 /** Guild record type retrieved from the DB */
 interface GuildRow {
@@ -279,7 +284,7 @@ interface GuildCreateExtraFields {
   large: boolean
   unavailable: boolean
   member_count: number
-  voice_states: never[]
+  voice_states: APIBaseVoiceState[]
   members: unknown[]
   channels: unknown[]
   threads: never[]
@@ -314,6 +319,23 @@ export function buildGuildCreatePayload(
       .get(guildId) as { cnt: number }
   ).cnt
 
+  const voiceStates = getGuildVoiceStates(db, guildId).map((voiceState) => {
+    const state: APIVoiceState = { ...voiceState }
+    // Discord's GUILD_CREATE voice states omit the enclosing guild's ID.
+    delete state.guild_id
+    return state
+  })
+  const members = getGuildMembers(db, guildId, 1000)
+  const memberIds = new Set(members.map((member) => member.user.id))
+  // Voice users must be discoverable even beyond the ordinary member page.
+  for (const state of voiceStates) {
+    if (memberIds.has(state.user_id)) continue
+    const member = getGuildMember(db, guildId, state.user_id)
+    if (!member) continue
+    members.push(member)
+    memberIds.add(state.user_id)
+  }
+
   return {
     ...guild,
     // `joined_at` is meant to record when the bot joined this guild; the
@@ -332,8 +354,8 @@ export function buildGuildCreatePayload(
     large: memberCount > 50,
     unavailable: false,
     member_count: memberCount,
-    voice_states: [],
-    members: getGuildMembers(db, guildId, 1000),
+    voice_states: voiceStates,
+    members,
     channels: getGuildChannels(db, guildId),
     threads: [],
     presences: [],
