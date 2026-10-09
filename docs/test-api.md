@@ -1815,10 +1815,75 @@ retain their state. A missing overwrite DELETE returns `204` with
 no event. Invalid payloads (`400`), unknown channels (`404`), and rejected
 authentication (`401`) change no data and queue no update.
 
-Emulator limitations: Fauxcord does not enforce `MANAGE_ROLES` or channel
-visibility permissions. REST authentication permits access across guild setups;
+Emulator limitations: these overwrite endpoints do not enforce `MANAGE_ROLES`
+or channel visibility. Their REST authentication permits access across guild setups;
 Gateway delivery follows the guild's registered bot rather than the request's
 bot token. Permission overwrite dispatches apply to guild channels.
+
+## Exercise actual message-send permissions
+
+`POST /channels/:channelId/messages` (also `/api` and `/api/v10`) checks the
+authenticated bot's persisted guild permissions. This uses the existing roles,
+member roles and overwrites; no injected REST fault is needed. It applies
+`@everyone` base permissions, the union of assigned guild role permissions,
+then everyone, combined role, and member overwrites. At each overwrite stage,
+denies apply before allows. Role positions do not affect these calculations.
+Bitfields use arbitrary-precision integers and are serialized as decimal strings.
+See [Discord's permission semantics](https://docs.discord.com/developers/topics/permissions).
+
+Guild owners and members with guild-level `ADMINISTRATOR` bypass these checks.
+An `ADMINISTRATOR` bit in a channel overwrite does not grant that bypass.
+For a meaningful denial test, register a human using `POST /_test/users`, then
+pass their ID as `guilds[].owner_id` to `POST /_test/setup`. The default setup
+bot is the owner and therefore bypasses even a member-specific denial. The
+human-owner setup already adds both the bot and owner as guild members and
+creates `@everyone` with the existing default permissions.
+
+For example, deny sending to the non-owner bot, using its user ID:
+
+```bash
+curl -X PUT http://localhost:3000/api/v10/channels/333333333333333333/permissions/111111111111111111 \
+  -H 'Authorization: Bot testtoken' \
+  -H 'Content-Type: application/json' \
+  -d '{"type":1,"allow":"0","deny":"2048"}'
+```
+
+Missing guild membership or `VIEW_CHANNEL` (`1024`) returns HTTP `403`, code
+`50001` (`Missing Access`). Missing `SEND_MESSAGES` (`2048`) returns HTTP `403`,
+code `50013` (`Missing Permissions`). A nonempty explicit `embeds` array also
+requires `EMBED_LINKS` (`16384`), including embed-only messages and messages
+with `SUPPRESS_EMBEDS`. Omitted, `null`, or empty embeds and plain URL content
+do not require that bit. Active member timeouts deny sending with `50013`;
+expired/cleared timeouts restore normal permissions. Owners and administrators
+are exempt from timeouts.
+
+Supported guild targets are text (`0`), voice text chat (`2`), announcement
+(`5`), and stage text chat (`13`). DM (`1`) and group DM (`3`) sends retain their
+existing behavior without guild checks. Webhook execution and human message
+fixture controls retain their separate semantics. Category (`4`), directory
+(`14`), forum (`15`), media (`16`), and unknown types return HTTP `400`, code
+`50024`. Thread sends (`10`, `11`, `12`) are explicitly unsupported and also
+return `400/50024`: their parent permissions, `SEND_MESSAGES_IN_THREADS`, private
+membership and archive lifecycle are not modeled by this send endpoint.
+
+Denied requests create no message, embed, attachment or poll records, do not
+advance `last_message_id`, and produce no `MESSAGE_CREATE` or replay entry.
+Permissions are re-read after body parsing and again immediately before the
+synchronous message transaction, including after asynchronous file preparation.
+Uploads prepared before a revocation or channel deletion are removed without
+being published. Restoring membership, roles or overwrites takes effect on the
+next send. Concurrent sends evaluate their own author and channel; persisted
+message-create events stay in their originating server database.
+
+`POST /_test/reset` retains guild membership, roles and overwrites, so it does
+not restore a denied permission. Delete an overwrite through Discord REST to
+restore its inherited permissions, or delete/recreate the setup to clear its
+guild fixtures. There is no queued permission state to cancel. This enforcement
+is scoped to channel message creation: it does not add permission checks to
+message reads, edits, deletes, or other Discord endpoints, and does not yet
+enforce feature-specific send permissions such as TTS, attachments, replies,
+stickers or polls. It supplies Fauxcord prerequisites for bot integration tests;
+the bot harness and end-to-end handler coverage remain downstream work.
 
 ## REST pagination page holds
 
