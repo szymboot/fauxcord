@@ -1823,7 +1823,13 @@ Ownership and intent filtering still apply throughout the gap.
 With `pause_resume: true`, an authenticated, structurally valid RESUME attempt
 waits at the gate without receiving a fabricated success or invalid-session
 response. Inspection exposes `pending_resume: true`. One pending connection is
-retained; competing attempts receive the ordinary INVALID_SESSION (op9, false).
+retained per control, and one socket can belong to only one pending gate across
+all controls. A second RESUME attempt on an already-pending socket (including
+another session/control) receives ordinary INVALID_SESSION (op9, false) without
+changing the first pending owner or the second gate. Canceling/expiring the
+rejected gate cannot close the first owner's socket. Opening the rejected gate
+only opens its policy; it does not replay or bind the first owner's connection.
+Use separate fresh sockets to wait on two gates simultaneously.
 A socket already bound to an existing session also receives INVALID_SESSION
 without admission to the gate, so cancellation/expiry cannot disrupt that
 session or its controls. Use a fresh connection for a gated RESUME.

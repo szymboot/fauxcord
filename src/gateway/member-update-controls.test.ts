@@ -141,6 +141,44 @@ describe('native member update controls HTTP/WS contract', () => {
     expect(response.status).toBe(201)
     return ((await response.json()) as { id: string }).id
   }
+  /** Pauses a native session with its own exact control and resume checkpoint. */
+  async function pauseSession(
+    target: Client,
+    ttlMs = 30_000
+  ): Promise<{ id: string; session_id: string; seq: number }> {
+    const id = await arm({
+      session_id: target.sessionId,
+      hold: false,
+      ttl_ms: ttlMs,
+    })
+    const closed = once(target.ws, 'close')
+    const response = await request(`${ROOT}/${id}/disconnect`, 'POST', {
+      pause_resume: true,
+    })
+    expect(response.status).toBe(200)
+    const checkpoint = (await response.json()) as { sequence: number }
+    await closed
+    return { id, session_id: target.sessionId, seq: checkpoint.sequence }
+  }
+
+  /** Sends a protocol RESUME and fences the response stream, including gated attempts. */
+  async function resumeOn(
+    target: Client,
+    checkpoint: { session_id: string; seq: number }
+  ): Promise<void> {
+    target.ws.send(
+      JSON.stringify({
+        op: 6,
+        d: {
+          token: TOKEN,
+          session_id: checkpoint.session_id,
+          seq: checkpoint.seq,
+        },
+      })
+    )
+    await fence(target)
+  }
+
   /** Reads a copy of the public observation. */
   async function observe(id: string): Promise<Observation> {
     const response = await request(`${ROOT}/${id}`)
@@ -1483,4 +1521,211 @@ describe('native member update controls HTTP/WS contract', () => {
       ])
     }
   )
+  it.each([
+    { first: 'A', action: 'cancel', target: 'owner' },
+    { first: 'A', action: 'cancel', target: 'other' },
+    { first: 'A', action: 'expiry', target: 'owner' },
+    { first: 'A', action: 'expiry', target: 'other' },
+    { first: 'A', action: 'open', target: 'owner' },
+    { first: 'A', action: 'open', target: 'other' },
+    { first: 'B', action: 'cancel', target: 'owner' },
+    { first: 'B', action: 'cancel', target: 'other' },
+    { first: 'B', action: 'expiry', target: 'owner' },
+    { first: 'B', action: 'expiry', target: 'other' },
+    { first: 'B', action: 'open', target: 'owner' },
+    { first: 'B', action: 'open', target: 'other' },
+  ])(
+    'owns one pending gate when $first resumes first and $target is subject to $action',
+    async ({ first, action, target }) => {
+      const secondClient = await connect()
+      const ownerClient = first === 'A' ? client : secondClient
+      const otherClient = first === 'A' ? secondClient : client
+      const owner = await pauseSession(
+        ownerClient,
+        action === 'expiry' && target === 'owner' ? 750 : 30_000
+      )
+      const other = await pauseSession(
+        otherClient,
+        action === 'expiry' && target === 'other' ? 750 : 30_000
+      )
+      const socket = await openSocket()
+      await resumeOn(socket, owner)
+      await resumeOn(socket, other)
+      const original = await observe(owner.id)
+      const rejected = await observe(other.id)
+      expect(original.pending_resume).toBe(true)
+      expect(rejected.pending_resume).toBe(false)
+      expect(rejected.awaiting_resume).toBe(true)
+      expect(socket.frames.filter((frame) => frame.op === 9)).toHaveLength(1)
+      expect(socket.frames.some((frame) => frame.t === 'RESUMED')).toBe(false)
+      await patch('Single pending owner')
+      const selected = target === 'owner' ? owner : other
+      const ownerCloses = action !== 'open' && target === 'owner'
+      const closed = ownerCloses ? once(socket.ws, 'close') : undefined
+      switch (action) {
+        case 'cancel': {
+          const response = await request(`${ROOT}/${selected.id}`, 'DELETE')
+          expect(response.status).toBe(204)
+          break
+        }
+        case 'expiry': {
+          await expect
+            .poll(async () => {
+              const response = await request(`${ROOT}/${selected.id}`)
+              return response.status
+            })
+            .toBe(404)
+          break
+        }
+        case 'open': {
+          const response = await request(
+            `${ROOT}/${selected.id}/resume`,
+            'POST',
+            {}
+          )
+          expect(response.status).toBe(200)
+          break
+        }
+      }
+      if (ownerCloses) {
+        await closed
+        const unaffected = await observe(other.id)
+        expect(unaffected.pending_resume).toBe(false)
+        expect(unaffected.awaiting_resume).toBe(true)
+        const opened = await request(`${ROOT}/${other.id}/resume`, 'POST', {})
+        expect(opened.status).toBe(200)
+        const recovered = await connect(TOKEN, INTENTS, other)
+        expect(updates(recovered).map((frame) => frame.d?.nick)).toEqual([
+          'Single pending owner',
+        ])
+        const restored = await observe(other.id)
+        expect(restored.awaiting_resume).toBe(false)
+        return
+      }
+      await fence(socket)
+      expect(socket.ws.readyState).toBe(WebSocket.OPEN)
+      if (target === 'other') {
+        const retained = await observe(owner.id)
+        expect(retained.pending_resume).toBe(true)
+        expect(socket.frames.some((frame) => frame.t === 'RESUMED')).toBe(false)
+        const opened = await request(`${ROOT}/${owner.id}/resume`, 'POST', {})
+        expect(opened.status).toBe(200)
+        await fence(socket)
+      }
+      expect(
+        socket.frames.filter((frame) => frame.t === 'RESUMED')
+      ).toHaveLength(1)
+      expect(updates(socket).map((frame) => frame.d?.nick)).toEqual([
+        'Single pending owner',
+      ])
+      const restored = await observe(owner.id)
+      expect(restored.awaiting_resume).toBe(false)
+      expect(restored.pending_resume).toBe(false)
+      if (action !== 'open') return
+      // The unselected gate can open independently and still requires a fresh RESUME.
+      if (target === 'owner') {
+        const opened = await request(`${ROOT}/${other.id}/resume`, 'POST', {})
+        expect(opened.status).toBe(200)
+      }
+      const otherWaiting = await observe(other.id)
+      expect(otherWaiting.pending_resume).toBe(false)
+      expect(otherWaiting.awaiting_resume).toBe(true)
+      const recovered = await connect(TOKEN, INTENTS, other)
+      expect(updates(recovered).map((frame) => frame.d?.nick)).toEqual([
+        'Single pending owner',
+      ])
+    }
+  )
+
+  it.each(['identify', 'resume'])(
+    'clears unique pending ownership on %s replacement after attempts for two gates',
+    async (replacement) => {
+      const secondClient = await connect()
+      const a = await pauseSession(client)
+      const b = await pauseSession(secondClient)
+      const socket = await openSocket()
+      await resumeOn(socket, a)
+      await resumeOn(socket, b)
+      const owned = await observe(a.id)
+      const rejected = await observe(b.id)
+      expect(owned.pending_resume).toBe(true)
+      expect(rejected.pending_resume).toBe(false)
+      if (replacement === 'identify') {
+        socket.ws.send(
+          JSON.stringify({ op: 2, d: { token: TOKEN, intents: INTENTS } })
+        )
+        await fence(socket)
+        socket.sessionId = String(
+          socket.frames.findLast((frame) => frame.t === 'READY')?.d?.session_id
+        )
+      } else {
+        // Opening B must leave A's ownership intact until the successful protocol replacement.
+        const opened = await request(`${ROOT}/${b.id}/resume`, 'POST', {})
+        expect(opened.status).toBe(200)
+        const stillOwned = await observe(a.id)
+        expect(stillOwned.pending_resume).toBe(true)
+        await resumeOn(socket, b)
+        socket.sessionId = b.session_id
+      }
+      const established = server.sessionManager.get(socket.sessionId)
+      assert.ok(established)
+      const cleared = await observe(a.id)
+      expect(cleared.pending_resume).toBe(false)
+      const liveControl =
+        replacement === 'identify'
+          ? await arm({ session_id: socket.sessionId, hold: false })
+          : b.id
+      const resumedBefore = socket.frames.filter(
+        (frame) => frame.t === 'RESUMED'
+      ).length
+      const opened = await request(`${ROOT}/${a.id}/resume`, 'POST', {})
+      expect(opened.status).toBe(200)
+      const canceled = await request(`${ROOT}/${a.id}`, 'DELETE')
+      expect(canceled.status).toBe(204)
+      await fence(socket)
+      expect(socket.ws.readyState).toBe(WebSocket.OPEN)
+      expect(server.sessionManager.get(socket.sessionId)).toBe(established)
+      expect(
+        socket.frames.filter((frame) => frame.t === 'RESUMED')
+      ).toHaveLength(resumedBefore)
+      await patch('Replacement scope')
+      await fence(socket)
+      expect(updates(socket).map((frame) => frame.d?.nick)).toEqual([
+        'Replacement scope',
+      ])
+      const retained = await observe(liveControl)
+      expect(retained.events_captured).toHaveLength(1)
+    }
+  )
+  it('keeps two gates independent when each pending RESUME owns a distinct fresh socket', async () => {
+    const secondClient = await connect()
+    const a = await pauseSession(client)
+    const b = await pauseSession(secondClient)
+    const firstSocket = await openSocket()
+    const secondSocket = await openSocket()
+    await Promise.all([resumeOn(firstSocket, a), resumeOn(secondSocket, b)])
+    const firstPending = await observe(a.id)
+    const secondPending = await observe(b.id)
+    expect(firstPending.pending_resume).toBe(true)
+    expect(secondPending.pending_resume).toBe(true)
+    await patch('Independent sockets')
+    const firstClosed = once(firstSocket.ws, 'close')
+    const canceled = await request(`${ROOT}/${a.id}`, 'DELETE')
+    expect(canceled.status).toBe(204)
+    await firstClosed
+    await fence(secondSocket)
+    const unaffected = await observe(b.id)
+    expect(unaffected.pending_resume).toBe(true)
+    expect(unaffected.awaiting_resume).toBe(true)
+    expect(secondSocket.ws.readyState).toBe(WebSocket.OPEN)
+    const opened = await request(`${ROOT}/${b.id}/resume`, 'POST', {})
+    expect(opened.status).toBe(200)
+    await fence(secondSocket)
+    expect(updates(secondSocket).map((frame) => frame.d?.nick)).toEqual([
+      'Independent sockets',
+    ])
+    const restored = await observe(b.id)
+    expect(restored.awaiting_resume).toBe(false)
+    expect(restored.pending_resume).toBe(false)
+  })
 })

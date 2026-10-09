@@ -123,6 +123,9 @@ export class GatewayEventControls {
       if (!control) return false
       if (
         control.pending_resume ||
+        this.controls
+          .values()
+          .some((owner) => owner.pending_resume?.socket === socket) ||
         manager.getAll().some((owner) => owner.ws === socket)
       ) {
         socket.send(encodePayload({ op: 9, d: false }))
