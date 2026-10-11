@@ -196,11 +196,15 @@ guilds, as in the Discord client: joining a voice channel in one server leaves
 the channel in another. Whenever a write leaves a human connected in guild B
 (a join from no connection, a join from guild A, or any connected update),
 every connected state of that user in another guild is disconnected first,
-with the same semantics as `{"channel_id":null}`: the row is kept with
-`channel_id: null`, the previous session ID is preserved, and `self_stream`,
-`self_video` and `request_to_speak_timestamp` are cleared. The disconnect and
-the write commit in one transaction. The response still describes only the
-target guild's state.
+through the same path as `{"channel_id":null}`: the row is kept with
+`channel_id: null`, the previous session ID is preserved, server `mute`/`deaf`
+come from that guild's member (even if a legacy or directly inserted row
+stored different values), and `self_stream`, `self_video` and
+`request_to_speak_timestamp` are cleared. The disconnect and the write commit
+in one transaction. The response still describes only the target guild's
+state. Legacy rows of a user who is no longer a member of that guild are left
+untouched: there is no member to resolve `mute`/`deaf` from, and such rows are
+never published or listed in `GUILD_CREATE`.
 
 With live delivery, guild A's bot receives `VOICE_STATE_UPDATE`
 `channel_id: null` before guild B's bot receives the join. When one bot owns
@@ -309,7 +313,9 @@ is published. `/_test/reset`, setup cleanup and guild deletion remain silent.
   publisher can use `changed && emit` after success; this service emits nothing.
 - `applyGuildVoiceStatePatch(db, guildId, userId, patch)`, the same
   transaction for an already validated `TestVoiceStatePatch`. It is shared by
-  the fixture, stage and Modify Guild Member voice moderation paths and mirrors
+  the fixture, stage and Modify Guild Member voice moderation paths, channel
+  deletion and cross-guild displacement (each displaced guild is disconnected
+  with a nested `channel_id: null` patch, reported in `displaced`), and mirrors
   server `mute`/`deaf` into `guild_members`.
 - `updateGuildMember(db, guildId, userId, params)` in
   `src/services/guild-members.ts` mirrors the opposite direction: non-null

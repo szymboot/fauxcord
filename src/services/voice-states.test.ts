@@ -8,6 +8,7 @@ import {
   seedVoiceChannel,
   seedChannel,
 } from '../test-helpers'
+import { getGuildMember } from './guild-members'
 import {
   compareUserIds,
   disconnectGuildVoiceChannelMembers,
@@ -231,6 +232,63 @@ describe('Shared voice-state foundation', () => {
       ])
       expect(getGuildVoiceStates(db, guild)).toEqual([])
       expect(getGuildVoiceStates(db, third)).toEqual([])
+    })
+
+    it('resolves the displaced mute/deaf from the member, not a divergent stored row', () => {
+      setTestGuildVoiceState(db, guild, user, {
+        channel_id: channel,
+        mute: true,
+        self_deaf: true,
+        suppress: true,
+      })
+      // Legacy/direct-SQL divergence: the row contradicts the member's flags.
+      db.prepare(
+        'UPDATE guild_voice_states SET mute = 0, deaf = 1 WHERE guild_id = ? AND user_id = ?'
+      ).run(guild, user)
+      const before = getGuildVoiceState(db, guild, user)
+      const result = setTestGuildVoiceState(db, otherGuild, user, {
+        channel_id: otherChannel,
+      })
+      assert.ok(typeof result !== 'string')
+      const disconnected = {
+        ...before,
+        channel_id: null,
+        mute: true,
+        deaf: false,
+        self_stream: false,
+        self_video: false,
+        request_to_speak_timestamp: null,
+      }
+      expect(result.displaced).toEqual([
+        {
+          previous: before,
+          state: disconnected,
+          changed: true,
+          emit: true,
+          displaced: [],
+        },
+      ])
+      expect(getGuildVoiceState(db, guild, user)).toEqual(disconnected)
+      expect(getGuildMember(db, guild, user)).toMatchObject({
+        mute: true,
+        deaf: false,
+      })
+    })
+
+    it('leaves a legacy connected row without a membership untouched', () => {
+      const third = seedGuild(db, 'Bot testtoken', '222222222222222224')
+      const thirdChannel = seedVoiceChannel(db, third, '555555555555555560')
+      db.prepare(
+        `INSERT INTO guild_voice_states
+        (guild_id, user_id, channel_id, session_id) VALUES (?, ?, ?, 'orphan')`
+      ).run(third, user, thirdChannel)
+      const orphan = getGuildVoiceState(db, third, user)
+      const result = setTestGuildVoiceState(db, otherGuild, user, {
+        channel_id: otherChannel,
+      })
+      assert.ok(typeof result !== 'string')
+      expect(result.displaced).toEqual([])
+      expect(getGuildVoiceState(db, third, user)).toEqual(orphan)
     })
 
     it('lets bot users stay connected in one channel per guild', () => {
