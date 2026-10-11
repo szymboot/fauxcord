@@ -1158,9 +1158,11 @@ describe('GatewayGuildOutages limits', () => {
     const ended = controls.end(record.id) as {
       guild_creates: unknown[]
       guild_creates_skipped: number
+      recovery_snapshot: boolean
     }
     expect(ended.guild_creates).toHaveLength(50)
     expect(ended.guild_creates_skipped).toBe(5)
+    expect(ended.recovery_snapshot).toBe(true)
     // Every session still received both frames.
     for (const target of manager.getAll()) expect(target.seq).toBe(2)
     controls.reset(undefined, false)
@@ -1229,6 +1231,68 @@ describe('GatewayGuildOutages limits', () => {
     expect(result.guild_creates.map((entry) => entry.transport)).toEqual([
       'buffered',
       'sent',
+    ])
+    controls.reset(undefined, false)
+  })
+
+  it('reports recovery_snapshot only when a snapshot was dispatched', () => {
+    const { manager, controls, ids } = setup(2)
+    // No registered session holds the Guilds intent.
+    const voiceOnly = session(manager, 1 << 7)
+    const none = controls.create({
+      bot_id: '111111111111111111',
+      guild_id: ids[0] ?? '',
+      ttl_ms: 60_000,
+    }) as { id: string }
+    expect(controls.end(none.id)).toMatchObject({
+      status: 'recovered',
+      recovery_snapshot: false,
+      guild_creates: [],
+    })
+    expect(voiceOnly.seq).toBe(0)
+
+    session(manager)
+    const one = controls.create({
+      bot_id: '111111111111111111',
+      guild_id: ids[1] ?? '',
+      ttl_ms: 60_000,
+    }) as { id: string }
+    expect(controls.end(one.id)).toMatchObject({
+      recovery_snapshot: true,
+      guild_creates: [{ trigger: 'recovery', transport: 'sent' }],
+    })
+    controls.reset(undefined, false)
+  })
+
+  it('keeps a GUILD_DELETE whose socket write failed in the replay buffer', () => {
+    const { manager, controls, ids } = setup(1)
+    const broken = manager.create({
+      botId: '111111111111111111',
+      token: 'limits',
+      intents: 1,
+      ws: {
+        readyState: 1,
+        send: (_data: string, callback?: (error?: Error) => void) => {
+          callback?.(new Error('socket broke'))
+        },
+      } as never,
+    })
+    const record = controls.create({
+      bot_id: '111111111111111111',
+      guild_id: ids[0] ?? '',
+      ttl_ms: 60_000,
+    }) as { guild_deletes: { transport: string; sequence: number }[] }
+    expect(record.guild_deletes).toMatchObject([
+      { transport: 'failed', sequence: 1 },
+    ])
+    // RESUME from before the outage replays the outage signal.
+    expect(manager.replayFrom(broken, 0)?.map((entry) => entry.event)).toEqual([
+      {
+        op: 0,
+        t: 'GUILD_DELETE',
+        s: 1,
+        d: { id: ids[0], unavailable: true },
+      },
     ])
     controls.reset(undefined, false)
   })

@@ -112,7 +112,10 @@ interface OutageRecord {
   expires_at: number
   ended_at: number | null
   retained_until: number | null
-  /** Whether recovery wrote snapshots; false when the guild left the setup */
+  /**
+   * Whether recovery dispatched at least one GUILD_CREATE snapshot; false when
+   * the guild left the setup or no session of the setup holds the Guilds intent
+   */
   recovery_snapshot: boolean | null
   /** True while recovery dispatches are still being registered. */
   recovering: boolean
@@ -488,7 +491,7 @@ export class GatewayGuildOutages {
       this.ownerToken(record.bot_id, record.guild_id) === record.token
         ? buildGuildCreatePayload(this.db, record.guild_id)
         : null
-    record.recovery_snapshot = guild !== null
+    record.recovery_snapshot = false
     if (!guild) return
     // Waiters must not settle on an early session's synchronous transport
     // status before every recovery GUILD_CREATE has been registered.
@@ -499,6 +502,8 @@ export class GatewayGuildOutages {
         sendDispatch(this.manager, session, 'GUILD_CREATE', guild, (payload) =>
           this.observeCreate(record, session, payload, 'recovery', null)
         )
+        // Counted per dispatch, independent of the bounded evidence list.
+        record.recovery_snapshot = true
       }
     } finally {
       record.recovering = false

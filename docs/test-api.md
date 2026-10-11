@@ -3236,10 +3236,13 @@ session is allowed; it then only affects later IDENTIFYs.
 
 - `status`: `unavailable` while active, `recovered` after it ended;
   `ended_by` is `request` (end route, DELETE or reset) or `ttl`.
-- `recovery_snapshot`: `null` while active; `true` when recovery wrote
-  `GUILD_CREATE` snapshots; `false` when the guild no longer belongs to the
-  setup at recovery time (for example another `/_test/setup` reused the guild
-  ID), in which case nothing is sent to the original setup's sessions.
+- `recovery_snapshot`: `null` while active; `true` when recovery dispatched a
+  `GUILD_CREATE` snapshot to at least one session; `false` when it dispatched
+  none, either because the guild no longer belongs to the setup at recovery
+  time (for example another `/_test/setup` reused the guild ID; nothing is sent
+  to the original setup's sessions) or because no registered session of the
+  setup holds the `Guilds` intent. A session that IDENTIFYs after recovery
+  receives the ordinary full `GUILD_CREATE`.
 - `started_at`/`ended_at`/`dispatched_at` are server epoch milliseconds;
   `expires_at` is when the TTL would end the outage.
 - `guild_deletes`: one entry per written outage `GUILD_DELETE`, with the
