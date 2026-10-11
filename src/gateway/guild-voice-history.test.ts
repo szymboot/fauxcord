@@ -235,31 +235,69 @@ describe('GUILD_CREATE historical voice states', () => {
       seedGuild(server.db, firstToken, '888888888888888888'),
       seedGuild(server.db, secondToken, '999999999999999999'),
     ]
-    const human = seedMember(server.db, guildIds[0])
+    // A human holds one voice connection, so each guild gets its own human.
+    // The first bot is connected in both of its guilds, which bots may do.
+    const botId = '111111111111111111'
     const states = []
     for (const [index, guildId] of guildIds.entries()) {
-      seedMember(server.db, guildId, human)
+      const human = seedMember(server.db, guildId)
       const channel = seedVoiceChannel(
         server.db,
         guildId,
         String(555_555_555_555_555_555n + BigInt(index))
       )
-      states.push(
+      const guildStates = [
         await fixture(server.url, guildId, human, {
           channel_id: channel,
           self_stream: index === 0,
-        })
-      )
+        }),
+      ]
+      if (index < 2) {
+        seedMember(server.db, guildId, botId)
+        guildStates.push(
+          await fixture(server.url, guildId, botId, { channel_id: channel })
+        )
+      }
+      states.push(guildStates)
     }
     const first = await identify(server.url, firstToken, 2)
     for (const [index, guildId] of guildIds.slice(0, 2).entries()) {
-      expect(first.guilds.find((g) => g.id === guildId)?.voice_states).toEqual([
-        states[index],
-      ])
+      const voiceStates = first.guilds.find(
+        (g) => g.id === guildId
+      )?.voice_states
+      expect(voiceStates).toHaveLength(2)
+      expect(voiceStates).toEqual(expect.arrayContaining(states[index]))
     }
     const second = await identify(server.url, secondToken)
     expect(second.guilds[0].id).toBe(guildIds[2])
-    expect(second.guilds[0].voice_states).toEqual([states[2]])
+    expect(second.guilds[0].voice_states).toEqual(states[2])
+  })
+
+  it('shows a human only in the guild they last connected to after a cross-guild switch', async () => {
+    const server = await createTestGatewayServer()
+    close = server.close
+    const firstToken = seedBot(server.db)
+    const secondToken = seedBot(server.db, 'Bot other', '777777777777777777')
+    const guildA = seedGuild(server.db, firstToken)
+    const guildB = seedGuild(server.db, secondToken, '888888888888888888')
+    const voiceA = seedVoiceChannel(server.db, guildA)
+    const voiceB = seedVoiceChannel(server.db, guildB, '666666666666666666')
+    const human = seedMember(server.db, guildA)
+    seedMember(server.db, guildB, human)
+    await fixture(server.url, guildA, human, {
+      channel_id: voiceA,
+      self_stream: true,
+      self_video: true,
+    })
+    const joined = await fixture(server.url, guildB, human, {
+      channel_id: voiceB,
+      self_stream: true,
+    })
+    const first = await identify(server.url, firstToken)
+    expect(first.guilds[0].voice_states).toEqual([])
+    const second = await identify(server.url, secondToken)
+    expect(second.guilds[0].voice_states).toEqual([joined])
+    expect(joined).toMatchObject({ self_stream: true, self_video: false })
   })
 
   it('omits disconnected, removed, deleted, foreign-channel and stale text-channel states', async () => {

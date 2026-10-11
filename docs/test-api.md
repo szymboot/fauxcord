@@ -177,6 +177,35 @@ request timestamp. The session ID stays stable through flag changes, moves and
 the disconnect response; rejoining after disconnect creates a fresh session.
 IDs and session identity are server-owned and cannot be overridden.
 
+### One voice connection per human user
+
+A human user (`user.bot` is `false`) holds a single voice connection across all
+guilds, as in the Discord client: joining a voice channel in one server leaves
+the channel in another. Whenever a write leaves a human connected in guild B
+(a join from no connection, a join from guild A, or any connected update),
+every connected state of that user in another guild is disconnected first,
+with the same semantics as `{"channel_id":null}`: the row is kept with
+`channel_id: null`, the previous session ID is preserved, and `self_stream`,
+`self_video` and `request_to_speak_timestamp` are cleared. The disconnect and
+the write commit in one transaction. The response still describes only the
+target guild's state.
+
+With live delivery, guild A's bot receives `VOICE_STATE_UPDATE`
+`channel_id: null` before guild B's bot receives the join. When one bot owns
+both guilds, its sessions get the two events in that order with consecutive
+sequence numbers, and voice capture controls on either guild record their
+respective event. With `emit: false`, the same disconnect is applied silently,
+so later `GUILD_CREATE` snapshots list the user only in guild B. Moves within
+one guild and disconnects are unaffected.
+
+Bot users are exempt: a bot may stay connected to one channel in each of
+several guilds at once, because Discord voice connections are requested per
+guild (the Gateway
+[Update Voice State](https://docs.discord.com/developers/events/gateway-events#update-voice-state)
+payload is keyed by `guild_id`). The rule applies to every write path,
+including the authenticated `PATCH /guilds/:guildId/voice-states/:userId`
+route.
+
 Malformed JSON, nonobjects, unsupported fields and invalid values return `400`.
 Missing guild, user, membership or channel returns Discord-style `404`; channels
 in another guild return `404`, and non-voice/stage channels return `400`. All

@@ -4,11 +4,17 @@ import { gatewayBus } from '../gateway/bus'
 import { getGuildMember } from './guild-members'
 import type { VoiceStateFixtureMutation } from './voice-states'
 
-/** Publishes a committed voice transition with its member and setup scope. */
+/**
+ * Publishes a committed voice transition with its member and setup scope.
+ * Cross-guild disconnects caused by the same write are published first, so
+ * every observer sees the old guild's leave before the new guild's join.
+ */
 export function publishGuildVoiceStateMutation(
   db: Database,
   mutation: VoiceStateFixtureMutation
 ): void {
+  for (const displaced of mutation.displaced)
+    publishGuildVoiceStateMutation(db, displaced)
   const { state, previous, changed, emit } = mutation
   if (!changed || !emit) return
   // A disconnected fixture has no live voice session to update. Disconnect
