@@ -22,7 +22,9 @@ const COLORS = ['#ffcc4d', '#f4900c']
  * @param response - Pending HTTP response
  * @returns HTTP status code
  */
-async function statusOf(response: Promise<Response>): Promise<number> {
+async function statusOf(
+  response: Response | Promise<Response>
+): Promise<number> {
   const result = await response
   return result.status
 }
@@ -211,6 +213,50 @@ describe('burst (super) reactions over the test control and REST routes', () => 
         burst_colors: [],
       },
     ])
+  })
+
+  it('orders and pages reaction users numerically across snowflake lengths', async () => {
+    // 17-digit (older) and 19-digit IDs: lexicographic TEXT order would put
+    // the larger 19-digit ID first and make the cursor skip the shorter one.
+    const older = '20000000000000000'
+    const newer = '1000000000000000000'
+    for (const id of [newer, older]) {
+      expect(
+        await statusOf(
+          app.request('/_test/users', {
+            method: 'POST',
+            body: JSON.stringify({ id, username: `Human ${id}` }),
+          })
+        )
+      ).toBe(201)
+      expect(
+        await statusOf(
+          app.request(`/_test/guilds/${guild}/members/${id}`, {
+            method: 'POST',
+          })
+        )
+      ).toBe(201)
+    }
+    for (const type of ['0', '1']) {
+      for (const id of [newer, older, HUMAN_ID]) {
+        expect(
+          await statusOf(
+            control('POST', {
+              user_id: id,
+              emoji: '🐝',
+              ...(type === '1' && { burst: true }),
+            })
+          )
+        ).toBe(204)
+      }
+      expect(await users(type)).toEqual([older, HUMAN_ID, newer])
+      expect(await users(type, '🐝', 'limit=1')).toEqual([older])
+      expect(await users(type, '🐝', `after=${older}&limit=1`)).toEqual([
+        HUMAN_ID,
+      ])
+      expect(await users(type, '🐝', `after=${HUMAN_ID}`)).toEqual([newer])
+      expect(await users(type, '🐝', `after=${newer}`)).toEqual([])
+    }
   })
 
   it('treats a repeated burst add as a no-op without an event, even with new colors', async () => {

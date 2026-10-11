@@ -248,21 +248,24 @@ export function getReactionUsers(
   type: ReactionType = 0
 ): UserRow[] {
   const clampedLimit = Math.min(limit, 100)
-  return after
-    ? (db
-        .prepare(
-          `SELECT u.* FROM users u
-         JOIN reactions r ON r.user_id = u.id
-         WHERE r.message_id = ? AND r.emoji = ? AND r.type = ? AND u.id > ?
-         ORDER BY u.id ASC LIMIT ?`
-        )
-        .all(messageId, emoji, type, after, clampedLimit) as UserRow[])
-    : (db
-        .prepare(
-          `SELECT u.* FROM users u
+  // Snowflake IDs are stored as TEXT and vary in length, so order (and page)
+  // numerically by length first, then lexicographically within one length.
+  const cursor =
+    after === undefined
+      ? ''
+      : 'AND (length(u.id) > ? OR (length(u.id) = ? AND u.id > ?))'
+  return db
+    .prepare(
+      `SELECT u.* FROM users u
        JOIN reactions r ON r.user_id = u.id
-       WHERE r.message_id = ? AND r.emoji = ? AND r.type = ?
-       ORDER BY u.id ASC LIMIT ?`
-        )
-        .all(messageId, emoji, type, clampedLimit) as UserRow[])
+       WHERE r.message_id = ? AND r.emoji = ? AND r.type = ? ${cursor}
+       ORDER BY length(u.id) ASC, u.id ASC LIMIT ?`
+    )
+    .all(
+      messageId,
+      emoji,
+      type,
+      ...(after === undefined ? [] : [after.length, after.length, after]),
+      clampedLimit
+    ) as UserRow[]
 }

@@ -1729,7 +1729,7 @@ rules implemented by your bot.
 Ordinary `GET /channels/:channelId/messages/:messageId/reactions/:emoji` reads
 expose the same registered human with `bot: false`: `type=0` (or omitted) lists
 normal members and `type=1` lists burst members, each with `limit` and `after`
-pagination. Other `type` values return `400 Invalid Form Body` (code `50035`).
+pagination in numeric user-ID order (shorter snowflakes first). Other `type` values return `400 Invalid Form Body` (code `50035`).
 Single-message and message history reads include per-emoji summaries: `count`
 is normal plus burst, `count_details` is `{ "normal": n, "burst": b }`, and
 `burst_colors` holds the colors of the emoji's earliest remaining burst
@@ -1834,7 +1834,8 @@ control to end a human's burst reaction.
 
 Removes a registered human's normal or burst reaction, as when the person
 removes it in the client. It takes the same JSON body fields and target rules
-as the add control, except `burst_colors`:
+as the add control. `burst_colors` only describes an add, so here it is ignored
+like any other unrecognized field:
 
 ```bash
 curl -X DELETE http://localhost:3000/_test/channels/333333333333333333/messages/MESSAGE_ID/reactions \
