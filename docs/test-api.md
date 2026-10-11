@@ -3908,8 +3908,9 @@ After the bot is detached:
   re-adds the bot as a member, clears a ban of the bot's user ID and sends
   `GUILD_CREATE` with the surviving fixture (channels, members, voice
   states). Later IDENTIFYs list the guild again. The removed setup's sessions
-  never see the guild again, even if another setup takes it over: only the new
-  owner's sessions receive its events (an earlier removal is recorded per
+  never see the guild again, and its Bot or linked OAuth2 credentials stay
+  denied on the guild-scoped command routes, even if another setup takes the
+  guild over (an earlier removal is recorded per
   guild, survives deletion of that setup, and is cleared only when the same
   token lists the guild again or the guild is deleted).
 

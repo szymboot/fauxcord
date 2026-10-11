@@ -443,6 +443,70 @@ describe('guild fixtures survive the bot leaving, being kicked or banned', () =>
     expect(await statusOf(`/applications/${BOT}/commands`)).toBe(200)
   })
 
+  it('keeps a removed setup out of guild commands after another setup takes over', async () => {
+    const db = await start()
+    seedApplicationCommand(db, BOT, GUILD, 'guild-cmd')
+    const command = db
+      .prepare('SELECT id FROM application_commands WHERE guild_id = ?')
+      .get(GUILD) as { id: string }
+    // OAuth2 clients linked to the removed setup, with the permissions scope.
+    db.prepare(
+      'INSERT INTO oauth2_clients (client_id, client_secret, bot_token) VALUES (?, ?, ?)'
+    ).run(BOT, 'secret-a', TOKEN)
+    db.prepare(
+      `INSERT INTO oauth2_access_tokens (token, client_id, user_id, scope, expires_at)
+       VALUES ('bearer-a', ?, ?, 'applications.commands.permissions.update', datetime('now', '+1 day'))`
+    ).run(BOT, ALICE)
+    await http(`/users/@me/guilds/${GUILD}`, 'DELETE')
+
+    const setup = await fetch(
+      (server?.url ?? '').replace('ws://', 'http://') + '/_test/setup',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: OTHER_TOKEN,
+          user: { id: OTHER_BOT, username: 'Successor' },
+          guilds: [{ id: GUILD, name: 'Taken over' }],
+        }),
+      }
+    )
+    expect(setup.status).toBe(201)
+
+    const base = `/applications/${BOT}/guilds/${GUILD}/commands`
+    // The removed setup stays denied for reads and writes with Bot tokens...
+    expect(await statusOf(base)).toBe(403)
+    expect(
+      await statusOf(`${base}/${command.id}`, 'PATCH', { description: 'taken' })
+    ).toBe(403)
+    // ...and with its linked OAuth2 credentials.
+    const oauth = await fetch(
+      (server?.url ?? '').replace('ws://', 'http://') +
+        `${base}/${command.id}/permissions`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer bearer-a',
+        },
+        body: JSON.stringify({ permissions: [] }),
+      }
+    )
+    expect(oauth.status).toBe(403)
+    expect(
+      db
+        .prepare('SELECT description FROM application_commands WHERE id = ?')
+        .get(command.id)
+    ).not.toEqual({ description: 'taken' })
+    // The new owner manages its own application, and global commands of the
+    // removed application are unaffected.
+    const successorBase = `/applications/${OTHER_BOT}/guilds/${GUILD}/commands`
+    expect(await statusOf(successorBase, 'GET', undefined, OTHER_TOKEN)).toBe(
+      200
+    )
+    expect(await statusOf(`/applications/${BOT}/commands`)).toBe(200)
+  })
+
   it('rejoins through setup: re-lists the guild, clears the ban and sends GUILD_CREATE', async () => {
     const db = await start()
     seedVoiceState(db, GUILD, ALICE, VOICE)

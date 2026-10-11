@@ -118,16 +118,43 @@ function hasDuplicateNameInPayload(
 export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
 
-  // A guild whose bot left or was removed keeps its stored commands and
-  // permissions, but no application can manage them until the bot rejoins.
+  /**
+   * Denies guild-scoped command and permission routes to a caller whose bot
+   * has no access to the guild: the guild is detached (its bot left or was
+   * removed), or the caller's own setup was removed from it earlier, even if
+   * another setup has since taken the guild over. The stored commands and
+   * permissions survive for the current owner and a later rejoin. The caller's
+   * setup is the Bot token, or the bot linked to the OAuth2 client of a Bearer
+   * token; callers without a registered setup only face the detached check.
+   * @param c - Authenticated Hono context
+   * @param next - Next handler
+   * @returns A 403 Missing Access response, or undefined to continue
+   */
   const denyDetachedGuild = async (
     c: Context<AppEnv>,
     next: Next
   ): Promise<Response | undefined> => {
-    const detached = db
-      .prepare('SELECT 1 FROM guilds WHERE id = ? AND bot_present = 0')
-      .get(c.req.param('guildId'))
-    if (detached)
+    const accessToken = c.get('accessToken')
+    const setupToken =
+      c.get('bot')?.token ??
+      (accessToken
+        ? (
+            db
+              .prepare(
+                'SELECT bot_token FROM oauth2_clients WHERE client_id = ?'
+              )
+              .get(accessToken.client_id) as
+              { bot_token: string | null } | undefined
+          )?.bot_token
+        : undefined)
+    const denied = db
+      .prepare(
+        `SELECT 1 FROM guilds g WHERE g.id = ? AND (g.bot_present = 0 OR EXISTS (
+           SELECT 1 FROM guild_bot_removals r
+           WHERE r.guild_id = g.id AND r.bot_token = ?))`
+      )
+      .get(c.req.param('guildId'), setupToken ?? null)
+    if (denied)
       return c.json(
         discordError(DiscordErrorCode.MISSING_ACCESS, 'Missing Access', 403)
           .body,
