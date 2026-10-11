@@ -96,7 +96,14 @@ guild, which may be defined in the same setup request. Voice settings on other
 channel types and invalid values return `400` with a `message` and
 Discord-style field `errors`, with no partial fixture state or Gateway events.
 When setup reuses an ID, omitted fields keep their stored values and `null`
-restores the default (or clears `afk_channel_id`).
+restores the default (or clears `afk_channel_id`). After applying a guild,
+setup re-validates every stored voice and stage setting of that guild against
+the final channel type and boost tier, and the stored AFK channel against its
+final type: switching a channel between voice and stage, or lowering
+`premium_tier`, returns `400` if a kept value would fall out of range (for
+example a stage `user_limit` above `99` on a channel becoming voice, or an AFK
+channel becoming a stage channel). Replace or reset the value in the same
+request.
 
 The ordinary Discord routes accept the same fields: `POST
 /guilds/{guild.id}/channels` and `PATCH /channels/{channel.id}` (voice settings

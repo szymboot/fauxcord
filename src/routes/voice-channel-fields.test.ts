@@ -577,6 +577,87 @@ describe('Voice channel and guild AFK fields', () => {
         expect(emit).not.toHaveBeenCalled()
       }
     )
+
+    describe('stored values after a voice <-> stage switch or tier change', () => {
+      /** Re-runs setup for the main guild with a fresh token. */
+      function rerun(guild: Record<string, unknown>) {
+        return setup({
+          token: 'Bot second',
+          guilds: [{ id: guildId, name: 'Voice Guild', ...guild }],
+        })
+      }
+
+      it.each([
+        [
+          'a stage user_limit above the voice maximum',
+          { user_limit: 500 },
+          stageId,
+          { channels: [{ id: stageId, name: 'stage', type: 2 }] },
+          'user_limit',
+        ],
+        [
+          'a voice bitrate above the stage maximum',
+          { bitrate: 96_000 },
+          voiceId,
+          { channels: [{ id: voiceId, name: 'voice', type: 13 }] },
+          'bitrate',
+        ],
+        [
+          'a boosted bitrate after lowering premium_tier',
+          { bitrate: 384_000 },
+          voiceId,
+          { premium_tier: 0 },
+          'bitrate',
+        ],
+      ])(
+        'rejects %s atomically',
+        async (_label, patch, channelId, guild, field) => {
+          context.db
+            .prepare('UPDATE guilds SET premium_tier = 3 WHERE id = ?')
+            .run(guildId)
+          expect(
+            await readStatus(api(`/channels/${channelId}`, 'PATCH', patch))
+          ).toBe(200)
+          const before = snapshot()
+          const emit = vi.spyOn(gatewayBus, 'emit')
+          const response = await rerun(guild)
+          expect(response.status).toBe(400)
+          await expect(response.json()).resolves.toMatchObject({
+            message: 'Invalid voice channel settings',
+            errors: { [field]: { _errors: [expect.any(Object)] } },
+          })
+          expect(snapshot()).toEqual(before)
+          expect(emit).not.toHaveBeenCalled()
+        }
+      )
+
+      it('accepts the switch when the same request replaces the value', async () => {
+        await api(`/channels/${stageId}`, 'PATCH', { user_limit: 500 })
+        const response = await rerun({
+          channels: [{ id: stageId, name: 'stage', type: 2, user_limit: 50 }],
+        })
+        expect(response.status).toBe(201)
+      })
+
+      it('rejects turning the AFK channel into a stage channel', async () => {
+        await api(`/guilds/${guildId}`, 'PATCH', { afk_channel_id: voiceId })
+        const before = snapshot()
+        const response = await rerun({
+          channels: [{ id: voiceId, name: 'voice', type: 13 }],
+        })
+        expect(response.status).toBe(400)
+        await expect(response.json()).resolves.toMatchObject({
+          message: 'Invalid guild AFK settings',
+          errors: { afk_channel_id: {} },
+        })
+        expect(snapshot()).toEqual(before)
+        const cleared = await rerun({
+          afk_channel_id: null,
+          channels: [{ id: voiceId, name: 'voice', type: 13 }],
+        })
+        expect(cleared.status).toBe(201)
+      })
+    })
   })
 
   describe('REST voice-state joins and user_limit', () => {

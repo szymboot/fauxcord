@@ -186,6 +186,55 @@ function applySetupGuildAfk(
   }
 }
 
+/**
+ * Re-validates a guild's stored voice state after setup wrote it: a voice
+ * <-> stage switch or a lower `premium_tier` must not leave stored settings
+ * outside the ranges Discord enforces for the final type and tier, and the
+ * stored AFK channel must still be a voice channel. Values that are now out
+ * of range must be replaced in the same setup request.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @throws SetupValidationError with INVALID_CHANNEL_SETTINGS or
+ * INVALID_GUILD_AFK
+ */
+function assertStoredGuildVoiceSettings(db: Database, guildId: string): void {
+  const guild = db
+    .prepare('SELECT premium_tier, afk_channel_id FROM guilds WHERE id = ?')
+    .get(guildId) as { premium_tier: number; afk_channel_id: string | null }
+  if (
+    guild.afk_channel_id !== null &&
+    !isValidAfkChannel(db, guildId, guild.afk_channel_id)
+  ) {
+    throw new SetupValidationError('INVALID_GUILD_AFK', {
+      afk_channel_id: {
+        _errors: [
+          {
+            code: 'CHANNEL_TYPE_INVALID',
+            message: 'Must be a voice channel in this guild.',
+          },
+        ],
+      },
+    })
+  }
+  const channels = db
+    .prepare(
+      `SELECT type, bitrate, user_limit, rtc_region, video_quality_mode
+       FROM channels WHERE guild_id = ? AND type IN (2, 13)`
+    )
+    .all(guildId) as (VoiceChannelSettings & { type: number })[]
+  const regionIds = listVoiceRegions().map((region) => region.id)
+  for (const { type, ...stored } of channels) {
+    const errors = validateVoiceChannelSettings(
+      stored,
+      type,
+      guild.premium_tier,
+      regionIds
+    )
+    if (Object.keys(errors).length > 0)
+      throw new SetupValidationError('INVALID_CHANNEL_SETTINGS', errors)
+  }
+}
+
 /** Test setup response type */
 export interface SetupResponse {
   token: string
@@ -467,6 +516,7 @@ export function setupTestEnvironment(
       }
 
       applySetupGuildAfk(db, guildId, guildReq)
+      assertStoredGuildVoiceSettings(db, guildId)
 
       guildsResponse.push({
         id: guildId,
