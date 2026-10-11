@@ -110,10 +110,9 @@ export function registerGatewaySubscriptions(
       ...(payload.messageAuthorId && {
         message_author_id: payload.messageAuthorId,
       }),
-      // Fauxcord persists only normal reactions.
-      burst: false,
-      type: 0,
-      burst_colors: [],
+      burst: payload.burst ?? false,
+      type: payload.burst ? 1 : 0,
+      burst_colors: payload.burstColors ?? [],
     }
     if (payload.scope) {
       if (payload.scope.db !== db) return
@@ -137,18 +136,31 @@ export function registerGatewaySubscriptions(
   const onReactionRemove: Parameters<
     typeof gatewayBus.on<'message.reaction.remove'>
   >[1] = (payload) => {
+    const data = {
+      user_id: payload.userId,
+      channel_id: payload.channelId,
+      message_id: payload.messageId,
+      guild_id: payload.guildId,
+      emoji: payload.emoji,
+      burst: payload.burst ?? false,
+      type: payload.burst ? 1 : 0,
+    }
+    if (payload.scope) {
+      if (payload.scope.db !== db) return
+      broadcastToBot(
+        manager,
+        payload.scope.botId,
+        'MESSAGE_REACTION_REMOVE',
+        data,
+        GatewayIntentBits.GuildMessageReactions,
+        payload.scope.token
+      )
+      return
+    }
     broadcastToAll(
       manager,
       'MESSAGE_REACTION_REMOVE',
-      {
-        user_id: payload.userId,
-        channel_id: payload.channelId,
-        message_id: payload.messageId,
-        guild_id: payload.guildId,
-        emoji: payload.emoji,
-        burst: false,
-        type: 0,
-      },
+      data,
       GatewayIntentBits.GuildMessageReactions
     )
   }

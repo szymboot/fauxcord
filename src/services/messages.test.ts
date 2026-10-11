@@ -51,7 +51,7 @@ describe('toMessageObject', () => {
       author,
       [],
       [],
-      [{ emoji: '👍', count: 2 }],
+      [{ emoji: '👍', count: 2, burst_count: 0, burst_colors: null }],
       'http://localhost:3000'
     )
     expect(obj.reactions).toHaveLength(1)
@@ -62,6 +62,34 @@ describe('toMessageObject', () => {
     expect(reaction?.burst_colors).toEqual([])
     expect(reaction?.count_details).toEqual({ burst: 0, normal: 2 })
     expect(reaction?.emoji).toEqual({ id: null, name: '👍' })
+  })
+
+  it('splits burst memberships into count_details and exposes burst colors', () => {
+    const obj = toMessageObject(
+      row,
+      author,
+      [],
+      [],
+      [
+        {
+          emoji: '🔥',
+          count: 3,
+          burst_count: 2,
+          burst_colors: '["#ff0000","#00ff00"]',
+        },
+      ],
+      'http://localhost:3000'
+    )
+    expect(obj.reactions).toEqual([
+      {
+        count: 3,
+        count_details: { burst: 2, normal: 1 },
+        me: false,
+        me_burst: false,
+        emoji: { id: null, name: '🔥' },
+        burst_colors: ['#ff0000', '#00ff00'],
+      },
+    ])
   })
 
   it('omits the reactions field entirely when there are no reactions', () => {

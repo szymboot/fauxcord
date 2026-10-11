@@ -1679,7 +1679,8 @@ message lifetime.
 
 ## `POST /_test/channels/:channelId/messages/:messageId/reactions` — Add a human reaction
 
-Adds a persisted normal reaction as an existing registered human. This test
+Adds a persisted normal or burst (super) reaction as an existing registered
+human. This test
 control requires no authentication, like the other `/_test/*` routes. Register
 users with `POST /_test/users`, then join each reactor through
 `POST /_test/guilds/:guildId/members/:userId` before adding reactions. The source
@@ -1698,9 +1699,23 @@ Node runtime (for example `🐝`, `👍🏽`, `👩‍💻`, `🇵🇱`, `1️�
 custom guild emoji in Discord's reaction form `name:id`, or animated
 `a:name:id` (for example `party:123456789012345678`). Send the literal value in
 JSON; do not URL-encode it. Other fields are ignored. Bare IDs, `<:name:id>`
-mention syntax, arbitrary text, multiple emoji in one string, and super
-reactions are unsupported. DMs, group DMs, threads, voice, forum, and other
-channel types are outside this producer's scope. Ephemeral messages are excluded.
+mention syntax, arbitrary text, and multiple emoji in one string are
+unsupported. DMs, group DMs, threads, voice, forum, and other channel types are
+outside this producer's scope. Ephemeral messages are excluded.
+
+| Field          | Required | Description                                                                                                            |
+| -------------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `user_id`      | ✓        | Registered non-bot member of the channel's guild.                                                                      |
+| `emoji`        | ✓        | One Unicode RGI emoji sequence, or a custom `name:id` / `a:name:id` emoji of the channel's guild.                      |
+| `burst`        | —        | Boolean, default `false`. `true` adds a burst (super) reaction (`type: 1`) instead of a normal one.                    |
+| `burst_colors` | —        | Only with `"burst": true`. Array of `"#rrggbb"` strings echoed in the add event and the message summary. Default `[]`. |
+
+```bash
+# A live human super reaction
+curl -X POST http://localhost:3000/_test/channels/333333333333333333/messages/MESSAGE_ID/reactions \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "555555555555555555", "emoji": "🐝", "burst": true, "burst_colors": ["#ffcc4d"]}'
+```
 
 A custom emoji must exist in the source channel's guild; otherwise the request
 fails with `400 Unknown Emoji` (code `10014`), as Discord does. Only the ID
@@ -1708,24 +1723,31 @@ identifies the emoji: the `name` part and the `a:` prefix may be stale or
 different (for example after a rename), and the payload always uses the
 emoji's current name and animated flag. See
 [Custom guild emoji reactions](#custom-guild-emoji-reactions) for seeding,
-renaming and the native REST routes.
+renaming and the native REST routes. Custom emoji support normal and burst
+reactions alike.
 
-Returns `204 No Content`, including repeated adds of the same user/message/emoji.
-The shared reaction service inserts one row per unique tuple; a duplicate adds
-no count and emits no event. Distinct humans and distinct emoji have independent
-rows. The control never registers a bot, changes a user's profile or `bot: false`,
+Returns `204 No Content`, including repeated adds of the same
+user/message/emoji/type. Normal and burst memberships are separate: the
+reaction service inserts one row per unique message/user/emoji/type tuple, so
+one human may hold a normal and a burst reaction of the same emoji at once. A
+duplicate adds no count, emits no event and keeps the original colors.
+Distinct humans and distinct emoji have independent rows. The control never
+registers a bot, changes a user's profile or `bot: false`,
 creates membership, or changes roles, nicknames, or membership dates. Membership
 in the source guild is required; membership in another guild does not qualify.
 This fixture does not evaluate channel permission overwrites or user eligibility
 rules implemented by your bot.
 
 Ordinary `GET /channels/:channelId/messages/:messageId/reactions/:emoji` reads
-expose the same registered human with `bot: false` when `type` is omitted or
-`type=0`. Fauxcord persists only normal reactions, so `type=1` (burst) returns an
-empty array without changing normal membership. Other `type` values return
-`400 Invalid Form Body` (code `50035`). Normal reads retain `limit` and `after`
-pagination. Single-message and message history reads include the persisted
-reaction counts. These REST routes still require normal bot authentication and
+expose the same registered human with `bot: false`: `type=0` (or omitted) lists
+normal members and `type=1` lists burst members, each with `limit` and `after`
+pagination in numeric user-ID order (shorter snowflakes first). Other `type` values return `400 Invalid Form Body` (code `50035`).
+Single-message and message history reads include per-emoji summaries: `count`
+is normal plus burst, `count_details` is `{ "normal": n, "burst": b }`, and
+`burst_colors` holds the colors of the emoji's earliest remaining burst
+reaction (`[]` without bursts). `me_burst` is always `false` because the
+requester is a bot and only humans can hold burst reactions; `me` keeps its
+existing behavior. These REST routes still require normal bot authentication and
 work under `/api/v10`, `/api`, and bare paths. The ordinary `PUT .../reactions/:emoji/@me` continues to react as its
 actual authenticated bot; no human token or impersonation mode is introduced.
 
@@ -1735,8 +1757,10 @@ native `MESSAGE_REACTION_ADD` through the existing bus, dispatch, capture and
 resume pipeline, containing `user_id`, `guild_id`, `channel_id`, `message_id`,
 `emoji: {"id": null, "name": "🐝"}` (custom:
 `{"id": "123456789012345678", "name": "party", "animated": false}`), the
-existing reactor's full `member` data,
-`message_author_id`, `burst: false`, `type: 0`, and `burst_colors: []`. Delivery
+existing reactor's full `member` data, `message_author_id`, `burst`, `type`, and
+`burst_colors`. A normal add has `burst: false`, `type: 0`, and
+`burst_colors: []`; a burst add has `burst: true`, `type: 1`, and the requested
+`burst_colors` (default `[]`). Delivery
 is limited to that guild's setup token and bot ID in the originating database,
 including all matching sessions with the intent. Raw and `Bot `-prefixed IDENTIFY
 tokens work. Another setup sharing the bot ID does not receive the event.
@@ -1756,12 +1780,17 @@ Rejected requests produce no reaction row, membership changes or add event:
 | `400` / `0`     | Actor is a bot, or channel/setup scope is unsupported.                                                                                       |
 | `500` / `0`     | Reaction persistence failed; no add was emitted.                                                                                             |
 
+`400` / `50035` also covers a non-boolean `burst` (`errors.burst`) and
+`burst_colors` that is not an array of `"#rrggbb"` strings or is sent without
+`"burst": true` (`errors.burst_colors`).
+
 Validation runs before target resolution. Target resolution checks channel and
 supported guild/setup scope, message, user, bot flag, membership, then custom
 emoji existence. The
 operation installs no pending producer and needs no fixture-specific cleanup.
-Ordinary single-user removal, emoji clear and message reaction clear remove
-these rows. Re-adding a removed reaction produces a new add event. Reaction-clear
+Ordinary single-user removal removes only the normal membership (see below);
+emoji clear and message reaction clear remove both types. Re-adding a removed
+reaction produces a new add event. Reaction-clear
 routes retain their current behavior and do not gain new Gateway producers.
 Message/channel/guild/setup deletion cascades reaction removal. Full
 `POST /_test/reset` removes all message reactions. A token reset removes reactions
@@ -1802,6 +1831,51 @@ Reactions intent:
 
 Reaction-user reads list the bot with `bot: true`. Duplicate adds and removals of
 absent reactions emit nothing.
+
+### Removing burst reactions
+
+Discord's documented `DELETE .../reactions/:emoji/@me` and
+`DELETE .../reactions/:emoji/:userId` routes have no reaction-type selector, and
+the docs do not say which of a user's memberships they remove (the documented
+`type` default of `0` belongs to Get Reactions only). So there is no documented
+way to remove only one user's burst reaction; the emoji and message clear routes
+remove both types. As a mock assumption, not verified Discord behavior,
+Fauxcord treats both single-user routes as removing the **normal** membership
+and leaves a burst membership intact. Bots cannot super-react, so `@me` never
+holds a burst reaction. Both routes keep their existing behavior, emitting
+`MESSAGE_REACTION_REMOVE` with `burst: false` and `type: 0`. Use the following
+control to end a human's burst reaction.
+
+## `DELETE /_test/channels/:channelId/messages/:messageId/reactions` — Remove a human reaction
+
+Removes a registered human's normal or burst reaction, as when the person
+removes it in the client. It takes the same JSON body fields and target rules
+as the add control, with one exception: a custom emoji is matched by ID and
+need not still exist, so a reaction can be removed after its guild emoji was
+deleted. `burst_colors` only describes an add, so here it is ignored like any
+other unrecognized field:
+
+```bash
+curl -X DELETE http://localhost:3000/_test/channels/333333333333333333/messages/MESSAGE_ID/reactions \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "555555555555555555", "emoji": "🐝", "burst": true}'
+```
+
+`burst: true` removes the burst membership; omitted or `false` removes the
+normal one. The other type is never touched. Returns `204 No Content`, also when
+the human holds no such reaction. When a row is removed it emits native
+`MESSAGE_REACTION_REMOVE` with `user_id`, `channel_id`, `message_id`, `guild_id`,
+`emoji: {"id": null, "name": "🐝"}`, `burst` and `type` (`true`/`1` for a burst
+removal). Delivery uses the same setup scope as the add control: the guild's
+setup token and bot ID in the originating database, with the Guild Message
+Reactions intent (`1024`). Removing an absent reaction emits nothing. Validation
+and target errors match the add control's table and leave reactions unchanged;
+a human who is no longer a guild member gets `404` / `10007`, and REST clears
+still remove that human's rows.
+
+Reactions have no public seed: `SEED_FILE` registers bots only. Seeding fixtures
+with SQL or the test helpers stays silent, as before; only these controls and
+REST routes emit reaction events.
 
 ---
 

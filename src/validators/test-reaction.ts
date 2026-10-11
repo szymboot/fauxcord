@@ -14,12 +14,13 @@ function isSupportedTestEmoji(emoji: unknown): emoji is string {
 }
 
 /**
- * Validates the explicit actor and one Unicode RGI emoji sequence or custom
- * `name:id` / `a:name:id` emoji. Arbitrary strings are rejected.
+ * Validates the explicit actor, one Unicode RGI emoji sequence or custom
+ * `name:id` / `a:name:id` emoji, and the optional `burst` flag shared by the
+ * human reaction add and removal controls. Arbitrary strings are rejected.
  * @param payload - Parsed JSON object from the test control route
  * @returns Discord field errors, empty when valid
  */
-export function validateTestReaction(
+function validateReactionTarget(
   payload: Record<string, unknown>
 ): ValidationErrors {
   const errors = Object.create(null) as ValidationErrors
@@ -43,5 +44,55 @@ export function validateTestReaction(
       ],
     }
   }
+  if (payload.burst !== undefined && typeof payload.burst !== 'boolean') {
+    errors.burst = { _errors: [typeError('boolean')] }
+  }
   return errors
+}
+
+/**
+ * Validates a human reaction add. Besides the shared target fields, a burst
+ * add may carry `burst_colors`: "#rrggbb" strings echoed in the Gateway event
+ * and the message reaction summary. Colors are rejected on normal reactions.
+ * @param payload - Parsed JSON object from the test control route
+ * @returns Discord field errors, empty when valid
+ */
+export function validateTestReaction(
+  payload: Record<string, unknown>
+): ValidationErrors {
+  const errors = validateReactionTarget(payload)
+  const colors = payload.burst_colors
+  if (colors === undefined) return errors
+  if (payload.burst !== true) {
+    errors.burst_colors = {
+      _errors: [
+        {
+          code: 'BURST_COLORS_REQUIRE_BURST',
+          message: 'burst_colors is only allowed when burst is true.',
+        },
+      ],
+    }
+  } else if (
+    !Array.isArray(colors) ||
+    colors.some(
+      (color) => !(typeof color === 'string' && /^#[\da-f]{6}$/i.test(color))
+    )
+  ) {
+    errors.burst_colors = {
+      _errors: [typeError('array of "#rrggbb" strings')],
+    }
+  }
+  return errors
+}
+
+/**
+ * Validates a human reaction removal: the actor, emoji and optional `burst`
+ * flag selecting which membership type to remove.
+ * @param payload - Parsed JSON object from the test control route
+ * @returns Discord field errors, empty when valid
+ */
+export function validateTestReactionRemoval(
+  payload: Record<string, unknown>
+): ValidationErrors {
+  return validateReactionTarget(payload)
 }
