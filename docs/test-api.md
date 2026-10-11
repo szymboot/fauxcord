@@ -2530,13 +2530,14 @@ instead of sleeping.
 }
 ```
 
-| Field           | Required | Meaning                                                                                                   |
-| --------------- | -------- | --------------------------------------------------------------------------------------------------------- |
-| `ownership_key` | ✅       | Fresh opaque key chosen **before** sending, `[A-Za-z0-9_-]{1,128}`. Never put credentials in it.          |
-| `bot_id`        | ✅       | Registered bot user ID (1–20 digit snowflake).                                                            |
-| `guild_id`      | ✅       | A guild of that bot's setup; proves the session's IDENTIFY token owns it. All of its guilds are affected. |
-| `session_id`    | ✅       | Exact Gateway session to invalidate (32 lowercase hex characters). Never inferred.                        |
-| `ttl_ms`        | —        | Observation lifetime, integer `1`–`120000`, default `60000`. The invalidation itself is permanent.        |
+| Field           | Required | Meaning                                                                                                                                                  |
+| --------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ownership_key` | ✅       | Fresh opaque key chosen **before** sending, `[A-Za-z0-9_-]{1,128}`. Never put credentials in it.                                                         |
+| `bot_id`        | ✅       | Registered bot user ID (1–20 digit snowflake).                                                                                                           |
+| `guild_id`      | ✅       | A guild of that bot's setup; proves the session's IDENTIFY token owns it. All of its guilds are affected.                                                |
+| `session_id`    | ✅       | Exact Gateway session to invalidate (32 lowercase hex characters). Never inferred.                                                                       |
+| `ttl_ms`        | —        | Observation lifetime, integer `1`–`120000`, default `60000` (`trigger: "resume"`: `1`–`300000`, default `180000`). The invalidation itself is permanent. |
+| `trigger`       | —        | `"immediate"` (default) invalidates now; `"resume"` rejects the session's next RESUME instead — see [Failed RESUME](#failed-resume-trigger-resume).      |
 
 Use the read-only preflight
 `GET /_test/gateway-event-controls/session?bot_id=:bot&guild_id=:guild` to
@@ -2558,13 +2559,15 @@ Responses:
   already invalidated, heartbeat-expired) or does not belong to that bot and
   guild setup (including another bot's session or another setup sharing the
   bot ID). Failed requests reserve no key.
-- `409` `INVALID_STATE` when the session is registered but its socket is not
-  open: a dropped connection retained for RESUME, or an explicit
-  `gateway-event-controls` disconnect awaiting RESUME. Nothing changes and the
+- `409` `INVALID_STATE` (immediate trigger only) when the session is
+  registered but its socket is not open or is a
+  [zombie connection](#zombie-gateway-connections): a dropped connection
+  retained for RESUME, or an explicit `gateway-event-controls` disconnect
+  awaiting RESUME. Nothing changes and the
   key stays unused; after the client resumes on a new socket the session is
   live again and can be invalidated.
-- `409` `CONFLICT` when the key is already reserved with a different owner or
-  `ttl_ms`, has been closed by DELETE, or its observation retired.
+- `409` `CONFLICT` when the key is already reserved with a different owner,
+  `ttl_ms` or `trigger`, has been closed by DELETE, or its observation retired.
 - `409` `BUSY` when another live observation for the same setup token is
   still open (has no `replacement` yet). A replacement IDENTIFY carries no
   link to the session it replaces, so only one open observation per setup
@@ -2588,12 +2591,14 @@ can never invalidate the replacement session.
   "bot_id": "111111111111111111",
   "guild_id": "222222222222222222",
   "session_id": "0123456789abcdef0123456789abcdef",
+  "trigger": "immediate",
   "sequence": 42,
   "op": 9,
   "resumable": false,
   "close_code": 4009,
   "transport": "sent",
   "status": "identified",
+  "resume_rejection": null,
   "replacement": {
     "session_id": "fedcba9876543210fedcba9876543210",
     "...": "same shape as identifies[n]"
@@ -2646,7 +2651,8 @@ can never invalidate the replacement session.
   sequence (a server high-water mark, not a client receipt).
 - `transport`: socket write progress of the op 9 frame (`queued`, `sent`,
   `failed`).
-- `status`: `awaiting_identify` while no attempt is in progress (none yet, or
+- `status`: `armed` while a `trigger: "resume"` invalidation has not been
+  applied yet, `awaiting_identify` while no attempt is in progress (none yet, or
   all failed), `identifying` while an attempt's frames are still being
   written, and `identified` once `replacement` is set.
 - `identifies`: replacement attempts, in order. An attempt is a successful
@@ -2764,6 +2770,277 @@ try {
 
 Focused real HTTP/WS coverage is in
 `src/gateway/session-invalidations.test.ts`.
+
+### Failed RESUME (`trigger: "resume"`)
+
+With `"trigger": "resume"` the POST does not touch the live connection. It
+**arms** a rejection of the session's next authenticated RESUME, so a test can
+drop the connection, generate events during the gap, and prove that the client
+recovers through a fresh IDENTIFY and `GUILD_CREATE` snapshots instead of a
+replay. Discord documents this path in
+[Resuming](https://docs.discord.com/developers/events/gateway#preparing-to-resume):
+a RESUME that cannot be honored is answered with INVALID_SESSION (op 9) and
+`d: false`, after which the app disconnects, opens a new connection and sends
+IDENTIFY. Discord gives no protocol-level reason; in practice it happens when
+the session expired or its missed events can no longer be replayed.
+
+The TTL starts when the rejection is armed and must cover the whole gap until
+the client's RESUME. That includes a zombie's detection delay: DiscordGo needs
+up to two 41.25 s heartbeat intervals, plus its reconnect. The resume trigger
+therefore defaults to `180000` ms and allows up to `300000`.
+
+Arming requires a registered session of that bot and guild setup. The socket
+may be open, dropped, waiting behind an explicit `disconnect` or silenced as a
+[zombie](#zombie-gateway-connections). `INVALID_STATE` does not apply.
+`BUSY`, `LIMIT`, `CONFLICT`, ownership keys, `wait_ms`, DELETE and lifecycle
+behave exactly as for the immediate trigger. An armed observation counts as
+open for `BUSY`.
+
+When a RESUME arrives that names the session and carries its token, Fauxcord:
+
+1. answers it with INVALID_SESSION (op 9, `d: false`) on the RESUME socket,
+   which stays open (Fauxcord's usual RESUME rejection),
+2. removes the session and its replay buffer, so the events buffered during
+   the gap are **discarded** and never delivered one by one, and
+3. starts observing the replacement IDENTIFY. That IDENTIFY may arrive on
+   any socket, including the one that carried the RESUME.
+
+The rejection also applies when the cursor could no longer be replayed
+(overflow). Such a RESUME is rejected immediately, even while a `pause_resume`
+gate is closed, because only replayable cursors enter the gate. The removed
+session cancels the event control, so a later `/resume` returns `404`. A
+replayable RESUME waits behind a `pause_resume` gate and is rejected when the
+gate opens. The `/resume` response then shows the opened gate, and the event
+control is canceled together with the removed session. A RESUME with another
+token, or one for another session, is unaffected. If the armed observation
+retires (TTL, DELETE, reset), nothing is applied and later RESUMEs succeed
+normally.
+
+If the session disappears before any RESUME (heartbeat timeout, re-IDENTIFY on
+its socket), the observation applies at that moment with reason
+`session_removed`. The client's later RESUME is then rejected naturally and
+counted in `resumes_rejected`.
+
+Differences from the immediate trigger in the observation object:
+
+| Field              | `trigger: "resume"`                                                                                       |
+| ------------------ | --------------------------------------------------------------------------------------------------------- |
+| `status`           | `armed` until applied, then as above                                                                      |
+| `sequence`         | `null` until applied, then the server high-water mark at rejection (including gap events)                 |
+| `invalidated_at`   | `null` until applied                                                                                      |
+| `transport`        | `null` until applied; write progress of the op 9 answering the RESUME; stays `null` for `session_removed` |
+| `close_code`       | always `null` (Fauxcord does not close a socket)                                                          |
+| `resume_rejection` | `null` until applied, then `{reason, at, client_sequence, replay_available, discarded}`                   |
+| `resumes_rejected` | includes the forced rejection                                                                             |
+
+`resume_rejection.reason` is `forced` or `session_removed`. `client_sequence`
+is the RESUME's `seq`. `replay_available` reports whether the replay buffer
+could still have served it (`false` after overflow). `discarded` is
+`{count, first_sequence, last_sequence}` of buffered dispatches after the
+client's sequence. `client_sequence`, `replay_available` and `discarded` are
+`null` for `session_removed`.
+
+```typescript
+// 1. Arm before the gap; 2. drop the connection (event-control disconnect,
+// zombie, or a network drop); 3. change state; 4. wait for the replacement.
+await post('/_test/gateway-session-invalidations', {
+  ownership_key: key,
+  bot_id: botId,
+  guild_id: guildId,
+  session_id: sessionId,
+  trigger: 'resume',
+})
+await post(`/_test/gateway-event-controls/${controlId}/disconnect`, {})
+await patch(`/_test/guilds/${guildId}/voice-states/${userId}`, {
+  self_stream: false,
+})
+const observation = await get(`${address}&wait_ms=15000`)
+// observation.resume_rejection.discarded lists the events that were never
+// delivered individually; observation.replacement.guild_creates holds the
+// snapshot the client rebuilt its state from.
+```
+
+#### Alternative: natural replay-buffer overflow
+
+Each session keeps its most recent **100** dispatches for RESUME. If more
+than 100 dispatches are generated for the session while it is disconnected,
+the RESUME's cursor is older than the buffer and Fauxcord answers op 9
+`d: false` with no control involved. The client then IDENTIFYs. Two
+deviations from Discord apply: Fauxcord keeps the unresumable session
+registered until its heartbeat timeout (it rejects only that cursor), and
+nothing observes the replacement IDENTIFY. Arm `trigger: "resume"` as well to
+observe it: the overflow then shows up as `replay_available: false`.
+
+---
+
+## Zombie Gateway connections
+
+`/_test/gateway-zombie-connections` turns one exact live Gateway connection
+into a _zombie_. The socket stays open, but the server stops answering. It
+writes no HEARTBEAT_ACK (op 11) and no dispatches to that socket, and still
+reads everything the client sends. Native dispatches generated meanwhile are
+sequenced and stored in the session's replay buffer exactly as for a closed
+socket. Use it to test the window in which a client cannot see events
+because it has not yet noticed that its connection is dead.
+
+Discord describes the client side in
+[Heartbeat Interval](https://docs.discord.com/developers/events/gateway#heartbeat-interval):
+if a client does not receive a heartbeat ACK between its attempts at sending
+heartbeats, the connection may be "zombied". The client should then terminate
+the connection with any close code besides `1000` or `1001`, reconnect and
+RESUME. On a successful RESUME the Gateway sends the missed events in order
+and finishes with RESUMED
+([Preparing to Resume](https://docs.discord.com/developers/events/gateway#preparing-to-resume)).
+The DiscordGo fork used by szymboot (`github.com/0x00-sys/discordgo
+v0.0.0-20260923174158-eda8642daf18`, `wsapi.go` `heartbeat()`) checks on each
+tick whether the previous heartbeat was acknowledged. If it was not, DiscordGo
+closes with `1012` (service restart) and calls `reconnect()`, which RESUMEs.
+With Fauxcord's fixed 41.25 s heartbeat interval, detection therefore takes
+between one and two intervals (about 41–83 s) after the zombie starts.
+
+### `POST /_test/gateway-zombie-connections` — Silence one connection
+
+```json
+{
+  "ownership_key": "zombie-0b8a7d6e",
+  "bot_id": "111111111111111111",
+  "guild_id": "222222222222222222",
+  "session_id": "0123456789abcdef0123456789abcdef",
+  "ttl_ms": 180000
+}
+```
+
+| Field           | Required | Meaning                                                                                                     |
+| --------------- | -------- | ----------------------------------------------------------------------------------------------------------- |
+| `ownership_key` | —        | Optional fresh opaque key `[A-Za-z0-9_-]{1,128}` for idempotent retry, recovery and tombstoning.            |
+| `bot_id`        | ✅       | Registered bot user ID.                                                                                     |
+| `guild_id`      | ✅       | A guild of that bot's setup, proving the session's IDENTIFY token owns it.                                  |
+| `session_id`    | ✅       | Exact Gateway session (32 lowercase hex characters), e.g. from `GET /_test/gateway-event-controls/session`. |
+| `ttl_ms`        | —        | Maximum zombie duration, integer `1`–`300000`, default `180000`.                                            |
+
+Responses: `201` with the record below. A keyed retry with the same owner and
+`ttl_ms` returns the same record. `400` is returned for malformed bodies,
+unknown fields, or invalid IDs, key or TTL, and `413` for bodies over 16 KiB.
+`404` `UNKNOWN_SCOPE` means the session is not registered or not in that
+bot/guild setup. `409` `INVALID_STATE` means its socket is not open (dropped,
+or awaiting RESUME after a disconnect) or is already a zombie. `409`
+`CONFLICT` means the key is reserved for another owner or TTL, or is closed.
+`429` `LIMIT` means 32 live records or 4096 key reservations exist.
+
+Only that connection is affected. Other sessions of the same bot, other bots
+and other setups keep receiving ACKs and dispatches. While a connection is a
+zombie, `POST /_test/gateway-session-invalidations` (immediate trigger) and
+`POST /_test/gateway-event-controls/:id/disconnect` for its session return `409`
+`INVALID_STATE`, because neither op 9 nor op 7 could reach the client. Captures
+keep working, and releases are buffered like any other dispatch.
+
+### How the zombie ends
+
+| End                                                        | `ended_by`        | Effect                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The client closes the socket                               | `client_close`    | Normal detection. `close.code` is the client's code, `initiated_by: "client"`.                                                                                                                                                                                                                                                |
+| `POST /_test/gateway-zombie-connections/:id/end` with `{}` | `end`             | The server drops the socket with close code `4000` (Unknown error, reconnect allowed). Returns `200` with the record; `409` when the zombie already ended, `404` when unknown, `400` for a nonempty body.                                                                                                                     |
+| `ttl_ms` elapses                                           | `ttl`             | As `end`.                                                                                                                                                                                                                                                                                                                     |
+| The client RESUMEs on a new socket first                   | `resume`          | The silenced socket is dropped with `4000`.                                                                                                                                                                                                                                                                                   |
+| The session is removed                                     | `session_removed` | The status becomes `session_lost`; nothing is replayed. Examples: a rejected RESUME on another socket, or the heartbeat timeout. A still-open zombie socket is closed with `4009`, so it is not left ACKing for a session that no longer exists. A re-IDENTIFY on the zombie socket itself keeps it open for its new session. |
+| DELETE, `/_test/reset`, setup or guild deletion            | (record retired)  | An active zombie socket is dropped with `4000` first, so the client can still RESUME.                                                                                                                                                                                                                                         |
+
+After the zombie ends the session is an ordinary disconnected session. The
+client's RESUME (on a new socket, with its last received sequence) replays
+every buffered dispatch with its **original** sequence number, followed by
+RESUMED. Combine with
+[`trigger: "resume"`](#failed-resume-trigger-resume) to reject that RESUME
+instead.
+
+**Heartbeat timeout interaction.** Fauxcord closes a session (`4009`) and
+discards it when no HEARTBEAT arrives for 82.5 s (two intervals). Heartbeats
+on a zombie connection are still received and still re-arm that timeout. Only
+the ACK is withheld, so the server never reaps the session while the client
+keeps heartbeating, however long detection takes. After the client closes the
+socket, the session remains resumable until 82.5 s after the last heartbeat
+the server received. This is at least one interval for a client that detects
+on its next tick. A client that stops heartbeating entirely is reaped by the
+timeout: the record becomes `session_lost` and the RESUME gets op 9 `d: false`.
+
+### Record
+
+```json
+{
+  "id": "1d7c…",
+  "ownership_key": "zombie-0b8a7d6e",
+  "bot_id": "111111111111111111",
+  "guild_id": "222222222222222222",
+  "session_id": "0123456789abcdef0123456789abcdef",
+  "status": "resumed",
+  "ttl_ms": 180000,
+  "sequence": 12,
+  "started_at": 1791936000000,
+  "zombie_expires_at": 1791936180000,
+  "expires_at": 1791936202500,
+  "last_ack_at": 1791935990000,
+  "heartbeats_unacknowledged": 1,
+  "last_heartbeat_at": 1791936031250,
+  "last_heartbeat_sequence": 12,
+  "dispatches_withheld": {
+    "count": 2,
+    "first_sequence": 13,
+    "last_sequence": 14
+  },
+  "ended_at": 1791936082500,
+  "ended_by": "client_close",
+  "close": { "at": 1791936082500, "code": 1012, "initiated_by": "client" },
+  "resume": {
+    "at": 1791936083100,
+    "client_sequence": 12,
+    "replayed": { "count": 2, "first_sequence": 13, "last_sequence": 14 },
+    "resumed_sequence": 15
+  },
+  "session_removed_at": null
+}
+```
+
+- `status`: `zombie` → `awaiting_resume` → `resumed`, or `session_lost` if
+  the session was removed (heartbeat timeout, a rejected RESUME, re-IDENTIFY)
+  before a successful RESUME.
+- `sequence`: server high-water mark when the zombie started.
+- `last_ack_at`: when the last HEARTBEAT_ACK was written to this session
+  before the zombie started (`null` if none). Nothing is ACKed afterwards.
+- `heartbeats_unacknowledged`, `last_heartbeat_at`,
+  `last_heartbeat_sequence`: heartbeats received during the zombie and the
+  client's reported sequence (`d`), which stays at its last received
+  dispatch.
+- `dispatches_withheld`: dispatches sequenced for the session but not
+  written while it was silenced. Dispatches generated after the socket
+  closed are buffered too, but are not counted here; `resume.replayed`
+  covers both.
+- `close.at - started_at` is the detection delay as seen by the server, and
+  `close.at - last_ack_at` is the time since the client's last ACK.
+- `resume`: the successful RESUME's cursor, the replayed sequence range and
+  RESUMED's sequence.
+- `expires_at`: retirement time. Evidence is retained for 120 s after the
+  zombie ended, or 120 s after `zombie_expires_at` while still active.
+
+### Inspect, wait, recover and cancel
+
+- `GET /_test/gateway-zombie-connections/:id[?wait_ms=0..30000]`: with
+  `wait_ms`, holds until `status` is `resumed` or `session_lost`, or the
+  record retires, then returns `200`, or `404` once retired. At most 64
+  concurrent waits (`429`). Responses use `Cache-Control: no-store`.
+- `GET /_test/gateway-zombie-connections/by-key/:key?bot_id=…&guild_id=…&session_id=…[&wait_ms=…]`:
+  the same, addressed by the exact owner (each field exactly once; `400`
+  otherwise).
+- `DELETE /_test/gateway-zombie-connections/:id`: ends an active zombie
+  (drops the socket with `4000`) and retires the record; `204`/`404`.
+- `DELETE /_test/gateway-zombie-connections/by-key/:key?bot_id=…&guild_id=…&session_id=…`:
+  retires the keyed record, or tombstones an unused key in a valid scope so a
+  delayed POST returns `409` and silences nothing.
+
+Records are in memory and cleared by `/_test/reset` (all, or the matching
+setup token), `DELETE /_test/setup/:token`, deleting the scoped guild and
+Gateway shutdown. The HELLO heartbeat interval (41.25 s) is fixed, so a
+library's real detection delay applies. Allow for it in test timeouts and use
+`wait_ms` rather than sleeps. Focused real HTTP/WS coverage is in
+`src/gateway/connection-faults.test.ts`.
 
 ---
 

@@ -25,20 +25,52 @@ const MAX_VOICE_STATES = 100
 /** Maximum concurrent long-poll waiters per Gateway instance. */
 const MAX_WAITERS = 64
 
-/** Exact keyed request; every field is required except the observation TTL. */
+/**
+ * When the invalidation applies: `immediate` invalidates the live session
+ * now; `resume` arms a rejection of the session's next authenticated RESUME.
+ */
+export type InvalidationTrigger = 'immediate' | 'resume'
+
+/** Exact keyed request; every field is required except TTL and trigger. */
 export interface SessionInvalidationRequest {
   ownership_key: string
   bot_id: string
   guild_id: string
   session_id: string
   ttl_ms: number
+  /** Defaults to `immediate`. */
+  trigger?: InvalidationTrigger
 }
 
 /** Exact public owner address known before sending a keyed POST. */
 export type SessionInvalidationOwnership = Omit<
   SessionInvalidationRequest,
-  'ttl_ms'
+  'ttl_ms' | 'trigger'
 >
+
+/** First/last sequence of buffered dispatches that were never replayed. */
+interface DiscardedRange {
+  count: number
+  first_sequence: number | null
+  last_sequence: number | null
+}
+
+/** Evidence of how a `resume`-triggered invalidation was applied. */
+interface ResumeRejection {
+  /**
+   * `forced`: an authenticated RESUME was answered with op 9 `d: false`;
+   * `session_removed`: the session disappeared first (e.g. heartbeat timeout),
+   * so any later RESUME is rejected naturally.
+   */
+  reason: 'forced' | 'session_removed'
+  at: number
+  /** Sequence the client reported in RESUME (null for `session_removed`). */
+  client_sequence: number | null
+  /** Whether the replay buffer could still have served that RESUME. */
+  replay_available: boolean | null
+  /** Buffered dispatches after the client's sequence, discarded unsent. */
+  discarded: DiscardedRange | null
+}
 
 /** Compact voice-state facts copied from one written GUILD_CREATE. */
 interface VoiceStateSummary {
@@ -86,16 +118,20 @@ interface IdentifyAttempt extends IdentifyObservation {
 /** Progress of one replacement attempt. */
 type AttemptState = 'pending' | 'complete' | 'failed'
 
-/** One applied invalidation and its bounded replacement evidence. */
+/** One invalidation (applied or armed) and its bounded replacement evidence. */
 interface InvalidationRecord extends SessionInvalidationRequest {
+  trigger: InvalidationTrigger
   id: string
   /** Normalized setup token of the invalidated session (never exposed). */
   token: string
+  /** Whether the invalidation has been applied (always for `immediate`). */
+  applied: boolean
   /** Invalidated socket; IDENTIFYs on it are not replacements. */
-  socket: WebSocket
-  sequence: number
-  transport: DispatchTransport
-  invalidated_at: number
+  socket: WebSocket | undefined
+  sequence: number | null
+  transport: DispatchTransport | null
+  invalidated_at: number | null
+  resume_rejection: ResumeRejection | null
   expires_at: number
   timer: NodeJS.Timeout
   identifies: IdentifyAttempt[]
@@ -106,6 +142,7 @@ interface InvalidationRecord extends SessionInvalidationRequest {
 /** Bounded lifetime reservation; a null ID permanently prevents resurrection. */
 interface OwnershipReservation extends SessionInvalidationOwnership {
   ttl_ms?: number
+  trigger?: InvalidationTrigger
   id: string | null
 }
 
@@ -141,6 +178,15 @@ function attemptState(attempt: IdentifyAttempt): AttemptState {
     )
     ? 'complete'
     : 'pending'
+}
+
+/** Summarizes buffered sequences as a count and first/last range. */
+function discardedRange(sequences: number[]): DiscardedRange {
+  return {
+    count: sequences.length,
+    first_sequence: sequences.at(0) ?? null,
+    last_sequence: sequences.at(-1) ?? null,
+  }
 }
 
 /** Whether an observation still awaits its replacement IDENTIFY. */
@@ -218,11 +264,68 @@ export class GatewaySessionInvalidations {
       this.observeIdentify(session, facts)
     manager.observeRejectedResume = (sessionId) => {
       for (const record of this.records.values()) {
-        if (record.session_id !== sessionId) continue
+        if (record.session_id !== sessionId || !record.applied) continue
         record.resumes_rejected += 1
         this.notify(record.id)
       }
     }
+    manager.rejectResume = (session, attempt) => {
+      const record = this.armedFor(session)
+      if (!record || !this.inScope(session, record)) return undefined
+      const now = Date.now()
+      record.applied = true
+      record.invalidated_at = now
+      record.sequence = session.seq
+      record.transport = 'queued'
+      record.resumes_rejected += 1
+      record.resume_rejection = {
+        reason: 'forced',
+        at: now,
+        client_sequence: attempt.clientSequence,
+        replay_available: attempt.replay !== undefined,
+        discarded: discardedRange(
+          session.replayBuffer
+            .filter((entry) => entry.seq > attempt.clientSequence)
+            .map((entry) => entry.seq)
+        ),
+      }
+      // Discarding the session drops its replay buffer: the dispatches
+      // generated during the gap are never delivered individually.
+      this.manager.remove(session.sessionId)
+      this.notify(record.id)
+      return (status) => {
+        record.transport = status
+        this.notify(record.id)
+      }
+    }
+    manager.onRemove((session) => {
+      const record = this.armedFor(session)
+      if (!record) return
+      const now = Date.now()
+      record.applied = true
+      record.invalidated_at = now
+      record.sequence = session.seq
+      record.resume_rejection = {
+        reason: 'session_removed',
+        at: now,
+        client_sequence: null,
+        replay_available: null,
+        discarded: null,
+      }
+      this.notify(record.id)
+    })
+  }
+
+  /** Returns the armed (not yet applied) `resume` record for a session. */
+  private armedFor(session: Session): InvalidationRecord | undefined {
+    return this.records
+      .values()
+      .find(
+        (record) =>
+          !record.applied &&
+          record.session_id === session.sessionId &&
+          record.token === normalizeToken(session.token)
+      )
   }
 
   /** Whether the bot is the registered owner of the guild's setup. */
@@ -258,13 +361,16 @@ export class GatewaySessionInvalidations {
 
   /**
    * Invalidates one exact live session (INVALID_SESSION `d: false`, then close
-   * 4009) or returns the existing observation for an identical keyed retry.
+   * 4009), arms the rejection of its next RESUME, or returns the existing
+   * observation for an identical keyed retry.
    */
-  create(request: SessionInvalidationRequest): string | object {
+  create(input: SessionInvalidationRequest): string | object {
+    const request = { ...input, trigger: input.trigger ?? 'immediate' }
     const owner = this.owners.get(request.ownership_key)
     if (owner) {
       return sameOwner(owner, request) &&
         owner.ttl_ms === request.ttl_ms &&
+        owner.trigger === request.trigger &&
         owner.id
         ? (this.inspect(owner.id) ?? 'CONFLICT')
         : 'CONFLICT'
@@ -272,7 +378,14 @@ export class GatewaySessionInvalidations {
     if (this.owners.size >= MAX_OWNERS) return 'LIMIT'
     const session = this.manager.get(request.session_id)
     if (!session || !this.inScope(session, request)) return 'UNKNOWN_SCOPE'
-    if (session.ws.readyState !== WebSocket.OPEN) return 'INVALID_STATE'
+    const immediate = request.trigger === 'immediate'
+    // A silenced (zombie) connection cannot receive op 9 either.
+    if (
+      immediate &&
+      (session.ws.readyState !== WebSocket.OPEN ||
+        this.manager.isSilenced(session.ws))
+    )
+      return 'INVALID_STATE'
     if (this.records.size >= MAX_LIVE) return 'LIMIT'
     // A replacement IDENTIFY carries no link to the session it replaces, so
     // only one open observation per setup token keeps attribution exact.
@@ -292,10 +405,14 @@ export class GatewaySessionInvalidations {
       ...request,
       id,
       token,
-      socket: session.ws,
-      sequence: session.seq,
-      transport: 'queued',
-      invalidated_at: now,
+      applied: immediate,
+      // A replacement after a rejected RESUME may IDENTIFY on any socket,
+      // including the one that carried the RESUME.
+      socket: immediate ? session.ws : undefined,
+      sequence: immediate ? session.seq : null,
+      transport: immediate ? 'queued' : null,
+      invalidated_at: immediate ? now : null,
+      resume_rejection: null,
       expires_at: now + request.ttl_ms,
       timer,
       identifies: [],
@@ -309,8 +426,10 @@ export class GatewaySessionInvalidations {
       guild_id: request.guild_id,
       session_id: request.session_id,
       ttl_ms: request.ttl_ms,
+      trigger: request.trigger,
       id,
     })
+    if (!immediate) return this.inspect(id) ?? 'CONFLICT'
     // Removing the session first makes the invalidation atomic: no further
     // dispatch can reach it, and any RESUME naming it gets INVALID_SESSION.
     this.manager.remove(session.sessionId)
@@ -343,6 +462,7 @@ export class GatewaySessionInvalidations {
       .values()
       .find(
         (candidate) =>
+          candidate.applied &&
           candidate.token === token &&
           candidate.bot_id === session.botId &&
           candidate.socket !== session.ws &&
@@ -408,18 +528,25 @@ export class GatewaySessionInvalidations {
           bot_id: record.bot_id,
           guild_id: record.guild_id,
           session_id: record.session_id,
+          trigger: record.trigger,
           sequence: record.sequence,
           op: GatewayOp.InvalidSession,
           resumable: false,
-          close_code: GatewayCloseCode.SessionTimedOut,
+          close_code:
+            record.trigger === 'immediate'
+              ? GatewayCloseCode.SessionTimedOut
+              : null,
           transport: record.transport,
-          status: replacement
-            ? 'identified'
-            : record.identifies.some(
-                  (attempt) => attemptState(attempt) === 'pending'
-                )
-              ? 'identifying'
-              : 'awaiting_identify',
+          status: record.applied
+            ? replacement
+              ? 'identified'
+              : record.identifies.some(
+                    (attempt) => attemptState(attempt) === 'pending'
+                  )
+                ? 'identifying'
+                : 'awaiting_identify'
+            : 'armed',
+          resume_rejection: record.resume_rejection,
           replacement: replacement ? publicAttempt(replacement) : null,
           ttl_ms: record.ttl_ms,
           invalidated_at: record.invalidated_at,
