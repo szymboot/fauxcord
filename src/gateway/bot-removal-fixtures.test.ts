@@ -14,6 +14,7 @@ import {
   seedVoiceChannel,
   seedVoiceState,
 } from '../test-helpers'
+import { createAuthCode } from '../services/oauth2'
 import { GatewayOp } from './opcodes'
 
 /** One decoded Gateway frame as seen by the client. */
@@ -516,6 +517,15 @@ describe('guild fixtures survive the bot leaving, being kicked or banned', () =>
       `INSERT INTO oauth2_access_tokens (token, client_id, user_id, scope, expires_at)
        VALUES ('bearer-a', ?, ?, 'applications.commands.permissions.update', datetime('now', '+1 day'))`
     ).run(BOT, ALICE)
+    // An authorization code issued before the removal must not outlive the
+    // setup either.
+    const staleCode = createAuthCode(
+      db,
+      BOT,
+      ALICE,
+      'applications.commands.permissions.update',
+      'https://example.com/oauth'
+    )
     await http(`/users/@me/guilds/${GUILD}`, 'DELETE')
     // Detached under its own setup, the removed bot still reads the fixture.
     expect(await statusOf(`/guilds/${GUILD}/members`)).toBe(200)
@@ -577,6 +587,20 @@ describe('guild fixtures survive the bot leaving, being kicked or banned', () =>
       }
     )
     expect(revoked.status).toBe(401)
+    expect(
+      db
+        .prepare('SELECT 1 FROM oauth2_auth_codes WHERE code = ?')
+        .get(staleCode)
+    ).toBeUndefined()
+    const exchange = await fetch(
+      (server?.url ?? '').replace('ws://', 'http://') + '/oauth2/token',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `grant_type=authorization_code&code=${staleCode}&redirect_uri=${encodeURIComponent('https://example.com/oauth')}`,
+      }
+    )
+    expect(exchange.status).toBeGreaterThanOrEqual(400)
   })
 
   it('rejoins through setup: re-lists the guild, clears the ban and sends GUILD_CREATE', async () => {

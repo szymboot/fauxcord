@@ -216,7 +216,7 @@ current seed file format registers only bots.
 
 ## `DELETE /_test/setup/:token` — Completely delete an environment
 
-Deletes the Bot, its OAuth2 access tokens and all of its related data (Guilds, Channels, Messages, Webhooks),
+Deletes the Bot, its OAuth2 access tokens and authorization codes and all of its related data (Guilds, Channels, Messages, Webhooks),
 including guilds the bot already left or was removed from (those survive the removal
 until their setup is deleted or the guild is deleted explicitly). This is silent: unlike deleting a guild through REST, no
 `GUILD_DELETE` or other Gateway event is dispatched.
