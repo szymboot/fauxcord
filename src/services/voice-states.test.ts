@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { initializeDatabase, closeDatabase, type Database } from '../db'
 import {
@@ -43,6 +44,7 @@ describe('Shared voice-state foundation', () => {
       state,
       changed: false,
       emit: false,
+      displaced: [],
     })
     expect(
       setTestGuildVoiceState(db, guild, user, { self_stream: true })
@@ -51,6 +53,7 @@ describe('Shared voice-state foundation', () => {
       state: { ...state, self_stream: true },
       changed: true,
       emit: true,
+      displaced: [],
     })
   })
 
@@ -104,6 +107,147 @@ describe('Shared voice-state foundation', () => {
     expect(getGuildVoiceState(db, guild, user)?.self_stream).toBe(false)
     db.prepare('DELETE FROM guilds WHERE id = ?').run(guild)
     expect(getGuildVoiceState(db, guild, user)).toBeNull()
+  })
+
+  describe('single voice connection per human user', () => {
+    let otherGuild: string
+    let otherChannel: string
+
+    beforeEach(() => {
+      otherGuild = seedGuild(db, 'Bot testtoken', '222222222222222223')
+      otherChannel = seedVoiceChannel(db, otherGuild, '555555555555555558')
+      seedMember(db, otherGuild, user)
+    })
+
+    it('disconnects the other guild first, keeping its session and clearing live-only fields', () => {
+      setTestGuildVoiceState(db, guild, user, {
+        channel_id: channel,
+        self_stream: true,
+        self_video: true,
+        self_mute: true,
+        request_to_speak_timestamp: '2026-01-01T00:00:00.000Z',
+      })
+      const before = getGuildVoiceState(db, guild, user)
+      const result = setTestGuildVoiceState(db, otherGuild, user, {
+        channel_id: otherChannel,
+        self_stream: true,
+      })
+      assert.ok(typeof result !== 'string')
+      const disconnected = {
+        ...before,
+        channel_id: null,
+        self_stream: false,
+        self_video: false,
+        request_to_speak_timestamp: null,
+      }
+      expect(result.displaced).toEqual([
+        {
+          previous: before,
+          state: disconnected,
+          changed: true,
+          emit: true,
+          displaced: [],
+        },
+      ])
+      expect(result.state).toMatchObject({
+        guild_id: otherGuild,
+        channel_id: otherChannel,
+        self_stream: true,
+      })
+      expect(getGuildVoiceState(db, guild, user)).toEqual(disconnected)
+      expect(getGuildVoiceStates(db, guild)).toEqual([])
+      expect(getGuildVoiceStates(db, otherGuild)).toEqual([result.state])
+    })
+
+    it('applies the rule silently for emit: false and reports a silent displacement', () => {
+      setTestGuildVoiceState(db, guild, user, {
+        channel_id: channel,
+        emit: false,
+      })
+      const result = setTestGuildVoiceState(db, otherGuild, user, {
+        channel_id: otherChannel,
+        emit: false,
+      })
+      assert.ok(typeof result !== 'string')
+      expect(result.emit).toBe(false)
+      expect(result.displaced.map((entry) => entry.emit)).toEqual([false])
+      expect(getGuildVoiceState(db, guild, user)?.channel_id).toBeNull()
+    })
+
+    it('keeps same-guild moves, disconnects and other users untouched', () => {
+      const moved = seedVoiceChannel(db, guild, '555555555555555559')
+      const other = seedMember(db, otherGuild)
+      setTestGuildVoiceState(db, otherGuild, other, {
+        channel_id: otherChannel,
+      })
+      setTestGuildVoiceState(db, guild, user, { channel_id: channel })
+      const result = setTestGuildVoiceState(db, guild, user, {
+        channel_id: moved,
+      })
+      assert.ok(typeof result !== 'string')
+      expect(result.displaced).toEqual([])
+      const left = setTestGuildVoiceState(db, guild, user, {
+        channel_id: null,
+      })
+      assert.ok(typeof left !== 'string')
+      expect(left.displaced).toEqual([])
+      expect(getGuildVoiceState(db, otherGuild, other)?.channel_id).toBe(
+        otherChannel
+      )
+    })
+
+    it('does not displace a retained disconnected state or a failed write', () => {
+      setTestGuildVoiceState(db, guild, user, { channel_id: channel })
+      setTestGuildVoiceState(db, guild, user, { channel_id: null })
+      const result = setTestGuildVoiceState(db, otherGuild, user, {
+        channel_id: otherChannel,
+      })
+      assert.ok(typeof result !== 'string')
+      expect(result.displaced).toEqual([])
+      setTestGuildVoiceState(db, guild, user, { channel_id: channel })
+      expect(
+        setTestGuildVoiceState(db, otherGuild, user, {
+          channel_id: seedChannel(db, otherGuild),
+        })
+      ).toBe('INVALID_INPUT')
+      expect(getGuildVoiceState(db, guild, user)?.channel_id).toBe(channel)
+    })
+
+    it('heals legacy rows connected in several guilds on the next connected write', () => {
+      const third = seedGuild(db, 'Bot testtoken', '222222222222222224')
+      const thirdChannel = seedVoiceChannel(db, third, '555555555555555560')
+      seedMember(db, third, user)
+      const insert = db.prepare(`INSERT INTO guild_voice_states
+        (guild_id, user_id, channel_id, session_id) VALUES (?, ?, ?, 'legacy')`)
+      insert.run(third, user, thirdChannel)
+      insert.run(guild, user, channel)
+      const result = setTestGuildVoiceState(db, otherGuild, user, {
+        channel_id: otherChannel,
+      })
+      assert.ok(typeof result !== 'string')
+      expect(result.displaced.map((entry) => entry.state.guild_id)).toEqual([
+        guild,
+        third,
+      ])
+      expect(getGuildVoiceStates(db, guild)).toEqual([])
+      expect(getGuildVoiceStates(db, third)).toEqual([])
+    })
+
+    it('lets bot users stay connected in one channel per guild', () => {
+      const botId = '111111111111111111'
+      seedMember(db, guild, botId)
+      seedMember(db, otherGuild, botId)
+      setTestGuildVoiceState(db, guild, botId, { channel_id: channel })
+      const result = setTestGuildVoiceState(db, otherGuild, botId, {
+        channel_id: otherChannel,
+      })
+      assert.ok(typeof result !== 'string')
+      expect(result.displaced).toEqual([])
+      expect(getGuildVoiceState(db, guild, botId)?.channel_id).toBe(channel)
+      expect(getGuildVoiceState(db, otherGuild, botId)?.channel_id).toBe(
+        otherChannel
+      )
+    })
   })
 })
 

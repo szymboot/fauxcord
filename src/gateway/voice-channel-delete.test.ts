@@ -40,6 +40,9 @@ const LOW_ID = '99999999999999999'
 const HIGH_ID = '100000000000000000'
 const OTHER_ID = '300000000000000000'
 const IDLE_ID = '400000000000000000'
+// A human holds one voice connection at a time, so the other guild needs its
+// own connected member.
+const FOREIGN_ID = '500000000000000000'
 const ROOT = '/_test/gateway-event-controls'
 const ALL_INTENTS =
   GatewayIntentBits.Guilds | GatewayIntentBits.GuildVoiceStates
@@ -204,9 +207,9 @@ describe('voice disconnects when a voice or stage channel is deleted', () => {
       otherGuild,
       '555555555555555553'
     )
-    seedMember(server.db, otherGuild, LOW_ID)
+    seedMember(server.db, otherGuild, FOREIGN_ID)
     const foreign = await prepare(
-      LOW_ID,
+      FOREIGN_ID,
       { channel_id: foreignVoice, self_stream: true },
       otherGuild
     )
@@ -264,7 +267,9 @@ describe('voice disconnects when a voice or stage channel is deleted', () => {
     expect(getGuildVoiceState(server.db, guild, OTHER_ID)).toEqual(other)
     expect(getGuildVoiceState(server.db, guild, IDLE_ID)).toEqual(idleBefore)
     expect(idleBefore?.session_id).toBe(idle.session_id)
-    expect(getGuildVoiceState(server.db, otherGuild, LOW_ID)).toEqual(foreign)
+    expect(getGuildVoiceState(server.db, otherGuild, FOREIGN_ID)).toEqual(
+      foreign
+    )
 
     // A fresh IDENTIFY only reports the member still connected elsewhere.
     const fresh = await connect()

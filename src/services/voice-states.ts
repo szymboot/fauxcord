@@ -92,10 +92,94 @@ export interface VoiceStateFixtureMutation {
   changed: boolean
   /** Defaults to true; false requests silent historical preparation. */
   emit: boolean
+  /**
+   * Connected states of the same human user in other guilds that this write
+   * disconnected first, ordered by guild ID. Publish these before the state.
+   */
+  displaced: VoiceStateFixtureMutation[]
 }
 
-/** Applies a validated patch after checking every referenced entity. */
-function applyTestGuildVoiceState(
+/** Persists one native voice state, inserting or replacing the guild row. */
+function writeGuildVoiceState(db: Database, state: GuildVoiceState): void {
+  db.prepare(
+    `INSERT INTO guild_voice_states
+    (guild_id, user_id, channel_id, session_id, deaf, mute, self_deaf,
+     self_mute, self_stream, self_video, suppress, request_to_speak_timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(guild_id, user_id) DO UPDATE SET
+    channel_id = excluded.channel_id, session_id = excluded.session_id,
+    deaf = excluded.deaf, mute = excluded.mute, self_deaf = excluded.self_deaf,
+    self_mute = excluded.self_mute, self_stream = excluded.self_stream,
+    self_video = excluded.self_video, suppress = excluded.suppress,
+    request_to_speak_timestamp = excluded.request_to_speak_timestamp`
+  ).run(
+    state.guild_id,
+    state.user_id,
+    state.channel_id,
+    state.session_id,
+    Number(state.deaf),
+    Number(state.mute),
+    Number(state.self_deaf),
+    Number(state.self_mute),
+    Number(state.self_stream),
+    Number(state.self_video),
+    Number(state.suppress),
+    state.request_to_speak_timestamp
+  )
+}
+
+/**
+ * Enforces Discord's single voice connection for human accounts: before a
+ * human connects in one guild, every connected state they hold in another
+ * guild is disconnected with fixture-disconnect semantics (row retained,
+ * session kept, streaming, video and request-to-speak cleared). Bot users may
+ * hold one connection per guild and are exempt. Must run inside the caller's
+ * transaction so the displacement and the join commit together.
+ */
+function disconnectOtherGuilds(
+  db: Database,
+  guildId: string,
+  userId: string,
+  emit: boolean
+): VoiceStateFixtureMutation[] {
+  const user = db.prepare('SELECT bot FROM users WHERE id = ?').get(userId) as
+    { bot: number } | undefined
+  if (!user || user.bot === 1) return []
+  const rows = db
+    .prepare(
+      `SELECT * FROM guild_voice_states
+      WHERE user_id = ? AND guild_id != ? AND channel_id IS NOT NULL
+      ORDER BY guild_id`
+    )
+    .all(userId, guildId) as VoiceStateRow[]
+  return rows.map((row) => {
+    const previous = toGuildVoiceState(row)
+    const state: GuildVoiceState = {
+      ...previous,
+      channel_id: null,
+      self_stream: false,
+      self_video: false,
+      request_to_speak_timestamp: null,
+    }
+    writeGuildVoiceState(db, state)
+    return { state, previous, changed: true, emit, displaced: [] }
+  })
+}
+
+/**
+ * Applies a validated patch after checking every referenced entity.
+ * Server `mute`/`deaf` are owned by the guild member: omitted values default to
+ * the member's persisted flags (server mute survives reconnects, as on
+ * Discord), and the committed values are written back to `guild_members` so
+ * REST member reads and embedded VOICE_STATE_UPDATE members never diverge.
+ * Shared by the fixture, stage and Modify Guild Member voice moderation paths.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - Member user ID
+ * @param payload - Already validated patch
+ * @returns Committed mutation, or an error before any write
+ */
+export function applyGuildVoiceStatePatch(
   db: Database,
   guildId: string,
   userId: string,
@@ -106,14 +190,12 @@ function applyTestGuildVoiceState(
       return 'UNKNOWN_GUILD'
     if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(userId))
       return 'UNKNOWN_USER'
-    if (
-      !db
-        .prepare(
-          'SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ?'
-        )
-        .get(guildId, userId)
-    )
-      return 'UNKNOWN_MEMBER'
+    const member = db
+      .prepare(
+        'SELECT mute, deaf FROM guild_members WHERE guild_id = ? AND user_id = ?'
+      )
+      .get(guildId, userId) as { mute: number; deaf: number } | undefined
+    if (!member) return 'UNKNOWN_MEMBER'
     const existing = getGuildVoiceState(db, guildId, userId)
     if (!existing && payload.channel_id === undefined) return 'INVALID_INPUT'
     const channelId =
@@ -141,8 +223,8 @@ function applyTestGuildVoiceState(
         existing && (channelId === null || existing.channel_id !== null)
           ? existing.session_id
           : randomUUID(),
-      deaf: payload.deaf ?? existing?.deaf ?? false,
-      mute: payload.mute ?? existing?.mute ?? false,
+      deaf: payload.deaf ?? member.deaf === 1,
+      mute: payload.mute ?? member.mute === 1,
       self_deaf: payload.self_deaf ?? existing?.self_deaf ?? false,
       self_mute: payload.self_mute ?? existing?.self_mute ?? false,
       self_stream:
@@ -161,36 +243,19 @@ function applyTestGuildVoiceState(
             ? (existing?.request_to_speak_timestamp ?? null)
             : payload.request_to_speak_timestamp,
     }
+    const emit = payload.emit ?? true
+    const displaced =
+      channelId === null ? [] : disconnectOtherGuilds(db, guildId, userId, emit)
+    writeGuildVoiceState(db, state)
     db.prepare(
-      `INSERT INTO guild_voice_states
-      (guild_id, user_id, channel_id, session_id, deaf, mute, self_deaf,
-       self_mute, self_stream, self_video, suppress, request_to_speak_timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(guild_id, user_id) DO UPDATE SET
-      channel_id = excluded.channel_id, session_id = excluded.session_id,
-      deaf = excluded.deaf, mute = excluded.mute, self_deaf = excluded.self_deaf,
-      self_mute = excluded.self_mute, self_stream = excluded.self_stream,
-      self_video = excluded.self_video, suppress = excluded.suppress,
-      request_to_speak_timestamp = excluded.request_to_speak_timestamp`
-    ).run(
-      state.guild_id,
-      state.user_id,
-      state.channel_id,
-      state.session_id,
-      Number(state.deaf),
-      Number(state.mute),
-      Number(state.self_deaf),
-      Number(state.self_mute),
-      Number(state.self_stream),
-      Number(state.self_video),
-      Number(state.suppress),
-      state.request_to_speak_timestamp
-    )
+      'UPDATE guild_members SET mute = ?, deaf = ? WHERE guild_id = ? AND user_id = ?'
+    ).run(Number(state.mute), Number(state.deaf), guildId, userId)
     return {
       state,
       previous: existing,
       changed: JSON.stringify(existing) !== JSON.stringify(state),
-      emit: payload.emit ?? true,
+      emit,
+      displaced,
     }
   })
 }
@@ -251,7 +316,7 @@ export function disconnectGuildVoiceChannelMembers(
     )
     const mutations: VoiceStateFixtureMutation[] = []
     for (const row of ordered) {
-      const result = applyTestGuildVoiceState(db, row.guild_id, row.user_id, {
+      const result = applyGuildVoiceStatePatch(db, row.guild_id, row.user_id, {
         channel_id: null,
       })
       if (typeof result !== 'string') mutations.push(result)
@@ -265,8 +330,10 @@ export function disconnectGuildVoiceChannelMembers(
  * First creation requires channel_id (null is permitted). Moves and flag
  * updates retain the session; reconnecting after null creates a new session.
  * Disconnect clears streaming, video and request-to-speak. Other omitted
- * flags remain unchanged. emit is reserved for the dispatch integration;
- * this foundation emits no Gateway event, including with active sessions.
+ * flags remain unchanged. Connecting a human user first disconnects any
+ * connected state they hold in another guild (reported in displaced); bots
+ * are exempt. emit is reserved for the dispatch integration; this
+ * foundation emits no Gateway event, including with active sessions.
  */
 export function setTestGuildVoiceState(
   db: Database,
@@ -276,6 +343,6 @@ export function setTestGuildVoiceState(
 ): VoiceStateFixtureMutation | VoiceStateFixtureError {
   const payload = validateTestVoiceState(input)
   return payload
-    ? applyTestGuildVoiceState(db, guildId, userId, payload)
+    ? applyGuildVoiceStatePatch(db, guildId, userId, payload)
     : 'INVALID_INPUT'
 }

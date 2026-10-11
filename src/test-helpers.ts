@@ -34,6 +34,7 @@ import { createApplicationRoutes } from './routes/applications'
 import { createInteractionRoutes } from './routes/interactions'
 import { createLobbyRoutes } from './routes/lobbies'
 import { createStageInstanceRoutes } from './routes/stage-instances'
+import { setTestGuildVoiceState } from './services/voice-states'
 import {
   createCatalogPublicRoutes,
   createCatalogRoutes,
@@ -881,6 +882,30 @@ export function seedVoiceChannel(
     'INSERT INTO channels (id, guild_id, type, name) VALUES (?, ?, 2, ?)'
   ).run(channelId, guildId, 'voice-channel')
   return channelId
+}
+
+/**
+ * Silently connects an existing guild member to a voice/stage channel through
+ * the voice-state fixture service (no Gateway event).
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - Member user ID
+ * @param channelId - Voice or stage channel ID in the same guild
+ * @returns The connected voice session ID
+ */
+export function seedVoiceState(
+  db: Database,
+  guildId: string,
+  userId: string,
+  channelId: string
+): string {
+  const result = setTestGuildVoiceState(db, guildId, userId, {
+    channel_id: channelId,
+    emit: false,
+  })
+  if (typeof result === 'string')
+    throw new Error(`seedVoiceState failed: ${result}`)
+  return result.state.session_id
 }
 
 /**

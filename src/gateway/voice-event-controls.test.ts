@@ -481,14 +481,15 @@ describe('native voice capture controls over HTTP and WebSockets', () => {
       otherGuild,
       '777777777777777777'
     )
-    seedMember(server.db, otherGuild, HUMAN_ID)
+    // One human per guild: a human holds a single voice connection.
+    const otherHuman = seedMember(server.db, otherGuild)
     const siblingGuild = seedGuild(server.db, TOKEN, '999999999999999999')
     const siblingChannel = seedVoiceChannel(
       server.db,
       siblingGuild,
       '777777777777777778'
     )
-    seedMember(server.db, siblingGuild, HUMAN_ID)
+    const siblingHuman = seedMember(server.db, siblingGuild)
     const id = await arm()
     const filtered = await arm({ session_id: noIntent.sessionId })
     const otherControl = await arm({
@@ -499,12 +500,12 @@ describe('native voice capture controls over HTTP and WebSockets', () => {
     const owned = await transition({ channel_id: channel, self_stream: true })
     const sibling = await transition(
       { channel_id: siblingChannel },
-      HUMAN_ID,
+      siblingHuman,
       siblingGuild
     )
     const unrelated = await transition(
       { channel_id: otherChannel },
-      HUMAN_ID,
+      otherHuman,
       otherGuild
     )
     for (const target of clients) await fence(target)
@@ -542,6 +543,81 @@ describe('native voice capture controls over HTTP and WebSockets', () => {
     expect(voices(otherBot)).toHaveLength(0)
     expect(voices(alias)).toHaveLength(0)
     expect(voices().map((frame) => frame.d)).toMatchObject([sibling, owned])
+  })
+
+  it('captures the cross-guild disconnect before the join with ordered sequence numbers', async () => {
+    seedBot(server.db, 'Bot other', '444444444444444444')
+    const otherBot = await connect('Bot other')
+    const otherGuild = seedGuild(server.db, 'Bot other', '666666666666666666')
+    const otherChannel = seedVoiceChannel(
+      server.db,
+      otherGuild,
+      '777777777777777777'
+    )
+    seedMember(server.db, otherGuild, HUMAN_ID)
+    const siblingGuild = seedGuild(server.db, TOKEN, '999999999999999999')
+    const siblingChannel = seedVoiceChannel(
+      server.db,
+      siblingGuild,
+      '777777777777777778'
+    )
+    seedMember(server.db, siblingGuild, HUMAN_ID)
+    const streaming = await transition({
+      channel_id: channel,
+      self_stream: true,
+      emit: false,
+    })
+    const leaveControl = await arm({ hold: false })
+    const siblingControl = await arm({ hold: false, guild_id: siblingGuild })
+    const joined = await transition(
+      { channel_id: siblingChannel },
+      HUMAN_ID,
+      siblingGuild
+    )
+    await fence()
+    const left = {
+      ...streaming,
+      channel_id: null,
+      self_stream: false,
+    }
+    const [leaveFrame, joinFrame] = voices()
+    expect(voices()).toHaveLength(2)
+    expect(leaveFrame.d).toMatchObject(left)
+    expect(joinFrame.d).toMatchObject(joined)
+    expect(joinFrame.s).toBe(Number(leaveFrame.s) + 1)
+    const leaveObservation = await observe(leaveControl)
+    expect(
+      leaveObservation.events_captured.map((event) => event.envelope)
+    ).toMatchObject([{ s: leaveFrame.s, d: left }])
+    const siblingObservation = await observe(siblingControl)
+    expect(
+      siblingObservation.events_captured.map((event) => event.envelope)
+    ).toMatchObject([{ s: joinFrame.s, d: joined }])
+
+    const otherControl = await arm({
+      hold: true,
+      guild_id: otherGuild,
+      bot_id: '444444444444444444',
+      session_id: otherBot.sessionId,
+    })
+    const moved = await transition(
+      { channel_id: otherChannel, self_stream: true },
+      HUMAN_ID,
+      otherGuild
+    )
+    for (const target of clients) await fence(target)
+    expect(voices().slice(2)).toMatchObject([
+      {
+        s: Number(joinFrame.s) + 1,
+        d: { ...joined, channel_id: null, guild_id: siblingGuild },
+      },
+    ])
+    expect(voices(otherBot)).toHaveLength(0)
+    const otherObservation = await observe(otherControl)
+    expect(otherObservation.events_captured).toMatchObject([
+      { state: 'held', envelope: { d: moved } },
+    ])
+    expect(await current()).toMatchObject({ channel_id: null })
   })
 
   it('clears only the reset setup and clears all voice controls on global reset', async () => {
@@ -813,5 +889,52 @@ describe('native voice capture controls over HTTP and WebSockets', () => {
         .map((frame) => frame.t)
     ).toEqual(['MESSAGE_REACTION_ADD', 'MESSAGE_DELETE'])
     expect(voices()).toHaveLength(0)
+  })
+  it('captures, holds and releases VOICE_STATE_UPDATE produced by Modify Guild Member', async () => {
+    const joined = await transition({ channel_id: channel })
+    await fence()
+    expect(voices()).toHaveLength(1)
+    const id = await arm()
+    const muted = await request(
+      `/api/v10/guilds/${guild}/members/${HUMAN_ID}`,
+      'PATCH',
+      { mute: true }
+    )
+    expect(muted.status).toBe(200)
+    const disconnected = await request(
+      `/guilds/${guild}/members/${HUMAN_ID}`,
+      'PATCH',
+      { channel_id: null }
+    )
+    expect(disconnected.status).toBe(200)
+    await fence()
+    expect(voices()).toHaveLength(1)
+    const observation = await observe(id)
+    expect(observation.events_captured.map((event) => event.state)).toEqual([
+      'held',
+      'held',
+    ])
+    const [mute, disconnect] = observation.events_captured
+    expect(mute.envelope.d).toMatchObject({
+      channel_id: channel,
+      session_id: joined.session_id,
+      mute: true,
+      member: { mute: true, user: { id: HUMAN_ID } },
+    })
+    expect(disconnect.envelope.d).toMatchObject({
+      channel_id: null,
+      session_id: joined.session_id,
+    })
+    expect(
+      await status(`${ROOT}/${id}/release`, 'POST', {
+        event_ids: [disconnect.id, mute.id],
+      })
+    ).toBe(200)
+    await fence()
+    expect(
+      voices()
+        .slice(1)
+        .map((frame) => frame.d)
+    ).toEqual([disconnect.envelope.d, mute.envelope.d])
   })
 })
