@@ -45,9 +45,14 @@ describes `voice_states` as an unconditional
 lists only `VOICE_STATE_UPDATE` and `VOICE_CHANNEL_EFFECT_SEND` under
 [`GUILD_VOICE_STATES`](https://docs.discord.com/developers/events/gateway#list-of-intents),
 and documents only `GUILD_PRESENCES` as changing `GUILD_CREATE` content
-(`members` and `presences`). Fauxcord follows the documented contract; if real
-Discord is observed to empty `voice_states` without the intent, that would be a
-separate change.
+(`members` and `presences`). When intents were introduced, a Discord staff
+member listed the `GUILD_CREATE` fields they filter
+([discord-api-docs#1307](https://github.com/discord/discord-api-docs/pull/1307#issuecomment-581561519))
+and named only `members` and `presences`. Major libraries (discord.js,
+discord.py, JDA) read `voice_states` from `GUILD_CREATE` without checking the
+intent. No captured payload without the intent is publicly available, so
+Fauxcord follows the documented contract; if real Discord is observed to empty
+`voice_states` without the intent, that would be a separate change.
 
 A voice or stage channel keeps its type for its whole lifetime (see
 [`POST /_test/setup`](test-api.md#post-_testsetup--create-an-environment)), so a

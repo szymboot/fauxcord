@@ -22,6 +22,9 @@ import {
 } from '../services/channels'
 import { listVoiceRegions } from '../services/catalog'
 import {
+  bitrateTooHigh,
+  isStageBitrateTooHigh,
+  normalizeVoiceChannelSettings,
   pickVoiceChannelSettings,
   validateVoiceChannelSettings,
 } from '../validators/channel'
@@ -179,9 +182,16 @@ export function createGuildRoutes(
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
     }
+    if (voice && isStageBitrateTooHigh(payload.bitrate, payload.type ?? 0)) {
+      return c.json(bitrateTooHigh().body, 400)
+    }
 
     const newChannel = createGuildChannel(db, {
-      ...(voice && pickVoiceChannelSettings(payload)),
+      ...(voice &&
+        normalizeVoiceChannelSettings(
+          pickVoiceChannelSettings(payload),
+          payload.type ?? 0
+        )),
       guildId,
       name: payload.name,
       type: payload.type,

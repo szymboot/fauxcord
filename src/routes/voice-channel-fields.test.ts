@@ -107,14 +107,17 @@ describe('Voice channel and guild AFK fields', () => {
 
   describe('defaults', () => {
     it('returns Discord defaults on voice and stage channels only', async () => {
-      for (const id of [voiceId, stageId]) {
+      for (const [id, userLimit] of [
+        [voiceId, 0],
+        [stageId, 10_000],
+      ] as const) {
         const body = (await readJson(api(`/channels/${id}`))) as Record<
           string,
           unknown
         >
         expect(body).toMatchObject({
           bitrate: 64_000,
-          user_limit: 0,
+          user_limit: userLimit,
           rtc_region: null,
         })
         expect(body).not.toHaveProperty('video_quality_mode')
@@ -184,62 +187,103 @@ describe('Voice channel and guild AFK fields', () => {
         2,
         { bitrate: 7999 },
         'bitrate',
-        'Must be an integer between 8000 and 96000.',
+        'NUMBER_TYPE_MIN',
+        'int value should be greater than or equal to 8000.',
       ],
       [
         2,
         { bitrate: 96_001 },
         'bitrate',
-        'Must be an integer between 8000 and 96000.',
+        'NUMBER_TYPE_MAX',
+        'int value should be less than or equal to 96000.',
       ],
       [
         13,
-        { bitrate: 64_001 },
+        { bitrate: 7999 },
         'bitrate',
-        'Must be an integer between 8000 and 64000.',
+        'NUMBER_TYPE_MIN',
+        'int value should be greater than or equal to 8000.',
       ],
       [
         2,
         { user_limit: 100 },
         'user_limit',
-        'Must be an integer between 0 and 99.',
+        'NUMBER_TYPE_MAX',
+        'int value should be less than or equal to 99.',
       ],
       [
         13,
-        { user_limit: 10_001 },
+        { user_limit: -1 },
         'user_limit',
-        'Must be an integer between 0 and 10000.',
+        'NUMBER_TYPE_MIN',
+        'int value should be greater than or equal to 0.',
       ],
       [
         2,
         { user_limit: 1.5 },
         'user_limit',
-        'Must be an integer between 0 and 99.',
+        'NUMBER_TYPE_COERCE',
+        'Value "1.5" is not int.',
       ],
-      [2, { rtc_region: 'mars' }, 'rtc_region', undefined],
+      [2, { rtc_region: 'mars' }, 'rtc_region', 'BASE_TYPE_CHOICES', undefined],
       [
         2,
         { video_quality_mode: 3 },
         'video_quality_mode',
+        'BASE_TYPE_CHOICES',
         'Value must be one of (1, 2).',
       ],
-    ])('rejects type %s with %o', async (type, settings, field, message) => {
+    ])(
+      'rejects type %s with %o',
+      async (type, settings, field, errorCode, message) => {
+        const before = snapshot()
+        const response = await api(`/guilds/${guildId}/channels`, 'POST', {
+          name: 'bad',
+          type,
+          ...settings,
+        })
+        expect(response.status).toBe(400)
+        const body = (await response.json()) as {
+          code: number
+          errors: Record<
+            string,
+            { _errors: { code: string; message: string }[] }
+          >
+        }
+        expect(body.code).toBe(50_035)
+        expect(body.errors[field]._errors[0]).toEqual({
+          code: errorCode,
+          message: message ?? expect.stringContaining('us-west'),
+        })
+        expect(snapshot()).toEqual(before)
+      }
+    )
+
+    it('rejects a stage bitrate above 64000 with error 30052', async () => {
       const before = snapshot()
       const response = await api(`/guilds/${guildId}/channels`, 'POST', {
-        name: 'bad',
-        type,
-        ...settings,
+        name: 'loud-stage',
+        type: 13,
+        bitrate: 64_001,
       })
       expect(response.status).toBe(400)
-      const body = (await response.json()) as {
-        code: number
-        errors: Record<string, { _errors: { message: string }[] }>
-      }
-      expect(body.code).toBe(50_035)
-      expect(body.errors[field]._errors[0].message).toEqual(
-        message ?? expect.stringContaining('us-west')
-      )
+      await expect(response.json()).resolves.toEqual({
+        code: 30_052,
+        message: 'Bitrate is too high for channel of this type',
+      })
       expect(snapshot()).toEqual(before)
+    })
+
+    it('truncates a stage user_limit above 10000 like Discord', async () => {
+      const response = await api(`/guilds/${guildId}/channels`, 'POST', {
+        name: 'huge-stage',
+        type: 13,
+        user_limit: 12_345,
+      })
+      expect(response.status).toBe(201)
+      await expect(response.json()).resolves.toMatchObject({
+        user_limit: 10_000,
+      })
     })
 
     it('accepts stage limits above the voice limits', async () => {
@@ -331,9 +375,9 @@ describe('Voice channel and guild AFK fields', () => {
     it('rejects out-of-range settings without changes or events', async () => {
       const before = snapshot()
       const emit = vi.spyOn(gatewayBus, 'emit')
-      const response = await api(`/channels/${stageId}`, 'PATCH', {
-        user_limit: 10_001,
-        bitrate: 96_000,
+      const response = await api(`/channels/${voiceId}`, 'PATCH', {
+        user_limit: 100,
+        bitrate: 7999,
       })
       expect(response.status).toBe(400)
       await expect(response.json()).resolves.toMatchObject({
@@ -342,6 +386,28 @@ describe('Voice channel and guild AFK fields', () => {
       })
       expect(snapshot()).toEqual(before)
       expect(emit).not.toHaveBeenCalled()
+    })
+
+    it('rejects a stage bitrate above 64000 with 30052 without changes', async () => {
+      const before = snapshot()
+      const emit = vi.spyOn(gatewayBus, 'emit')
+      const response = await api(`/channels/${stageId}`, 'PATCH', {
+        bitrate: 96_000,
+      })
+      expect(response.status).toBe(400)
+      await expect(response.json()).resolves.toMatchObject({ code: 30_052 })
+      expect(snapshot()).toEqual(before)
+      expect(emit).not.toHaveBeenCalled()
+    })
+
+    it('truncates a patched stage user_limit to 10000', async () => {
+      const response = await api(`/channels/${stageId}`, 'PATCH', {
+        user_limit: 12_345,
+      })
+      expect(response.status).toBe(200)
+      await expect(response.json()).resolves.toMatchObject({
+        user_limit: 10_000,
+      })
     })
 
     it('ignores voice settings on a text channel', async () => {
@@ -602,13 +668,6 @@ describe('Voice channel and guild AFK fields', () => {
           { channels: [{ id: voiceId, name: 'voice', type: 13 }] },
           'bitrate',
         ],
-        [
-          'a boosted bitrate after lowering premium_tier',
-          { bitrate: 384_000 },
-          voiceId,
-          { premium_tier: 0 },
-          'bitrate',
-        ],
       ])(
         'rejects %s atomically',
         async (_label, patch, channelId, guild, field) => {
@@ -630,6 +689,21 @@ describe('Voice channel and guild AFK fields', () => {
           expect(emit).not.toHaveBeenCalled()
         }
       )
+
+      it('keeps a boosted bitrate when premium_tier is lowered, like Discord', async () => {
+        context.db
+          .prepare('UPDATE guilds SET premium_tier = 3 WHERE id = ?')
+          .run(guildId)
+        await api(`/channels/${voiceId}`, 'PATCH', { bitrate: 384_000 })
+        const response = await rerun({ premium_tier: 0 })
+        expect(response.status).toBe(201)
+        const channel = await context.app.request(`/channels/${voiceId}`, {
+          headers: { Authorization: 'Bot second' },
+        })
+        await expect(channel.json()).resolves.toMatchObject({
+          bitrate: 384_000,
+        })
+      })
 
       it('accepts the switch when the same request replaces the value', async () => {
         await api(`/channels/${stageId}`, 'PATCH', { user_limit: 500 })

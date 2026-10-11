@@ -81,53 +81,70 @@ channel and any change into one with `50035` (`BASE_TYPE_CHOICES`); other
 
 Voice (`2`) and stage (`13`) channels always carry `bitrate`, `user_limit` and
 `rtc_region` in REST responses, `CHANNEL_CREATE`/`CHANNEL_UPDATE` and the
-`GUILD_CREATE` channel list, with Discord's defaults `64000`, `0` and `null`.
+`GUILD_CREATE` channel list. The defaults are `64000`, `null` for `rtc_region`
+(automatic), and `user_limit` `0` (unlimited) for voice or `10000` for stage
+channels, the value real stage channels report.
 `video_quality_mode` appears only once set, as on Discord ("1 when not
 present"). Other channel types never carry these fields. Guilds always carry
 `afk_channel_id` (default `null`) and `afk_timeout` (default `300`).
 
-Setup validates these fields with Discord's ranges from
+Validation follows Discord's documented ranges from
 [Modify Channel](https://docs.discord.com/developers/resources/channel#modify-channel)
-and [Modify Guild](https://docs.discord.com/developers/resources/guild#modify-guild):
-`bitrate` is at least `8000` and at most `96000`, `128000`, `256000` or
-`384000` for voice channels at boost tier 0-3 (the stored `premium_tier`;
-the `VIP_REGIONS` feature is not modeled) and `64000` for stage channels;
-`user_limit` is at most `99` for voice and `10000` for stage channels;
-`video_quality_mode` is `1` or `2`; `afk_timeout` is one of `60`, `300`, `900`,
-`1800`, `3600`; `afk_channel_id` must be a voice channel (type `2`) of the same
-guild, which may be defined in the same setup request. Voice settings on other
-channel types and invalid values return `400` with a `message` and
-Discord-style field `errors`, with no partial fixture state or Gateway events.
-When setup reuses an ID, omitted fields keep their stored values and `null`
-restores the default (or clears `afk_channel_id`). After applying a guild,
-setup re-validates every stored voice and stage setting of that guild against
-the final channel type and boost tier, and the stored AFK channel against its
-final type: switching a channel between voice and stage, or lowering
-`premium_tier`, returns `400` if a kept value would fall out of range (for
+and [Modify Guild](https://docs.discord.com/developers/resources/guild#modify-guild)
+and the responses observed from the live API:
+
+| Field | Rule | Response when violated |
+| ----- | ---- | ---------------------- |
+| `bitrate` (voice) | `8000` to `96000`, `128000`, `256000` or `384000` at boost tier 0-3 (`VIP_REGIONS` not modeled) | `50035`, `NUMBER_TYPE_MIN`/`NUMBER_TYPE_MAX`, e.g. `int value should be less than or equal to 96000.` |
+| `bitrate` (stage) | `8000` to `64000` | below the minimum: `50035`; above `64000`: JSON error `30052` `Bitrate is too high for channel of this type` |
+| `user_limit` (voice) | `0` to `99` | `50035`, `int value should be less than or equal to 99.` |
+| `user_limit` (stage) | any non-negative integer | values above `10000` are silently truncated to `10000` ([intended per Discord staff](https://github.com/discord/discord-api-docs/issues/5929)) |
+| `rtc_region` | a `GET /voice/regions` ID or `null` | `50035`, `BASE_TYPE_CHOICES` |
+| `video_quality_mode` | `1` or `2` | `50035`, `BASE_TYPE_CHOICES` |
+| `afk_timeout` | `60`, `300`, `900`, `1800` or `3600` | `50035`, `BASE_TYPE_CHOICES` |
+| `afk_channel_id` | a voice channel (type `2`) of the same guild, or `null` | `50035` (Discord's exact field code is undocumented; Fauxcord uses `CHANNEL_TYPE_INVALID`) |
+
+Non-integer values return `NUMBER_TYPE_COERCE`. In setup, the AFK channel may
+be defined in the same request. Voice settings on other channel types and
+invalid values return `400` with a `message` and Discord-style field `errors`
+(a stage bitrate above `64000` is reported as field code `BITRATE_TOO_HIGH`),
+with no partial fixture state or Gateway events. When setup reuses an ID,
+omitted fields keep their stored values and `null` restores the default (or
+clears `afk_channel_id`). After applying a guild, setup re-validates every
+stored voice and stage setting of that guild against the final channel type,
+and the stored AFK channel against its final type: switching a channel between
+voice and stage returns `400` if a kept value would fall out of range (for
 example a stage `user_limit` above `99` on a channel becoming voice, or an AFK
 channel becoming a stage channel). Replace or reset the value in the same
-request.
+request. Lowering `premium_tier` keeps higher stored bitrates, as Discord does
+when a guild loses boosts (only new writes are checked against the lower
+ceiling).
 
 The ordinary Discord routes accept the same fields: `POST
 /guilds/{guild.id}/channels` and `PATCH /channels/{channel.id}` (voice settings
-are ignored for other channel types, as on Discord; invalid values return
-`50035`), and `PATCH /guilds/{guild.id}` (`afk_channel_id`, `afk_timeout`).
-A successful guild modification that changes the guild dispatches native
-`GUILD_UPDATE` (the plain guild object) to the owning bot's sessions with the
-`Guilds` intent. Deleting the AFK channel clears `afk_channel_id`; no
-`GUILD_UPDATE` is sent for that implicit change.
+are ignored for other channel types, as on Discord), and `PATCH
+/guilds/{guild.id}` (`afk_channel_id`, `afk_timeout`). A successful guild
+modification that changes the guild dispatches native `GUILD_UPDATE` (the plain
+guild object) to the owning bot's sessions with the `Guilds` intent. Deleting
+the AFK channel clears `afk_channel_id` without a `GUILD_UPDATE`; Discord
+documents only `CHANNEL_DELETE` for channel deletion, and no source shows a
+`GUILD_UPDATE` for this case.
 
-`user_limit` is enforced only on the ordinary REST voice-state routes
-(`PATCH /guilds/{guild.id}/voice-states/@me` and `/{user.id}`), which
-Fauxcord lets join or move users: a join or move into a channel already
-holding `user_limit` connected users returns `403` (`50013`) unless the joining
-user or the calling bot has `MOVE_MEMBERS` in that channel (owners and
-administrators always do; a member with an active timeout keeps only
-`VIEW_CHANNEL` and `READ_MESSAGE_HISTORY`, as on Discord). The voice-state fixture API below remains a
-privileged override and never checks the limit, so fixtures can model any
-occupancy. AFK auto-moves (Discord moving idle users into the AFK channel
-after `afk_timeout`) depend on client idle detection and are not simulated;
-use the fixture API to move a user into the AFK channel explicitly.
+On Discord, users with `MOVE_MEMBERS` may join a voice channel whose
+`user_limit` is reached ([Discord staff](https://github.com/discord/discord-api-docs/issues/58)),
+everyone else is refused. Discord's REST voice-state routes cannot join or move
+users at all (`channel_id` must be the stage channel the user is already in),
+but Fauxcord's `PATCH /guilds/{guild.id}/voice-states/@me` and `/{user.id}`
+accept any voice or stage channel, so the rule is applied there: a join or move
+into a channel already holding `user_limit` connected users returns `403`
+(`50013`) unless the joining user or the calling bot has `MOVE_MEMBERS` in that
+channel (owners and administrators always do; a member with an active timeout
+keeps only `VIEW_CHANNEL` and `READ_MESSAGE_HISTORY`, as on Discord). The
+voice-state fixture API below remains a privileged override and never checks
+the limit, so fixtures can model any occupancy. AFK auto-moves (Discord moving
+idle users into the AFK channel after `afk_timeout`) depend on client idle
+detection and are not simulated; use the fixture API to move a user into the
+AFK channel explicitly.
 
 To seed a guild icon, pass `guilds[].icon`, for example
 `"a_0123456789abcdef0123456789abcdef"`. The value is stored verbatim and appears

@@ -16,6 +16,7 @@ import type { ChannelType } from 'discord-api-types/v10'
 import { generateSnowflake } from '../snowflake'
 import { gatewayBus } from '../gateway/bus'
 import {
+  defaultUserLimit,
   VOICE_CHANNEL_LIMITS,
   type VoiceChannelSettings,
 } from '../validators/channel'
@@ -320,7 +321,7 @@ function toChannelObject(
     // present").
     ...(isVoiceCapableChannelType(row.type) && {
       bitrate: row.bitrate ?? VOICE_CHANNEL_LIMITS.DEFAULT_BITRATE,
-      user_limit: row.user_limit ?? 0,
+      user_limit: row.user_limit ?? defaultUserLimit(row.type),
       rtc_region: row.rtc_region,
       ...(row.video_quality_mode !== null && {
         video_quality_mode: row.video_quality_mode,

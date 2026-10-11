@@ -18,6 +18,9 @@ import {
 import { listVoiceRegions } from '../services/catalog'
 import { getThread } from '../services/threads'
 import {
+  bitrateTooHigh,
+  isStageBitrateTooHigh,
+  normalizeVoiceChannelSettings,
   pickVoiceChannelSettings,
   validateChannelTypeChange,
   validateChannelUpdate,
@@ -96,12 +99,19 @@ export function createChannelRoutes(
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
     }
+    if (voice && isStageBitrateTooHigh(payload.bitrate, current.type)) {
+      return c.json(bitrateTooHigh().body, 400)
+    }
 
     const updated = requireEntity(
       c,
       updateChannel(db, channelId, {
         ...(payload as ValidatedChannelUpdate),
-        ...pickVoiceChannelSettings(payload),
+        ...(voice &&
+          normalizeVoiceChannelSettings(
+            pickVoiceChannelSettings(payload),
+            current.type
+          )),
       }),
       DiscordErrorCode.UNKNOWN_CHANNEL,
       'Unknown Channel'

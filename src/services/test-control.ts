@@ -14,8 +14,11 @@ import { gatewayBus } from '../gateway/bus'
 import { buildGuildCreatePayload, isValidAfkChannel } from './guilds'
 import { listVoiceRegions } from './catalog'
 import {
+  isStageBitrateTooHigh,
+  normalizeVoiceChannelSettings,
   pickVoiceChannelSettings,
   validateVoiceChannelSettings,
+  VOICE_CHANNEL_LIMITS,
   type VoiceChannelSettings,
 } from '../validators/channel'
 import { validateGuildAfk } from '../validators/guild'
@@ -102,6 +105,27 @@ export class SetupValidationError extends Error {
 }
 
 /**
+ * Rejects a stage channel bitrate above 64000 (Discord error 30052),
+ * reported as a setup field error.
+ * @param bitrate - Validated bitrate
+ * @param channelType - Channel type
+ * @throws SetupValidationError with INVALID_CHANNEL_SETTINGS
+ */
+function assertStageBitrate(bitrate: unknown, channelType: number): void {
+  if (!isStageBitrateTooHigh(bitrate, channelType)) return
+  throw new SetupValidationError('INVALID_CHANNEL_SETTINGS', {
+    bitrate: {
+      _errors: [
+        {
+          code: 'BITRATE_TOO_HIGH',
+          message: 'Bitrate is too high for channel of this type',
+        },
+      ],
+    },
+  })
+}
+
+/**
  * Validates a setup channel's voice settings against its (preserved or
  * requested) type and the guild's stored boost tier.
  * @param db - Database
@@ -151,7 +175,8 @@ function validateSetupVoiceSettings(
   )
   if (Object.keys(errors).length > 0)
     throw new SetupValidationError('INVALID_CHANNEL_SETTINGS', errors)
-  return settings
+  assertStageBitrate(settings.bitrate, channelType)
+  return normalizeVoiceChannelSettings(settings, channelType)
 }
 
 /**
@@ -189,10 +214,11 @@ function applySetupGuildAfk(
 
 /**
  * Re-validates a guild's stored voice state after setup wrote it: a voice
- * <-> stage switch or a lower `premium_tier` must not leave stored settings
- * outside the ranges Discord enforces for the final type and tier, and the
- * stored AFK channel must still be a voice channel. Values that are now out
- * of range must be replaced in the same setup request.
+ * <-> stage switch must not leave stored settings outside the ranges Discord
+ * enforces for the final type, and the stored AFK channel must still be a
+ * voice channel. Values that are now out of range must be replaced in the
+ * same setup request. A lower `premium_tier` keeps higher stored bitrates,
+ * as Discord does when a guild loses boosts.
  * @param db - Database
  * @param guildId - Guild ID
  * @throws SetupValidationError with INVALID_CHANNEL_SETTINGS or
@@ -225,14 +251,17 @@ function assertStoredGuildVoiceSettings(db: Database, guildId: string): void {
     .all(guildId) as (VoiceChannelSettings & { type: number })[]
   const regionIds = listVoiceRegions().map((region) => region.id)
   for (const { type, ...stored } of channels) {
+    // Discord keeps a stored bitrate when a guild loses boosts, so only the
+    // highest tier's ceiling applies to retained values.
     const errors = validateVoiceChannelSettings(
       stored,
       type,
-      guild.premium_tier,
+      VOICE_CHANNEL_LIMITS.VOICE_BITRATE_MAX_BY_TIER.length - 1,
       regionIds
     )
     if (Object.keys(errors).length > 0)
       throw new SetupValidationError('INVALID_CHANNEL_SETTINGS', errors)
+    assertStageBitrate(stored.bitrate, type)
   }
 }
 
