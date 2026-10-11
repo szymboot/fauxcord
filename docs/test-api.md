@@ -3585,7 +3585,11 @@ token) that has the `GUILDS` intent:
 
 `d` is an [unavailable guild object](https://discord.com/developers/docs/resources/guild#unavailable-guild-object)
 **without** `unavailable`, which is how Discord marks "the user left or was
-removed" (`unavailable: true` is reserved for outages, which are not modeled).
+removed" (`unavailable: true` is reserved for outages; see
+[Simulated guild outage](#simulated-guild-outage-guild_delete-unavailable--guild_create)).
+If the guild is in a simulated outage, only the removal `GUILD_DELETE` is
+delivered; the bot's `GUILD_MEMBER_REMOVE` is an event of the unavailable guild
+and is suppressed.
 
 | Path                                                    | Dispatches, in order                                                |
 | ------------------------------------------------------- | ------------------------------------------------------------------- |
