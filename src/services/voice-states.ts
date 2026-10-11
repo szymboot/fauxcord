@@ -129,41 +129,34 @@ function writeGuildVoiceState(db: Database, state: GuildVoiceState): void {
 }
 
 /**
- * Enforces Discord's single voice connection for human accounts: before a
- * human connects in one guild, every connected state they hold in another
- * guild is disconnected with fixture-disconnect semantics (row retained,
- * session kept, streaming, video and request-to-speak cleared). Bot users may
- * hold one connection per guild and are exempt. Must run inside the caller's
- * transaction so the displacement and the join commit together.
+ * Lists the guilds whose voice connection a human must leave before
+ * connecting in `guildId`, enforcing Discord's single voice connection for
+ * human accounts: every other guild where the user is still a member and
+ * connected, ordered by guild ID. Bot users may hold one connection per guild
+ * and are exempt. Legacy rows without a membership are left untouched: there
+ * is no member to resolve mute/deaf from, and they are never published.
+ * @param db - Database
+ * @param guildId - Guild the user is connecting in
+ * @param userId - Connecting user ID
+ * @returns Guild IDs to disconnect, possibly empty
  */
-function disconnectOtherGuilds(
+function listDisplacedGuilds(
   db: Database,
   guildId: string,
-  userId: string,
-  emit: boolean
-): VoiceStateFixtureMutation[] {
+  userId: string
+): string[] {
   const user = db.prepare('SELECT bot FROM users WHERE id = ?').get(userId) as
     { bot: number } | undefined
   if (!user || user.bot === 1) return []
   const rows = db
     .prepare(
-      `SELECT * FROM guild_voice_states
-      WHERE user_id = ? AND guild_id != ? AND channel_id IS NOT NULL
-      ORDER BY guild_id`
+      `SELECT vs.guild_id FROM guild_voice_states vs
+      JOIN guild_members m ON m.guild_id = vs.guild_id AND m.user_id = vs.user_id
+      WHERE vs.user_id = ? AND vs.guild_id != ? AND vs.channel_id IS NOT NULL
+      ORDER BY vs.guild_id`
     )
-    .all(userId, guildId) as VoiceStateRow[]
-  return rows.map((row) => {
-    const previous = toGuildVoiceState(row)
-    const state: GuildVoiceState = {
-      ...previous,
-      channel_id: null,
-      self_stream: false,
-      self_video: false,
-      request_to_speak_timestamp: null,
-    }
-    writeGuildVoiceState(db, state)
-    return { state, previous, changed: true, emit, displaced: [] }
-  })
+    .all(userId, guildId) as { guild_id: string }[]
+  return rows.map((row) => row.guild_id)
 }
 
 /**
@@ -172,7 +165,8 @@ function disconnectOtherGuilds(
  * the member's persisted flags (server mute survives reconnects, as on
  * Discord), and the committed values are written back to `guild_members` so
  * REST member reads and embedded VOICE_STATE_UPDATE members never diverge.
- * Shared by the fixture, stage and Modify Guild Member voice moderation paths.
+ * Shared by the fixture, stage and Modify Guild Member voice moderation paths,
+ * channel deletion and cross-guild displacement.
  * @param db - Database
  * @param guildId - Guild ID
  * @param userId - Member user ID
@@ -244,8 +238,22 @@ export function applyGuildVoiceStatePatch(
             : payload.request_to_speak_timestamp,
     }
     const emit = payload.emit ?? true
+    // Displaced guilds go through the ordinary disconnect patch, so their
+    // mute/deaf resolve from the member too. A null channel never displaces,
+    // so the nested call cannot recurse further.
     const displaced =
-      channelId === null ? [] : disconnectOtherGuilds(db, guildId, userId, emit)
+      channelId === null
+        ? []
+        : listDisplacedGuilds(db, guildId, userId).map((otherGuildId) => {
+            const result = applyGuildVoiceStatePatch(db, otherGuildId, userId, {
+              channel_id: null,
+              emit,
+            })
+            // Guild, user and membership were just read in this transaction.
+            if (typeof result === 'string')
+              throw new Error(`Voice displacement failed: ${result}`)
+            return result
+          })
     writeGuildVoiceState(db, state)
     db.prepare(
       'UPDATE guild_members SET mute = ?, deaf = ? WHERE guild_id = ? AND user_id = ?'
