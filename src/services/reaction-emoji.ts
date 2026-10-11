@@ -11,6 +11,9 @@ import type { Database } from '../db'
 /** Storage key prefix for custom (guild) emoji reactions. */
 export const CUSTOM_KEY_PREFIX = 'custom:'
 
+/** Persisted custom reaction key: `custom:<id>`. */
+const CUSTOM_KEY_PATTERN = /^custom:(\d+)$/
+
 /** Discord's custom emoji reaction form: `name:id` or animated `a:name:id`. */
 const CUSTOM_EMOJI_PATTERN = /^(?:(a):)?([^:]+):(\d+)$/
 
@@ -80,13 +83,16 @@ export function reactionEmojiFromKey(
   current?: Pick<GuildEmojiSnapshot, 'name' | 'animated'>,
   fallback?: ParsedReactionEmoji
 ): ReactionEmoji {
-  return key.startsWith(CUSTOM_KEY_PREFIX)
-    ? {
-        id: key.slice(CUSTOM_KEY_PREFIX.length),
+  // Only `custom:<digits>` is a custom key; any other stored string (such as a
+  // REST-supplied `custom:foo`) keeps the legacy exact-string behavior.
+  const customId = CUSTOM_KEY_PATTERN.exec(key)?.[1]
+  return customId === undefined
+    ? { id: null, name: key }
+    : {
+        id: customId,
         name: current?.name ?? fallback?.name ?? null,
         animated: current?.animated ?? fallback?.animated ?? false,
       }
-    : { id: null, name: key }
 }
 
 /**

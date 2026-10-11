@@ -236,6 +236,15 @@ describe('custom guild emoji reactions over real HTTP and WebSocket', () => {
         expect.objectContaining({ id, name: 'fiesta', animated: false }),
       ],
     })
+    for (const body of [{}, { name: 'fiesta' }, { roles: [] }]) {
+      const unchanged = await request(
+        `/guilds/${guild}/emojis/${id}`,
+        'PATCH',
+        body
+      )
+      expect(unchanged.status).toBe(200)
+    }
+    await fence() // No-op modifications dispatch nothing.
 
     // The renamed emoji may arrive under either name; identity is the ID.
     expect(await statusOf(react(SECOND, `fiesta:${id}`))).toBe(204)
@@ -305,6 +314,17 @@ describe('custom guild emoji reactions over real HTTP and WebSocket', () => {
     const id = await createEmoji('dance', GIF)
     const emoji = await request(`/guilds/${guild}/emojis/${id}`)
     expect(await emoji.json()).toMatchObject({ id, animated: true })
+    for (const [image, animated] of [
+      ['data:IMAGE/GIF;base64,R0lGODlhAQABAAAAACw=', true],
+      ['data:image/giffoo;base64,AAAA', false],
+      ['data:image/png;base64,iVBORw0KGgo=', false],
+    ] as const) {
+      const created = await request(`/guilds/${guild}/emojis`, 'POST', {
+        name: 'probe',
+        image,
+      })
+      expect(await created.json()).toMatchObject({ animated })
+    }
 
     expect(await statusOf(react(HUMAN, `a:dance:${id}`))).toBe(204)
     expect(await dispatch('MESSAGE_REACTION_ADD')).toMatchObject({
@@ -382,5 +402,16 @@ describe('custom guild emoji reactions over real HTTP and WebSocket', () => {
       { emoji: { id: null, name: '👍🏽' } },
     ])
     expect(rows()).toEqual([{ user_id: HUMAN, emoji: '👍🏽' }])
+
+    // A non-numeric `custom:` string stays an exact Unicode-style key.
+    expect(
+      await statusOf(request(reactionPath('custom:foo', '/@me'), 'PUT'))
+    ).toBe(204)
+    const raw = await dispatch('MESSAGE_REACTION_ADD')
+    expect(raw.emoji).toStrictEqual({ id: null, name: 'custom:foo' })
+    expect(await messageReactions()).toMatchObject([
+      { emoji: { id: null, name: 'custom:foo' } },
+      { emoji: { id: null, name: '👍🏽' } },
+    ])
   })
 })

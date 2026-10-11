@@ -48,6 +48,9 @@ describe('reaction emoji identity', () => {
       animated: false,
     })
     expect(reactionEmojiFromKey('🐝')).toStrictEqual({ id: null, name: '🐝' })
+    for (const key of ['custom:foo', 'custom:12a', 'custom:']) {
+      expect(reactionEmojiFromKey(key)).toStrictEqual({ id: null, name: key })
+    }
   })
 
   it('resolves the current guild emoji name and animated flag', () => {

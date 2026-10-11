@@ -32,6 +32,18 @@ interface BotRow {
 }
 
 /**
+ * Checks whether an emoji image is a GIF data URI, which Discord marks as an
+ * animated emoji. Media types are compared exactly and case-insensitively.
+ * @param image - Untrusted `image` value from the create payload
+ * @returns Whether the data URI's media type is `image/gif`
+ */
+function isGifDataUri(image: unknown): boolean {
+  if (typeof image !== 'string') return false
+  const mediaType = /^data:([^;,]*)[;,]/i.exec(image)?.[1]
+  return mediaType?.trim().toLowerCase() === 'image/gif'
+}
+
+/**
  * Creates the guild emojis API routes.
  * @param db - Database
  * @returns Hono router instance
@@ -113,10 +125,7 @@ export function createGuildEmojiRoutes(db: Database): Hono<AppEnv> {
       name: validatedPayload.name,
       userId: bot?.user_id ?? null,
       roles: payload.roles,
-      // Discord marks emoji uploaded as GIF images as animated.
-      animated:
-        typeof payload.image === 'string' &&
-        payload.image.startsWith('data:image/gif'),
+      animated: isGifDataUri(payload.image),
     })
     return c.json(emoji, 201)
   })

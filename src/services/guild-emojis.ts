@@ -168,7 +168,8 @@ function emitGuildEmojisUpdate(db: Database, guildId: string): void {
 }
 
 /**
- * Updates an emoji's information and emits `GUILD_EMOJIS_UPDATE`. The emoji
+ * Updates an emoji's information and emits `GUILD_EMOJIS_UPDATE` when the name
+ * or roles change. The emoji
  * ID is unchanged, so reactions keep their identity across renames.
  * @param db - Database
  * @param guildId - Guild ID
@@ -207,7 +208,10 @@ export function updateEmoji(
   const row = db
     .prepare('SELECT * FROM emojis WHERE id = ?')
     .get(emojiId) as EmojiRow
-  emitGuildEmojisUpdate(db, guildId)
+  // Like GUILD_UPDATE, only a modification that changes the emoji dispatches.
+  if (row.name !== current.name || row.roles !== current.roles) {
+    emitGuildEmojisUpdate(db, guildId)
+  }
   return toEmojiObject(db, row)
 }
 

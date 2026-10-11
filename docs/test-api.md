@@ -1825,7 +1825,8 @@ and `a:` prefix in a request are not compared, so `party:ID`, `fiesta:ID` and
 `a:party:ID` all address the same reaction, count once per user, and appear as
 one entry in message `reactions`. This matches bots that key custom reactions
 by ID so identity survives renames. Unicode emoji keep their exact-string
-behavior. Reactions persisted by older Fauxcord versions under `name:id` are
+behavior; only `name:id` / `a:name:id` with a numeric ID is custom, so a string
+such as `custom:foo` stays an exact Unicode-style key. Reactions persisted by older Fauxcord versions under `name:id` are
 migrated to ID identity at startup.
 
 **Emoji objects.** Gateway reaction events and message `reactions[].emoji`
@@ -1847,16 +1848,17 @@ reactions of a deleted emoji can still be cleaned up.
 **Seeding emoji.** Create guild emoji with the native
 `POST /guilds/:guildId/emojis` (`{"name": "party", "image": "data:image/png;base64,..."}`).
 Creation is a silent seed: it emits no Gateway event. An `image` data URI with
-type `image/gif` creates an animated emoji (`animated: true`). Use the returned
+media type `image/gif` (compared case-insensitively) creates an animated emoji
+(`animated: true`). Use the returned
 `id` in reaction requests.
 
 **Renaming emoji.** `PATCH /guilds/:guildId/emojis/:emojiId` with
 `{"name": "fiesta"}` keeps the ID, so existing reactions are unaffected, and
 subsequent reaction events, reaction-user reads and message `reactions` use the
-new name. Every successful modify emits native `GUILD_EMOJIS_UPDATE`
+new name. A modify that changes the name or roles emits native `GUILD_EMOJIS_UPDATE`
 (`{"guild_id": "...", "emojis": [<full guild emoji list>]}`) to the guild
-setup's bot sessions that have the Guild Expressions intent (`8`). Emoji
-creation and deletion remain silent.
+setup's bot sessions that have the Guild Expressions intent (`8`). A no-op
+modify, emoji creation and deletion emit nothing.
 
 ---
 
