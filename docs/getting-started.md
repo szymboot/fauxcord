@@ -13,7 +13,7 @@ It lets you automate testing of bots and apps without connecting to the real Dis
 - OAuth2 flows (Authorization Code / Client Credentials)
 - File attachments
 - Gateway (WebSocket): Identify / Heartbeat / Resume, and Dispatch events for
-  messages, reactions, guilds, channels, members, and roles
+  messages, reactions, guilds, guild emoji, channels, members, and roles
 
 **What it cannot do:**
 

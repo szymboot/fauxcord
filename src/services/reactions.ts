@@ -9,6 +9,11 @@ import type { UserRow } from './messages'
 import { gatewayBus, type GatewayBusEvents } from '../gateway/bus'
 import { getGuildIdForChannel } from './messages'
 import { getGuildMember } from './guild-members'
+import {
+  parseReactionEmoji,
+  reactionEmojiKey,
+  resolveReactionEmoji,
+} from './reaction-emoji'
 
 /**
  * Gets the channel ID that a message belongs to, given its message ID.
@@ -58,12 +63,6 @@ function getReactionClearDispatch(
     : undefined
 }
 
-/** Converts the stored REST emoji key into Discord's partial emoji object. */
-function toReactionEmoji(emoji: string): { id: string | null; name: string } {
-  const custom = /^([^:]+):(\d+)$/.exec(emoji)
-  return custom ? { id: custom[2], name: custom[1] } : { id: null, name: emoji }
-}
-
 /** Reaction membership type: normal (0) or burst/super (1). */
 export type ReactionType = 0 | 1
 
@@ -81,7 +80,7 @@ export interface ReactionBurst {
  * @param db - Database
  * @param messageId - Message ID
  * @param userId - User ID
- * @param emoji - Emoji
+ * @param emoji - Unicode emoji, or custom `name:id` / `a:name:id`
  * @param dispatch - Optional member snapshot and delivery scope for human
  * fixtures; without it the reactor's current guild member is resolved
  * @param kind - Reaction type; omitted means a normal reaction
@@ -98,6 +97,7 @@ export function addReaction(
   >,
   kind?: ReactionBurst
 ): boolean {
+  const parsed = parseReactionEmoji(emoji)
   const burst = kind?.burst ?? false
   const burstColors = burst ? (kind?.burstColors ?? []) : []
   let inserted: boolean
@@ -106,7 +106,13 @@ export function addReaction(
       .prepare(
         'INSERT OR IGNORE INTO reactions (message_id, user_id, emoji, type, burst_colors) VALUES (?, ?, ?, ?, ?)'
       )
-      .run(messageId, userId, emoji, burst ? 1 : 0, JSON.stringify(burstColors))
+      .run(
+        messageId,
+        userId,
+        reactionEmojiKey(parsed),
+        burst ? 1 : 0,
+        JSON.stringify(burstColors)
+      )
     inserted = result.changes > 0
   } catch {
     return false
@@ -132,7 +138,7 @@ export function addReaction(
         channelId: message.channel_id,
         messageId,
         userId,
-        emoji: { id: null, name: emoji },
+        emoji: resolveReactionEmoji(db, parsed),
         ...(member && { member: { ...member } }),
         messageAuthorId: message.author_id,
         ...dispatch,
@@ -152,7 +158,7 @@ export function addReaction(
  * @param db - Database
  * @param messageId - Message ID
  * @param userId - User ID
- * @param emoji - Emoji
+ * @param emoji - Unicode emoji, or custom `name:id` / `a:name:id`
  * @param burst - Remove the burst membership instead of the normal one
  * @param scope - Optional delivery scope for human fixtures
  * @returns Whether a membership was removed
@@ -165,11 +171,12 @@ export function removeReaction(
   burst = false,
   scope?: GatewayBusEvents['message.reaction.remove']['scope']
 ): boolean {
+  const parsed = parseReactionEmoji(emoji)
   const result = db
     .prepare(
       'DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ? AND type = ?'
     )
-    .run(messageId, userId, emoji, burst ? 1 : 0)
+    .run(messageId, userId, reactionEmojiKey(parsed), burst ? 1 : 0)
 
   // Only emit when a reaction was actually deleted, so removing a
   // non-existent reaction does not produce a misleading
@@ -183,7 +190,7 @@ export function removeReaction(
       channelId,
       messageId,
       userId,
-      emoji: { id: null, name: emoji },
+      emoji: resolveReactionEmoji(db, parsed),
       burst,
       ...(scope && { scope }),
     })
@@ -195,22 +202,23 @@ export function removeReaction(
  * Removes all reactions for the specified emoji.
  * @param db - Database
  * @param messageId - Message ID
- * @param emoji - Emoji
+ * @param emoji - Unicode emoji, or custom `name:id` / `a:name:id`
  */
 export function removeEmojiReactions(
   db: Database,
   messageId: string,
   emoji: string
 ): void {
+  const parsed = parseReactionEmoji(emoji)
   const result = db
     .prepare('DELETE FROM reactions WHERE message_id = ? AND emoji = ?')
-    .run(messageId, emoji)
+    .run(messageId, reactionEmojiKey(parsed))
   if (result.changes === 0) return
   const dispatch = getReactionClearDispatch(db, messageId)
   if (dispatch) {
     gatewayBus.emit('message.reaction.remove.emoji', {
       ...dispatch,
-      emoji: toReactionEmoji(emoji),
+      emoji: resolveReactionEmoji(db, parsed),
     })
   }
 }
@@ -233,7 +241,7 @@ export function removeAllReactions(db: Database, messageId: string): void {
  * Retrieves the list of users who reacted with the requested reaction type.
  * @param db - Database
  * @param messageId - Message ID
- * @param emoji - Emoji
+ * @param emoji - Unicode emoji, or custom `name:id` / `a:name:id`
  * @param limit - Number of items to retrieve (clamped to 100, default 25)
  * @param after - Pagination cursor (user ID)
  * @param type - Normal (0, default) or burst (1) membership
@@ -248,6 +256,7 @@ export function getReactionUsers(
   type: ReactionType = 0
 ): UserRow[] {
   const clampedLimit = Math.min(limit, 100)
+  const key = reactionEmojiKey(parseReactionEmoji(emoji))
   // Snowflake IDs are stored as TEXT and vary in length, so order (and page)
   // numerically by length first, then lexicographically within one length.
   // The cursor's length is computed by SQLite too, so ordering and cursor use
@@ -265,7 +274,7 @@ export function getReactionUsers(
     )
     .all(
       messageId,
-      emoji,
+      key,
       type,
       ...(after === undefined ? [] : [after, after, after]),
       clampedLimit

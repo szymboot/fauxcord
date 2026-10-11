@@ -5,6 +5,7 @@ import {
   seedGuild,
   seedChannel,
   seedMessage,
+  seedEmoji,
 } from '../test-helpers'
 import { closeDatabase, type Database } from '../db'
 import { gatewayBus, type GatewayBusEvents } from '../gateway/bus'
@@ -279,6 +280,82 @@ describe('burst (super) reactions over the test control and REST routes', () => 
     expect(await users('1', '🐝', `after=${encodeURIComponent('😀')}`)).toEqual(
       ['ab']
     )
+  })
+
+  it('supports burst reactions with custom guild emoji, including removal after deletion', async () => {
+    const party = seedEmoji(db, guild, null, 'party', true)
+    const custom = `party:${party}`
+    expect(
+      await statusOf(control('POST', { user_id: HUMAN_ID, emoji: custom }))
+    ).toBe(204)
+    expect(
+      await statusOf(
+        control('POST', {
+          user_id: HUMAN_ID,
+          // A stale name still identifies the emoji by ID.
+          emoji: `a:old_name:${party}`,
+          burst: true,
+          burst_colors: COLORS,
+        })
+      )
+    ).toBe(204)
+    expect(added[1]).toMatchObject({
+      emoji: { id: party, name: 'party', animated: true },
+      burst: true,
+      burstColors: COLORS,
+    })
+    expect(rows()).toEqual([
+      {
+        user_id: HUMAN_ID,
+        emoji: `custom:${party}`,
+        type: 0,
+        burst_colors: '[]',
+      },
+      {
+        user_id: HUMAN_ID,
+        emoji: `custom:${party}`,
+        type: 1,
+        burst_colors: JSON.stringify(COLORS),
+      },
+    ])
+    expect(await users('1', custom)).toEqual([HUMAN_ID])
+    expect(await users('0', custom)).toEqual([HUMAN_ID])
+    expect(await summaries()).toEqual([
+      {
+        count: 2,
+        count_details: { normal: 1, burst: 1 },
+        me: false,
+        me_burst: false,
+        emoji: { id: party, name: 'party', animated: true },
+        burst_colors: COLORS,
+      },
+    ])
+
+    // An unknown custom emoji is rejected before any write, burst or not.
+    const unknown = await control('POST', {
+      user_id: HUMAN_ID,
+      emoji: 'ghost:123456789012345678',
+      burst: true,
+    })
+    expect(unknown.status).toBe(400)
+    expect(await unknown.json()).toMatchObject({ code: 10_014 })
+    expect(rows()).toHaveLength(2)
+
+    // After the guild emoji is deleted, the burst can still be removed.
+    db.prepare('DELETE FROM emojis WHERE id = ?').run(party)
+    expect(
+      await statusOf(
+        control('DELETE', { user_id: HUMAN_ID, emoji: custom, burst: true })
+      )
+    ).toBe(204)
+    expect(removed).toEqual([
+      expect.objectContaining({
+        emoji: expect.objectContaining({ id: party }),
+        burst: true,
+      }),
+    ])
+    expect(await users('1', custom)).toEqual([])
+    expect(await users('0', custom)).toEqual([HUMAN_ID])
   })
 
   it('treats a repeated burst add as a no-op without an event, even with new colors', async () => {

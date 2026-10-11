@@ -6,6 +6,7 @@
 
 import type { Database } from '../db'
 import { getUser, type UserObject } from './users'
+import { gatewayBus } from '../gateway/bus'
 // Used for compile-time type drift detection.
 import type { APIEmoji } from 'discord-api-types/v10'
 
@@ -33,6 +34,7 @@ interface EmojiRow {
   name: string
   user_id: string | null
   roles: string
+  animated: number
 }
 
 /** Emoji object for API responses (conforms to the spec EmojiResponse) */
@@ -61,7 +63,7 @@ function toEmojiObject(db: Database, row: EmojiRow): EmojiObject {
     roles,
     require_colons: true,
     managed: false,
-    animated: false,
+    animated: row.animated === 1,
     available: true,
   }
   if (row.user_id) {
@@ -109,6 +111,8 @@ export interface EmojiCreateParams {
   name: string
   userId: string | null
   roles?: string[] | null
+  /** Whether the emoji image is animated (GIF); defaults to false */
+  animated?: boolean
 }
 
 /**
@@ -122,13 +126,14 @@ export function createEmoji(
   params: EmojiCreateParams
 ): EmojiObject {
   db.prepare(
-    'INSERT INTO emojis (id, guild_id, name, user_id, roles) VALUES (?, ?, ?, ?, ?)'
+    'INSERT INTO emojis (id, guild_id, name, user_id, roles, animated) VALUES (?, ?, ?, ?, ?, ?)'
   ).run(
     params.emojiId,
     params.guildId,
     params.name,
     params.userId,
-    JSON.stringify(params.roles ?? [])
+    JSON.stringify(params.roles ?? []),
+    params.animated ? 1 : 0
   )
   const row = db
     .prepare('SELECT * FROM emojis WHERE id = ?')
@@ -143,7 +148,29 @@ export interface EmojiUpdateParams {
 }
 
 /**
- * Updates an emoji's information.
+ * Publishes the guild's full emoji list as `GUILD_EMOJIS_UPDATE` to the
+ * sessions of the bot that owns the guild's setup.
+ * @param db - Database the guild belongs to
+ * @param guildId - Guild ID
+ */
+function emitGuildEmojisUpdate(db: Database, guildId: string): void {
+  const owner = db
+    .prepare(
+      'SELECT bots.user_id, bots.token FROM guilds JOIN bots ON bots.token = guilds.bot_token WHERE guilds.id = ?'
+    )
+    .get(guildId) as { user_id: string; token: string } | undefined
+  if (!owner) return
+  gatewayBus.emit('guild.emojis.update', {
+    guildId,
+    emojis: getGuildEmojis(db, guildId),
+    scope: { db, botId: owner.user_id, token: owner.token },
+  })
+}
+
+/**
+ * Updates an emoji's information and emits `GUILD_EMOJIS_UPDATE` when the name
+ * or roles change. The emoji
+ * ID is unchanged, so reactions keep their identity across renames.
  * @param db - Database
  * @param guildId - Guild ID
  * @param emojiId - Emoji ID
@@ -181,6 +208,10 @@ export function updateEmoji(
   const row = db
     .prepare('SELECT * FROM emojis WHERE id = ?')
     .get(emojiId) as EmojiRow
+  // Like GUILD_UPDATE, only a modification that changes the emoji dispatches.
+  if (row.name !== current.name || row.roles !== current.roles) {
+    emitGuildEmojisUpdate(db, guildId)
+  }
   return toEmojiObject(db, row)
 }
 

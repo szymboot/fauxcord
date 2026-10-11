@@ -12,6 +12,11 @@ import { gatewayBus } from '../gateway/bus'
 import { getGuildMember } from './guild-members'
 import { getUser, type UserObject } from './users'
 import { getMessageStickerItems } from './message-stickers'
+import {
+  CUSTOM_KEY_PREFIX,
+  reactionEmojiFromKey,
+  type ReactionEmoji,
+} from './reaction-emoji'
 // Used for compile-time type drift detection.
 // When Renovate bumps discord-api-types, `pnpm lint:tsc` will fail if the
 // safe-field subset of MessageResponse is renamed or retyped upstream.
@@ -97,6 +102,7 @@ interface AttachmentRow {
 
 /** Reaction aggregation record type retrieved from the DB */
 interface ReactionAggRow {
+  /** Persisted reaction key (Unicode sequence or `custom:<id>`) */
   emoji: string
   /** Normal plus burst memberships */
   count: number
@@ -104,6 +110,10 @@ interface ReactionAggRow {
   burst_count: number
   /** JSON "#rrggbb" colors of the earliest burst membership, or null */
   burst_colors: string | null
+  /** Current custom emoji name (null for Unicode or unavailable emoji) */
+  emoji_name?: string | null
+  /** Current custom emoji animated flag (null for Unicode or unavailable) */
+  emoji_animated?: number | null
 }
 
 /** Reaction object */
@@ -125,13 +135,8 @@ export interface ReactionObject {
    * bots, and only registered humans can hold burst reactions in the mock.
    */
   me_burst: boolean
-  /** Emoji information */
-  emoji: {
-    /** Custom emoji ID (null for standard emoji) */
-    id: string | null
-    /** Emoji string (Unicode emoji or custom emoji name) */
-    name: string
-  }
+  /** Emoji information (custom emoji carry their ID and animated flag) */
+  emoji: ReactionEmoji
   /** Hex colors of the emoji's burst reactions (empty without bursts) */
   burst_colors: string[]
 }
@@ -291,10 +296,12 @@ export function toMessageObject(
         },
         me: false, // Always false in the mock (the requesting user is not identified)
         me_burst: false, // Bots (the only requesters) cannot super-react
-        emoji: {
-          id: null, // Always null because these are standard emoji
-          name: r.emoji,
-        },
+        emoji: reactionEmojiFromKey(
+          r.emoji,
+          typeof r.emoji_name === 'string'
+            ? { name: r.emoji_name, animated: r.emoji_animated === 1 }
+            : undefined
+        ),
         burst_colors: r.burst_colors
           ? (JSON.parse(r.burst_colors) as string[])
           : [],
@@ -340,8 +347,11 @@ export function hydrateMessageRow(
          (SELECT b.burst_colors FROM reactions b
           WHERE b.message_id = r.message_id AND b.emoji = r.emoji
             AND b.type = 1
-          ORDER BY b.id LIMIT 1) AS burst_colors
-       FROM reactions r WHERE r.message_id = ? GROUP BY r.emoji`
+          ORDER BY b.id LIMIT 1) AS burst_colors,
+         e.name AS emoji_name, e.animated AS emoji_animated
+       FROM reactions r
+       LEFT JOIN emojis e ON r.emoji = '${CUSTOM_KEY_PREFIX}' || e.id
+       WHERE r.message_id = ? GROUP BY r.emoji`
     )
     .all(row.id) as ReactionAggRow[]
 

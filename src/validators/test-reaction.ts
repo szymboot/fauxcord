@@ -1,9 +1,22 @@
 import { requiredError, typeError, type ValidationErrors } from './common'
+import { parseReactionEmoji } from '../services/reaction-emoji'
 
 /**
- * Validates the explicit actor, one Unicode RGI emoji sequence and the optional
- * `burst` flag shared by the human reaction add and removal controls. Custom
- * emoji and arbitrary strings are outside the test producer's persistence model.
+ * Checks whether a test reaction emoji is one Unicode RGI emoji sequence or a
+ * custom emoji in Discord's `name:id` / animated `a:name:id` form.
+ * @param emoji - Untrusted emoji value
+ * @returns Whether the emoji has a supported shape
+ */
+function isSupportedTestEmoji(emoji: unknown): emoji is string {
+  return typeof emoji === 'string'
+    ? /^\p{RGI_Emoji}$/v.test(emoji) || parseReactionEmoji(emoji).id !== null
+    : false
+}
+
+/**
+ * Validates the explicit actor, one Unicode RGI emoji sequence or custom
+ * `name:id` / `a:name:id` emoji, and the optional `burst` flag shared by the
+ * human reaction add and removal controls. Arbitrary strings are rejected.
  * @param payload - Parsed JSON object from the test control route
  * @returns Discord field errors, empty when valid
  */
@@ -20,15 +33,13 @@ function validateReactionTarget(
       ],
     }
   }
-  if (
-    typeof payload.emoji !== 'string' ||
-    !/^\p{RGI_Emoji}$/v.test(payload.emoji)
-  ) {
+  if (!isSupportedTestEmoji(payload.emoji)) {
     errors.emoji = {
       _errors: [
         {
           code: 'INVALID_EMOJI',
-          message: 'Must be one Unicode emoji sequence.',
+          message:
+            'Must be one Unicode emoji sequence or a custom emoji (name:id).',
         },
       ],
     }

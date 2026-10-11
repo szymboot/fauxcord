@@ -1,6 +1,6 @@
 import { once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import { GatewayIntentBits } from 'discord-api-types/v10'
 import {
@@ -340,11 +340,19 @@ describe('Gateway connection faults (zombie connection, failed RESUME)', () => {
       // Native events generated while the connection is a zombie.
       await voice({ self_mute: true })
       await voice({ self_deaf: true })
+      // Advance the clock on every read, so separate reads can never agree.
+      const realNow = Date.now.bind(Date)
+      let tick = 0
+      const clock = vi
+        .spyOn(Date, 'now')
+        .mockImplementation(() => realNow() + ++tick)
       client.ws.send(JSON.stringify({ op: 1, d: received }))
       const silent = await until(
         started.id,
         (record) => record.heartbeats_unacknowledged === 1
-      )
+      ).finally(() => {
+        clock.mockRestore()
+      })
       expect(silent).toMatchObject({
         status: 'zombie',
         last_heartbeat_sequence: received,

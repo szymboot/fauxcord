@@ -707,6 +707,13 @@ export function createTestRoutes(
         }
       )
       if (result === 'OK') return c.body(null, 204)
+      if (result === 'UNKNOWN_EMOJI') {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_EMOJI, 'Unknown Emoji', 400)
+            .body,
+          400
+        )
+      }
       return result === 'WRITE_FAILED'
         ? c.json({ message: 'Internal Server Error', code: 0 }, 500)
         : testReactionTargetErrorResponse(c, result)

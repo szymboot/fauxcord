@@ -169,8 +169,15 @@ export class SessionManager {
   ) => ((status: DispatchTransport) => void) | undefined
   /** Observes a successful RESUME after its replay and RESUMED were queued. */
   observeResume?: (session: Session, facts: ResumeFacts) => void
-  /** Observes a HEARTBEAT that a silenced connection left unacknowledged. */
-  observeSilencedHeartbeat?: (session: Session, sequence: unknown) => void
+  /**
+   * Observes a HEARTBEAT that a silenced connection left unacknowledged, at
+   * the same receipt time recorded as the session's `lastHeartbeatAt`.
+   */
+  observeSilencedHeartbeat?: (
+    session: Session,
+    sequence: unknown,
+    at: number
+  ) => void
   /** Observes a dispatch withheld from a silenced connection. */
   observeSilencedDispatch?: (
     session: Session,

@@ -42,6 +42,7 @@ import {
   type MessageObject,
 } from './messages'
 import { addReaction, removeReaction, type ReactionBurst } from './reactions'
+import { findGuildEmoji, parseReactionEmoji } from './reaction-emoji'
 import { createInteraction } from './interactions'
 import type { InteractionObject } from './interactions'
 
@@ -1093,15 +1094,16 @@ function resolveTestReactionTarget(
 }
 
 /**
- * Adds a normal or burst (super) Unicode reaction as an existing human guild
- * member. Validates all targets before using the ordinary persistence and
- * reaction dispatch path. Normal and burst memberships are independent, so a
- * human may hold both for one emoji.
+ * Adds a normal or burst (super) reaction as an existing human guild member.
+ * Validates all targets before using the ordinary persistence and reaction
+ * dispatch path. Normal and burst memberships are independent, so a human may
+ * hold both for one emoji.
  * @param db - Database
  * @param channelId - Existing guild text or announcement channel
  * @param messageId - Existing public message in that channel
  * @param userId - Registered non-bot member of the channel's guild
- * @param emoji - Validated single Unicode emoji sequence
+ * @param emoji - Validated Unicode emoji sequence, or custom `name:id` /
+ * `a:name:id` emoji that must belong to the channel's guild
  * @param kind - Burst flag and validated colors; omitted means normal
  * @returns Success or a scoped error without writes or events on rejection
  */
@@ -1112,9 +1114,17 @@ export function injectTestReaction(
   userId: string,
   emoji: string,
   kind?: ReactionBurst
-): 'OK' | TestReactionTargetError | 'WRITE_FAILED' {
+): 'OK' | TestReactionTargetError | 'UNKNOWN_EMOJI' | 'WRITE_FAILED' {
   const target = resolveTestReactionTarget(db, channelId, messageId, userId)
   if (typeof target === 'string') return target
+  const customId = parseReactionEmoji(emoji).id
+  if (
+    customId !== null &&
+    findGuildEmoji(db, customId)?.guild_id !==
+      getChannel(db, channelId)?.guild_id
+  ) {
+    return 'UNKNOWN_EMOJI'
+  }
   return addReaction(db, messageId, userId, emoji, target, kind)
     ? 'OK'
     : 'WRITE_FAILED'
@@ -1125,12 +1135,14 @@ export function injectTestReaction(
  * native MESSAGE_REACTION_REMOVE when a row was removed. Discord documents no
  * way to remove only one user's burst reaction (clears remove both types), so
  * this control is the fixture's way to end one. Target rules match
- * {@link injectTestReaction}.
+ * {@link injectTestReaction}, except that a custom emoji need not still exist:
+ * a reaction can be removed after its guild emoji was deleted.
  * @param db - Database
  * @param channelId - Existing guild text or announcement channel
  * @param messageId - Existing public message in that channel
  * @param userId - Registered non-bot member of the channel's guild
- * @param emoji - Validated single Unicode emoji sequence
+ * @param emoji - Validated Unicode emoji sequence, or custom `name:id` /
+ * `a:name:id` emoji
  * @param burst - Remove the burst membership instead of the normal one
  * @returns Success (including when nothing was held) or a scoped error
  */
