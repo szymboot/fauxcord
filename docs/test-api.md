@@ -3261,9 +3261,13 @@ session is allowed; it then only affects later IDENTIFYs.
   guild dropped during the outage (one event fanned out to two sessions
   counts twice).
 
-Correlate with the bot: the outage started for a session at its
-`guild_deletes[].sequence` and ended at its `guild_creates[].sequence`; events
-of other guilds in between carry sequences between the two.
+Correlate with the bot per `session_id`. The outage starts for a session at
+its outage signal: its `guild_deletes[]` entry (`outage_start`, or `identify`
+in the default mode), or, with `identify_dispatch: "guild_create"`, its
+`guild_creates[]` entry with `trigger: "identify"` (`unavailable: true`). It
+ends at its `guild_creates[]` entry with `trigger: "recovery"`. Never treat an
+`identify` stub as the recovery. Events of other guilds in between carry
+sequences between the two.
 
 ### `POST /_test/gateway-guild-outages/:id/end` — End an outage
 
@@ -3341,8 +3345,9 @@ try {
     { method: 'POST' }
   )
   const outage = await ended.json()
-  // outage.guild_deletes[n].sequence / outage.guild_creates[n].sequence
-  // bracket the outage per session; assert the bot reconciled the snapshot.
+  // Per session_id, the outage signal (guild_deletes, or a guild_creates
+  // entry with trigger "identify") and the guild_creates entry with
+  // trigger "recovery" bracket the outage; assert the bot reconciled it.
 } finally {
   const cleanup = await fetch(address, { method: 'DELETE' })
   if (cleanup.status !== 204) throw new Error(`Cleanup: ${cleanup.status}`)
