@@ -331,10 +331,17 @@ function handleIdentify(
 
   const readySequence = sessionManager.nextSeq(session)
   const guildsIntent = hasIntent(data.intents, GatewayIntentBits.Guilds)
+  const guildIds = existingGuildIds.map(({ id }) => id)
+  // Guilds in a simulated outage stay unavailable: Discord sends GUILD_DELETE
+  // (`unavailable: true`) for them instead of the lazy-load GUILD_CREATE.
+  const outages =
+    sessionManager.identifyGuildOutages?.(session, guildIds, readySequence) ??
+    new Map()
   // Test controls may watch this IDENTIFY to prove READY/GUILD_CREATE writes.
   const observer = sessionManager.observeIdentify?.(session, {
     readySequence,
-    guildIds: existingGuildIds.map(({ id }) => id),
+    guildIds,
+    unavailableGuildIds: guildIds.filter((id) => outages.has(id)),
     guildsIntent,
   })
   const ready = encodePayload({
@@ -375,18 +382,32 @@ function handleIdentify(
   // transaction overhead, then perform the WebSocket sends outside it so no
   // I/O happens while the transaction is open.
   const payloads = db.transaction(() =>
-    existingGuildIds
-      .map(({ id: guildId }) => buildGuildCreatePayload(db, guildId))
-      .filter((guild) => guild !== null)
-  )()
-  for (const guild of payloads) {
-    sendDispatch(
-      sessionManager,
-      session,
-      'GUILD_CREATE',
-      guild,
-      observer?.guildCreate
+    guildIds.map((guildId) =>
+      outages.has(guildId)
+        ? { guildId }
+        : { guildId, guild: buildGuildCreatePayload(db, guildId) }
     )
+  )()
+  // READY order is kept; outage guilds get their GUILD_DELETE in place.
+  for (const { guildId, guild } of payloads) {
+    const outage = outages.get(guildId)
+    if (outage) {
+      sendDispatch(
+        sessionManager,
+        session,
+        'GUILD_DELETE',
+        { id: guildId, unavailable: true },
+        outage
+      )
+    } else if (guild) {
+      sendDispatch(
+        sessionManager,
+        session,
+        'GUILD_CREATE',
+        guild,
+        observer?.guildCreate
+      )
+    }
   }
 }
 

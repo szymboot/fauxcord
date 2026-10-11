@@ -864,6 +864,7 @@ describe('Gateway session invalidation attempt accounting', () => {
     const observer = manager.observeIdentify?.(replacement, {
       readySequence: 1,
       guildIds: guilds,
+      unavailableGuildIds: [],
       guildsIntent: true,
     })
     observer?.ready(ready)
@@ -934,6 +935,7 @@ describe('Gateway session invalidation attempt accounting', () => {
     manager.observeIdentify?.(replacement, {
       readySequence: 1,
       guildIds: guilds,
+      unavailableGuildIds: [],
       guildsIntent: true,
     })
     const body = controls.inspect(id) as Invalidation
