@@ -206,6 +206,13 @@ payload is keyed by `guild_id`). The rule applies to every write path,
 including the authenticated `PATCH /guilds/:guildId/voice-states/:userId`
 route.
 
+User rows are global, so a human user ID seeded into guilds of different Bot
+setups is one account. The disconnect then crosses setups, as in Discord: the
+other setup's bot receives the leave even though it did not make the write.
+The `/_test/reset` and setup-deletion scoping above still applies only to
+cleanup. Use a distinct human user ID per setup when setups must not affect
+each other's voice state.
+
 Malformed JSON, nonobjects, unsupported fields and invalid values return `400`.
 Missing guild, user, membership or channel returns Discord-style `404`; channels
 in another guild return `404`, and non-voice/stage channels return `400`. All
