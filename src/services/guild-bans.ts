@@ -176,7 +176,8 @@ function deleteRecentGuildMessages(
  * After commit, GUILD_BAN_ADD is published when the ban is new, followed by a
  * removed member's departure (voice disconnect when connected, then
  * GUILD_MEMBER_REMOVE). Like real Discord, banning an already banned user
- * keeps the original reason and publishes no ban event.
+ * keeps the original reason, removes no membership and publishes no event;
+ * only the requested message deletion still runs.
  * @param db - Database
  * @param guildId - Guild ID
  * @param userId - User ID to ban
@@ -198,8 +199,13 @@ export function createGuildBan(
       `INSERT INTO guild_bans (guild_id, user_id, reason) VALUES (?, ?, ?)
        ON CONFLICT(guild_id, user_id) DO NOTHING`
     ).run(guildId, userId, reason)
-    const departing = snapshotDepartingMember(db, guildId, userId)
-    deleteGuildMembership(db, guildId, userId)
+    // Re-banning changes nothing on real Discord (204, no events, original
+    // reason). Fixtures can rejoin a banned user, so leave that membership
+    // and voice state alone too; only the requested message cleanup runs.
+    const departing = created
+      ? snapshotDepartingMember(db, guildId, userId)
+      : null
+    if (created) deleteGuildMembership(db, guildId, userId)
     deleteRecentGuildMessages(db, guildId, userId, deleteMessageSeconds)
     return { created, departing }
   })

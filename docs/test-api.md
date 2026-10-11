@@ -313,7 +313,11 @@ disconnect real Discord sends, before the member removal event:
 2. Only when the banned user was a member.
 3. Only when the ban is new. Banning a non-member publishes only
    `GUILD_BAN_ADD`. Re-banning an already banned user returns `204`, publishes
-   nothing and keeps the original reason (the new reason is ignored).
+   nothing and keeps the original reason (the new reason is ignored). It also
+   leaves the membership and voice state of a banned user who rejoined through
+   a test fixture untouched (real Discord does not let banned users rejoin);
+   only the requested message deletion runs, since Discord's behavior there
+   has not been observed.
 
 `GUILD_BAN_ADD` carries `guild_id`, `user` and `delete_message_secs`, the
 ban's effective message deletion window in seconds (from

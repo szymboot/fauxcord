@@ -348,6 +348,22 @@ describe('voice disconnects when members are removed', () => {
     expect(frames).toMatchObject([{ t: 'GUILD_BAN_ADD', d: banOf(outsider) }])
   })
 
+  it('re-banning a banned user who rejoined through a fixture changes nothing', async () => {
+    expect(await status(`/guilds/${guild}/bans/${ALICE}`, 'PUT')).toBe(204)
+    // Real Discord blocks banned users from rejoining; fixtures do not.
+    expect(
+      await status(`/_test/guilds/${guild}/members/${ALICE}`, 'POST', {})
+    ).toBe(201)
+    const state = await joinVoice(ALICE, { channel_id: voice })
+    const client = await connect()
+
+    expect(await status(`/guilds/${guild}/bans/${ALICE}`, 'PUT')).toBe(204)
+
+    expect(await drain(client)).toEqual([])
+    expect(getGuildMember(server.db, guild, ALICE)).not.toBeNull()
+    expect(getGuildVoiceState(server.db, guild, ALICE)).toEqual(state)
+  })
+
   it('kick of a member without voice, or with a kept disconnected state, emits only GUILD_MEMBER_REMOVE', async () => {
     await joinVoice(BOB, { channel_id: voice })
     await joinVoice(BOB, { channel_id: null })
