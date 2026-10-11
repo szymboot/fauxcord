@@ -21,6 +21,7 @@ export const DiscordErrorCode = {
   UNKNOWN_WEBHOOK: 10_015,
   UNKNOWN_INTERACTION: 10_062,
   UNKNOWN_APPLICATION_COMMAND: 10_063,
+  UNKNOWN_VOICE_STATE: 10_065,
   UNKNOWN_BAN: 10_026,
   // 30xxx — Limit exceeded
   MAX_PINS_REACHED: 30_003,
@@ -116,6 +117,7 @@ export const ERROR_MESSAGES = {
   [DiscordErrorCode.UNKNOWN_WEBHOOK]: 'Unknown Webhook',
   [DiscordErrorCode.UNKNOWN_INTERACTION]: 'Unknown Interaction',
   [DiscordErrorCode.UNKNOWN_APPLICATION_COMMAND]: 'Unknown Application Command',
+  [DiscordErrorCode.UNKNOWN_VOICE_STATE]: 'Unknown Voice State',
   [DiscordErrorCode.UNKNOWN_BAN]: 'Unknown Ban',
   [DiscordErrorCode.MAX_PINS_REACHED]:
     'Maximum number of pins reached for the channel (50)',

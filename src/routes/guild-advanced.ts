@@ -210,6 +210,29 @@ function registerGuildSnowflakeValidation(app: Hono<AppEnv>): void {
   )
 }
 
+/**
+ * Reads a stored voice state, including a retained disconnected one. Without
+ * a stored state, an existing member gets `10065` Unknown Voice State (they
+ * simply never joined voice) and anyone else `10007` Unknown Member.
+ * @param c - Request context
+ * @param db - Database
+ * @param guildId - Guild ID, already access-checked
+ * @param userId - User whose voice state is read
+ * @returns The voice state, or a native 404 error
+ */
+function readGuildVoiceState(
+  c: Context<AppEnv>,
+  db: Database,
+  guildId: string,
+  userId: string
+): Response {
+  const state = getGuildVoiceState(db, guildId, userId)
+  if (state) return c.json(state)
+  return getGuildMember(db, guildId, userId)
+    ? unknown(c, DiscordErrorCode.UNKNOWN_VOICE_STATE, 'Unknown Voice State')
+    : unknown(c, DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member')
+}
+
 /** Publishes only successful committed stage writes, using native error codes. */
 async function patchGuildVoiceState(
   c: Context<AppEnv>,
@@ -1132,11 +1155,9 @@ export function createGuildAdvancedRoutes(
   app.get('/guilds/:guildId/voice-states/@me', (c) => {
     const { guildId } = c.req.param()
     const access = requireGuildAccess(c, db, guildId)
-    if (access instanceof Response) return access
-    const state = getGuildVoiceState(db, guildId, c.get('bot')?.user_id ?? '')
-    return state
-      ? c.json(state)
-      : unknown(c, DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member')
+    return access instanceof Response
+      ? access
+      : readGuildVoiceState(c, db, guildId, c.get('bot')?.user_id ?? '')
   })
   app.patch('/guilds/:guildId/voice-states/@me', async (c) => {
     const { guildId } = c.req.param()
@@ -1149,10 +1170,10 @@ export function createGuildAdvancedRoutes(
     const { guildId, userId } = c.req.param()
     const access = requireGuildAccess(c, db, guildId)
     if (access instanceof Response) return access
-    const state = getGuildVoiceState(db, guildId, userId)
-    return state
-      ? c.json(state)
-      : unknown(c, DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member')
+    // A percent-encoded `%40me` misses the literal route above (decodeURI
+    // keeps `%40`); the path parameter is decoded, so it arrives here as `@me`.
+    const targetId = userId === '@me' ? (c.get('bot')?.user_id ?? '') : userId
+    return readGuildVoiceState(c, db, guildId, targetId)
   })
   app.patch('/guilds/:guildId/voice-states/:userId', async (c) => {
     const { guildId, userId } = c.req.param()
