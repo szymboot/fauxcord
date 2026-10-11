@@ -1871,10 +1871,33 @@ requests, and changes to an already disconnected state produce no event to
 capture. Voice dispatches follow the guild's registered bot, exact setup token,
 and app database; a capture never holds another session's delivery.
 
-A voice capture includes all users and voice/stage channels in the selected
-guild. Inspect `envelope.d.user_id` and `channel_id` to choose event UUIDs;
-disconnects have `channel_id: null`. The envelope retains the native voice
-session ID, flags (including `self_stream`), and member/user snapshot. For
+Without a selector, a voice capture includes all users and voice/stage channels
+in the selected guild. Inspect `envelope.d.user_id` and `channel_id` to choose
+event UUIDs; disconnects have `channel_id: null`.
+
+To capture or hold only one user's voice transitions, add `member_id` (see
+[member selectors](#member-selectors) below):
+
+```json
+{
+  "guild_id": "222222222222222222",
+  "bot_id": "111111111111111111",
+  "session_id": "SESSION_ID_FROM_READY",
+  "events": ["VOICE_STATE_UPDATE"],
+  "member_id": "888888888888888888",
+  "hold": true
+}
+```
+
+Only dispatches whose `d.user_id` equals `member_id` are captured. Other users'
+voice dispatches in the same guild are not captured, not held, and are delivered
+immediately with their ordinary native sequence, exactly as if no control
+existed. For example, hold user A's leave while user B's join is delivered, then
+release A's leave later. Arm one selected control per user to hold or observe
+several users independently in one guild/session.
+
+The envelope retains the native voice session ID, flags (including
+`self_stream`), and member/user snapshot. For
 example, hold stream start and stop, then disconnect the user through the typed
 route. Releasing the earlier start after disconnect still sends the captured
 `self_stream: true` and original channel; replay duplicates that same snapshot.
@@ -1926,7 +1949,8 @@ RESUME attempts; overflow increments `delivery_observations_skipped` and leaves
 normal protocol delivery running. Check both skipped counters when complete
 observation matters. There are at most
 32 controls per assembled Gateway. Global capacity returns `429`. Overlapping
-event selectors for the same guild/session return `409`. Invalid policy,
+event selectors for the same guild/session return `409` (see
+[member selectors](#member-selectors) for how `member_id` affects overlap). Invalid policy,
 malformed JSON and explicit null policy values return `400`.
 
 When count/byte capacity is reached, subsequent matching events **pass through
@@ -2202,14 +2226,43 @@ sequence. Use `new` when testing duplicate callbacks rather than client sequence
 handling. Malformed action JSON, duplicate IDs or invalid sequence mode returns
 `400`; each successful action returns updated observation.
 
+### Member selectors
+
+`member_id` narrows a control to one existing guild member. It uses the same
+positive 1–20 digit string format as the scope IDs; null/malformed selectors
+return `400`, and a user who is not currently a member of the guild returns
+`404`. The selector matches the subject user of each event:
+
+| Event                 | Matched field |
+| --------------------- | ------------- |
+| `GUILD_MEMBER_UPDATE` | `d.user.id`   |
+| `VOICE_STATE_UPDATE`  | `d.user_id`   |
+
+`events` may combine both (for example one control holding a user's nickname and
+voice changes). Every listed event must be one of these member-scoped events;
+any other event type (messages, reactions) together with `member_id` returns
+`400` with
+`{"message":"member_id requires every event to be one of GUILD_MEMBER_UPDATE, VOICE_STATE_UPDATE","code":0}`.
+Dispatches of other users never match a selected control and pass through
+untouched.
+
+**Overlap and precedence.** At most one control ever matches a dispatch, so no
+precedence rule is needed at delivery time: overlap is rejected when arming. For
+the same guild and session, a new control conflicts (`409`) with an existing one
+when they share at least one event type and either has no `member_id` or both
+select the same member. Hence controls for different members coexist, the same
+member may have controls for disjoint event types, and an all-member control
+cannot coexist with a member-selected control for the same event type (cancel
+one first). Every control, selected or not, counts toward the 32-control limit
+and has its own `limit`, byte budget, operation budget and TTL. `member_id` is
+part of the ownership-key policy: retrying a keyed creation with a different
+selector returns `409`. Release, replay, sequence modes, acknowledgements,
+disconnect/resume gating, inspection by ID or key and cleanup are unchanged.
+
 ### Native member updates and cache preparation
 
-Arm `events: ["GUILD_MEMBER_UPDATE"]` and optionally `member_id` to select one
-existing guild member. `member_id` uses the same positive 1–20 digit string
-format as the scope IDs; null/malformed selectors return `400`, a missing member
-returns `404`. A member selector requires exactly this one event type. Different
-member selectors can coexist for one guild/session; an all-member selector or
-the same member overlaps and returns `409`.
+Arm `events: ["GUILD_MEMBER_UPDATE"]` and optionally `member_id` (see
+[member selectors](#member-selectors)) to select one existing guild member.
 
 Use the production `PATCH /guilds/:guildId/members/:userId` with `{"nick":"New"}`
 or `{"nick":null}`. Unchanged nickname PATCHes also emit a native update, as does
