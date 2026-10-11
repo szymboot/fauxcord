@@ -412,7 +412,8 @@ function intFieldError(
   if (typeof value !== 'number' || !Number.isSafeInteger(value))
     return {
       code: 'NUMBER_TYPE_COERCE',
-      message: `Value "${String(value)}" is not int.`,
+      // JSON.stringify never invokes user-controlled coercion methods.
+      message: `Value "${typeof value === 'string' ? value : JSON.stringify(value)}" is not int.`,
     }
   if (value < min)
     return {

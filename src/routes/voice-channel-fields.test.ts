@@ -388,6 +388,45 @@ describe('Voice channel and guild AFK fields', () => {
       expect(emit).not.toHaveBeenCalled()
     })
 
+    it.each(['bitrate', 'user_limit'])(
+      'rejects an object %s with 400 instead of crashing',
+      async (field) => {
+        const before = snapshot()
+        const response = await api(`/channels/${voiceId}`, 'PATCH', {
+          [field]: { toString: null },
+        })
+        expect(response.status).toBe(400)
+        await expect(response.json()).resolves.toMatchObject({
+          code: 50_035,
+          errors: {
+            [field]: {
+              _errors: [
+                {
+                  code: 'NUMBER_TYPE_COERCE',
+                  message: 'Value "{"toString":null}" is not int.',
+                },
+              ],
+            },
+          },
+        })
+        expect(snapshot()).toEqual(before)
+        const setupResponse = await setup({
+          token: 'Bot object-field',
+          guilds: [
+            {
+              id: guildId,
+              name: 'Voice Guild',
+              channels: [
+                { id: voiceId, name: 'voice', [field]: { toString: null } },
+              ],
+            },
+          ],
+        })
+        expect(setupResponse.status).toBe(400)
+        expect(snapshot()).toEqual(before)
+      }
+    )
+
     it('rejects a stage bitrate above 64000 with 30052 without changes', async () => {
       const before = snapshot()
       const emit = vi.spyOn(gatewayBus, 'emit')
