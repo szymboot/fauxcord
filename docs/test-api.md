@@ -1769,6 +1769,26 @@ Arm a fresh control after reset. This API supplies live fixture state for a futu
 Harness wrapper; it neither implements that wrapper nor guarantees bot-side
 statistics or cache invalidation, which must be asserted through your bot.
 
+### Live reactions by another bot
+
+Bot users react through the native REST routes instead of this control. Register
+an auxiliary bot at any time, including while the tested bot is connected, with
+`POST /_test/setup` (`"guilds": []`), and add it to the guild with
+`PUT /guilds/:guildId/members/:userId`. Its
+`PUT .../reactions/:emoji/@me` and `DELETE .../reactions/:emoji/@me` (as that
+bot), or the tested bot's `DELETE .../reactions/:emoji/:userId`, persist the
+membership and emit native events to connected sessions with the Guild Message
+Reactions intent:
+
+- `MESSAGE_REACTION_ADD`: `user_id`, `guild_id`, `channel_id`, `message_id`,
+  `emoji`, the reactor's current `member` (with `user.bot: true`),
+  `message_author_id`, `burst: false`, `type: 0`, and `burst_colors: []`.
+- `MESSAGE_REACTION_REMOVE`: `user_id`, `guild_id`, `channel_id`, `message_id`,
+  `emoji`, `burst: false`, and `type: 0`.
+
+Reaction-user reads list the bot with `bot: true`. Duplicate adds and removals of
+absent reactions emit nothing.
+
 ---
 
 ## `POST /_test/interactions` — Simulate an interaction

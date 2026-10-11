@@ -8,6 +8,7 @@ import type { Database } from '../db'
 import type { UserRow } from './messages'
 import { gatewayBus, type GatewayBusEvents } from '../gateway/bus'
 import { getGuildIdForChannel } from './messages'
+import { getGuildMember } from './guild-members'
 
 /**
  * Gets the channel ID that a message belongs to, given its message ID.
@@ -69,7 +70,8 @@ function toReactionEmoji(emoji: string): { id: string | null; name: string } {
  * @param messageId - Message ID
  * @param userId - User ID
  * @param emoji - Emoji
- * @param dispatch - Optional member snapshot and delivery scope for human fixtures
+ * @param dispatch - Optional member snapshot and delivery scope for human
+ * fixtures; without it the reactor's current guild member is resolved
  * @returns true on successful addition
  */
 export function addReaction(
@@ -100,14 +102,23 @@ export function addReaction(
   // (INSERT OR IGNORE with no state change) does not produce a spurious
   // MESSAGE_REACTION_ADD dispatch.
   if (inserted) {
-    const channelId = getChannelIdForMessage(db, messageId)
-    if (channelId !== undefined) {
+    const message = db
+      .prepare('SELECT channel_id, author_id FROM messages WHERE id = ?')
+      .get(messageId) as { channel_id: string; author_id: string } | undefined
+    if (message !== undefined) {
+      const guildId = getGuildIdForChannel(db, message.channel_id)
+      // REST reactors (the tested bot or an auxiliary bot) carry their current
+      // guild member snapshot, like Discord's native guild add event.
+      const member =
+        guildId === undefined ? null : getGuildMember(db, guildId, userId)
       gatewayBus.emit('message.reaction.add', {
-        guildId: getGuildIdForChannel(db, channelId),
-        channelId,
+        guildId,
+        channelId: message.channel_id,
         messageId,
         userId,
         emoji: { id: null, name: emoji },
+        ...(member && { member: { ...member } }),
+        messageAuthorId: message.author_id,
         ...dispatch,
       })
     }
