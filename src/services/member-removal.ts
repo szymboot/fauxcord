@@ -23,8 +23,34 @@ export interface DepartingMember {
 }
 
 /**
- * Reads a member and its voice state before removal. Must be called before
- * the member row is deleted, because the voice-state row is removed with it.
+ * Reads a member's stored voice state only when it counts as connected: its
+ * channel is a voice (2) or stage (13) channel of the same guild, the rule
+ * `GUILD_CREATE.voice_states` and channel deletion also use. Legacy rows that
+ * point elsewhere are treated as not connected and publish no disconnect.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - User ID
+ * @returns Connected voice state, or null
+ */
+function getConnectedVoiceState(
+  db: Database,
+  guildId: string,
+  userId: string
+): GuildVoiceState | null {
+  const voice = getGuildVoiceState(db, guildId, userId)
+  if (voice?.channel_id == null) return null
+  const channel = db
+    .prepare(
+      'SELECT 1 FROM channels WHERE id = ? AND guild_id = ? AND type IN (2, 13)'
+    )
+    .get(voice.channel_id, guildId)
+  return channel ? voice : null
+}
+
+/**
+ * Reads a member and its connected voice state before removal. Must be called
+ * before the member row is deleted, because the voice-state row is removed
+ * with it.
  * @param db - Database
  * @param guildId - Guild ID
  * @param userId - User ID
@@ -41,7 +67,7 @@ export function snapshotDepartingMember(
         guildId,
         userId,
         member,
-        voice: getGuildVoiceState(db, guildId, userId),
+        voice: getConnectedVoiceState(db, guildId, userId),
       }
     : null
 }

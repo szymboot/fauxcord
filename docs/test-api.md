@@ -303,7 +303,10 @@ disconnect real Discord sends, before the member removal event:
 | `PUT /guilds/:guildId/bans/:userId`       | `GUILD_BAN_ADD`³, `VOICE_STATE_UPDATE`¹, `GUILD_MEMBER_REMOVE`²                                      |
 | `POST /guilds/:guildId/bulk-ban`          | per banned user, in `user_ids` order: `GUILD_BAN_ADD`, `VOICE_STATE_UPDATE`¹, `GUILD_MEMBER_REMOVE`² |
 
-1. Only when the member had a connected voice/stage state. The payload has the
+1. Only when the member had a connected voice/stage state, meaning its channel
+   is a voice or stage channel of the same guild (the rule
+   `GUILD_CREATE.voice_states` uses; legacy rows pointing elsewhere count as
+   not connected). The payload has the
    same semantics as a fixture disconnect: `channel_id: null`, the previous
    voice `session_id`, `self_stream`/`self_video` `false`,
    `request_to_speak_timestamp: null`, server `mute`/`deaf` from the member,

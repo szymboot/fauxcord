@@ -742,6 +742,39 @@ describe('voice disconnects when members are removed', () => {
     }
   )
 
+  it.each(
+    REMOVALS.flatMap((removal) => [
+      { ...removal, target: 'a text channel' },
+      { ...removal, target: "another guild's voice channel" },
+    ])
+  )(
+    '$name publishes no voice event for a stored row pointing at $target',
+    async ({ run, expected, events, target }) => {
+      await joinVoice(ALICE, { channel_id: voice })
+      const invalid =
+        target === 'a text channel'
+          ? seedChannel(server.db, guild)
+          : seedVoiceChannel(
+              server.db,
+              seedGuild(server.db, TOKEN, '222222222222222223'),
+              '555555555555555556'
+            )
+      // Legacy/direct-SQL row that GUILD_CREATE would not list as connected.
+      server.db
+        .prepare(
+          'UPDATE guild_voice_states SET channel_id = ? WHERE guild_id = ? AND user_id = ?'
+        )
+        .run(invalid, guild, ALICE)
+      const client = await connect()
+
+      expect(await run()).toBe(expected)
+
+      expect(await eventTypes(client)).toEqual(
+        events.filter((event) => event !== 'VOICE_STATE_UPDATE')
+      )
+    }
+  )
+
   /** Event names a cleanup path must never publish. */
   function removalEvents(frames: Frame[]): Frame[] {
     return frames.filter((frame) =>
