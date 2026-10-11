@@ -3096,7 +3096,7 @@ snapshot.
 | Phase | What connected sessions of the setup receive |
 | ----- | -------------------------------------------- |
 | Start | `GUILD_DELETE` `{ "id": guild_id, "unavailable": true }`, normally sequenced and stored in the RESUME replay buffer. |
-| Unavailable | Nothing for that guild. Every dispatch whose `guild_id` (or `id` for `GUILD_CREATE`/`GUILD_UPDATE`/`GUILD_DELETE`) is the guild — voice states, members, messages, reactions, channels, roles, interactions, … — is dropped **before sequencing**: it consumes no sequence number, is never added to the replay buffer and is never delivered later. Fixtures and REST still change and persist state. |
+| Unavailable | Nothing for that guild except `GUILD_DELETE`. Every other dispatch whose `guild_id` (or `id` for `GUILD_CREATE`/`GUILD_UPDATE`/`GUILD_DELETE`) is the guild — voice states, members, messages, reactions, channels, roles, interactions, … — is dropped **before sequencing**: it consumes no sequence number, is never added to the replay buffer and is never delivered later. Fixtures and REST still change and persist state. |
 | IDENTIFY during the outage | `READY` lists the guild as `{ "id": guild_id, "unavailable": true }` (as every guild); instead of its `GUILD_CREATE`, the session receives `GUILD_DELETE` `{ "id": guild_id, "unavailable": true }` in `READY` guild order. Other guilds get their `GUILD_CREATE`. |
 | RESUME during the outage | Replays the outage `GUILD_DELETE` if the client had not seen it, and other guilds' events; never a suppressed event. The guild stays unavailable. |
 | End | Suppression stops, then `GUILD_CREATE` with the full **current** snapshot (the same builder as the IDENTIFY snapshot: members, channels, `voice_states`, and the member objects of users in voice) is sent to every registered session of the setup. Later events flow normally. |
@@ -3297,7 +3297,8 @@ and discards the record (`204`; `404` if unknown). Use it in test cleanup.
 | End route | Same, `ended_by: "request"`. |
 | DELETE (by ID or key) | Ends an active outage with recovery, then discards the record. |
 | `POST /_test/reset` (all, or matching `token`) | Runs after the data reset: active outages recover with a snapshot of the reset state, then records are discarded. |
-| `DELETE /_test/setup/:token`, `DELETE /guilds/:id` | Records are discarded **without** dispatching (the guild no longer exists). |
+| The bot loses the guild (`DELETE /guilds/:id`, leaving via `DELETE /users/@me/guilds/:id`, kicking or banning the bot) | The removal `GUILD_DELETE` (`{ "id": guild_id }` without `unavailable`) is still delivered — it is never suppressed — then the record is discarded without a recovery `GUILD_CREATE`. |
+| `DELETE /_test/setup/:token` | Records are discarded **without** dispatching (the guild no longer exists). |
 | Gateway shutdown | Records are discarded without dispatching. |
 
 Discarded records answer `404`; their keys stay closed. Records and

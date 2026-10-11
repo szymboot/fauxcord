@@ -215,7 +215,7 @@ export class GatewayGuildOutages {
 
   /**
    * Drops every native dispatch of an unavailable guild for in-scope sessions,
-   * except the outage's own GUILD_DELETE `unavailable: true`.
+   * except GUILD_DELETE (the outage signal, or the bot losing the guild).
    */
   private suppress(
     session: Session,
@@ -225,11 +225,10 @@ export class GatewayGuildOutages {
     if (this.active.size === 0) return false
     const guildId = dispatchGuildId(eventName, data)
     if (!guildId) return false
-    if (
-      eventName === 'GUILD_DELETE' &&
-      (data as { unavailable?: unknown }).unavailable === true
-    )
-      return false
+    // GUILD_DELETE is never suppressed: with `unavailable: true` it is the
+    // outage signal itself, without it the bot lost the guild (left, kicked,
+    // banned or deleted), which Discord reports even for unavailable guilds.
+    if (eventName === 'GUILD_DELETE') return false
     const record = this.activeFor(session, guildId)
     if (!record) return false
     record.suppressed += 1

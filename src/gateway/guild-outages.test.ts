@@ -774,21 +774,63 @@ describe('Gateway guild outage control', () => {
     expect(await status(`${ROOT}/${outage.id}`)).toBe(404)
   })
 
-  it('setup deletion and guild deletion discard outages without dispatching', async () => {
+  it('losing the guild during an outage still delivers the removal GUILD_DELETE and discards the outage', async () => {
     const outage = await start()
-    await frame(client, (entry) => entry.t === 'GUILD_DELETE')
+    const unavailable = await frame(
+      client,
+      (entry) => entry.t === 'GUILD_DELETE'
+    )
     const deleted = await fetch(`${base}/api/v10/guilds/${GUILD_A}`, {
       method: 'DELETE',
       headers: { Authorization: TOKEN },
     })
     expect(deleted.status).toBe(204)
+    const removed = await frame(
+      client,
+      (entry) =>
+        entry.t === 'GUILD_DELETE' && Number(entry.s) > Number(unavailable.s)
+    )
+    // Without `unavailable` the bot was removed (Discord Guild Delete docs).
+    expect(removed).toMatchObject({
+      s: Number(unavailable.s) + 1,
+      d: { id: GUILD_A },
+    })
+    expect(removed.d).not.toHaveProperty('unavailable')
     expect(await status(`${ROOT}/${outage.id}`)).toBe(404)
 
+    // Leaving through REST behaves the same.
     const second = await start({ guild_id: GUILD_B })
+    const left = await fetch(`${base}/api/v10/users/@me/guilds/${GUILD_B}`, {
+      method: 'DELETE',
+      headers: { Authorization: TOKEN },
+    })
+    expect(left.status).toBe(204)
+    await frame(
+      client,
+      (entry) =>
+        entry.t === 'GUILD_DELETE' &&
+        entry.d?.id === GUILD_B &&
+        entry.d.unavailable === undefined
+    )
+    expect(await status(`${ROOT}/${second.id}`)).toBe(404)
+    await fence(client)
+    expect(
+      client.frames.filter(
+        (entry) => entry.t === 'GUILD_CREATE' && Number(entry.s) > 3
+      )
+    ).toEqual([])
+  })
+
+  it('setup deletion discards outages without dispatching', async () => {
+    seedGuild(server.db, TOKEN, '252525252525252525')
+
+    const second = await start({ guild_id: GUILD_B })
+    const third = await start({ guild_id: '252525252525252525' })
     expect(
       await status(`/_test/setup/${encodeURIComponent(TOKEN)}`, 'DELETE')
     ).toBe(204)
     expect(await status(`${ROOT}/${second.id}`)).toBe(404)
+    expect(await status(`${ROOT}/${third.id}`)).toBe(404)
     await fence(client)
     expect(
       client.frames.filter(
