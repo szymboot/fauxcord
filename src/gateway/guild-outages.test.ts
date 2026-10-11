@@ -1297,6 +1297,24 @@ describe('GatewayGuildOutages limits', () => {
     controls.reset(undefined, false)
   })
 
+  it('buffers the outage GUILD_DELETE for a silenced (zombie) connection', () => {
+    const { manager, controls, ids } = setup(1)
+    const zombie = session(manager)
+    manager.silence(zombie.ws)
+    const record = controls.create({
+      bot_id: '111111111111111111',
+      guild_id: ids[0] ?? '',
+      ttl_ms: 60_000,
+    }) as { guild_deletes: { transport: string; sequence: number }[] }
+    expect(record.guild_deletes).toMatchObject([
+      { transport: 'buffered', sequence: 1 },
+    ])
+    expect(
+      manager.replayFrom(zombie, 0)?.map((entry) => entry.event.t)
+    ).toEqual(['GUILD_DELETE'])
+    controls.reset(undefined, false)
+  })
+
   it('shutdown reset discards without dispatching recovery', () => {
     const { manager, controls, ids } = setup(1)
     const target = session(manager)
