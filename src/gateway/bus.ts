@@ -47,6 +47,10 @@ export interface GatewayBusEvents {
     member?: Record<string, unknown>
     messageAuthorId?: string
     scope?: { db: Database; botId: string; token: string }
+    /** True for a burst (super) reaction; omitted for normal reactions. */
+    burst?: boolean
+    /** "#rrggbb" animation colors of a burst reaction. */
+    burstColors?: string[]
   }
   'message.reaction.remove': {
     guildId: string | undefined
@@ -54,6 +58,10 @@ export interface GatewayBusEvents {
     messageId: string
     userId: string
     emoji: Record<string, unknown>
+    /** Whether the removed membership was a burst (super) reaction. */
+    burst?: boolean
+    /** Exact setup scope for human fixture removals. */
+    scope?: { db: Database; botId: string; token: string }
   }
   'message.reaction.remove.all': {
     guildId: string | undefined

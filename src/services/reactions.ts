@@ -64,14 +64,27 @@ function toReactionEmoji(emoji: string): { id: string | null; name: string } {
   return custom ? { id: custom[2], name: custom[1] } : { id: null, name: emoji }
 }
 
+/** Reaction membership type: normal (0) or burst/super (1). */
+export type ReactionType = 0 | 1
+
+/** Burst state of a persisted reaction membership and its event fields. */
+export interface ReactionBurst {
+  /** Whether the membership is a burst (super) reaction (type 1). */
+  burst: boolean
+  /** "#rrggbb" animation colors stored with a burst reaction. */
+  burstColors?: string[]
+}
+
 /**
- * Adds a reaction.
+ * Adds a reaction. Normal and burst memberships of the same user and emoji are
+ * independent rows, so one user may hold both at once.
  * @param db - Database
  * @param messageId - Message ID
  * @param userId - User ID
  * @param emoji - Emoji
  * @param dispatch - Optional member snapshot and delivery scope for human
  * fixtures; without it the reactor's current guild member is resolved
+ * @param kind - Reaction type; omitted means a normal reaction
  * @returns true on successful addition
  */
 export function addReaction(
@@ -82,15 +95,18 @@ export function addReaction(
   dispatch?: Pick<
     GatewayBusEvents['message.reaction.add'],
     'scope' | 'member' | 'messageAuthorId'
-  >
+  >,
+  kind?: ReactionBurst
 ): boolean {
+  const burst = kind?.burst ?? false
+  const burstColors = burst ? (kind?.burstColors ?? []) : []
   let inserted: boolean
   try {
     const result = db
       .prepare(
-        'INSERT OR IGNORE INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?)'
+        'INSERT OR IGNORE INTO reactions (message_id, user_id, emoji, type, burst_colors) VALUES (?, ?, ?, ?, ?)'
       )
-      .run(messageId, userId, emoji)
+      .run(messageId, userId, emoji, burst ? 1 : 0, JSON.stringify(burstColors))
     inserted = result.changes > 0
   } catch {
     return false
@@ -120,6 +136,7 @@ export function addReaction(
         ...(member && { member: { ...member } }),
         messageAuthorId: message.author_id,
         ...dispatch,
+        ...(burst && { burst: true, burstColors }),
       })
     }
   }
@@ -128,28 +145,35 @@ export function addReaction(
 }
 
 /**
- * Removes a reaction (the user's own reaction).
+ * Removes one user's reaction membership of the given type. The documented
+ * REST delete routes carry no reaction type, so they remove the normal
+ * membership (the default type) and leave a burst membership intact.
  * @param db - Database
  * @param messageId - Message ID
  * @param userId - User ID
  * @param emoji - Emoji
+ * @param burst - Remove the burst membership instead of the normal one
+ * @param scope - Optional delivery scope for human fixtures
+ * @returns Whether a membership was removed
  */
 export function removeReaction(
   db: Database,
   messageId: string,
   userId: string,
-  emoji: string
-): void {
+  emoji: string,
+  burst = false,
+  scope?: GatewayBusEvents['message.reaction.remove']['scope']
+): boolean {
   const result = db
     .prepare(
-      'DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?'
+      'DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ? AND type = ?'
     )
-    .run(messageId, userId, emoji)
+    .run(messageId, userId, emoji, burst ? 1 : 0)
 
   // Only emit when a reaction was actually deleted, so removing a
   // non-existent reaction does not produce a misleading
   // MESSAGE_REACTION_REMOVE dispatch.
-  if (result.changes === 0) return
+  if (result.changes === 0) return false
 
   const channelId = getChannelIdForMessage(db, messageId)
   if (channelId !== undefined) {
@@ -159,8 +183,11 @@ export function removeReaction(
       messageId,
       userId,
       emoji: { id: null, name: emoji },
+      burst,
+      ...(scope && { scope }),
     })
   }
+  return true
 }
 
 /**
@@ -208,7 +235,7 @@ export function removeAllReactions(db: Database, messageId: string): void {
  * @param emoji - Emoji
  * @param limit - Number of items to retrieve (clamped to 100, default 25)
  * @param after - Pagination cursor (user ID)
- * @param type - Normal (0, default) or burst (1); burst persistence is unsupported
+ * @param type - Normal (0, default) or burst (1) membership
  * @returns Array of user records
  */
 export function getReactionUsers(
@@ -217,27 +244,24 @@ export function getReactionUsers(
   emoji: string,
   limit = 25,
   after?: string,
-  type: 0 | 1 = 0
+  type: ReactionType = 0
 ): UserRow[] {
-  // Persisted reactions are normal only; never expose them as burst membership.
-  if (type === 1) return []
-
   const clampedLimit = Math.min(limit, 100)
   return after
     ? (db
         .prepare(
           `SELECT u.* FROM users u
          JOIN reactions r ON r.user_id = u.id
-         WHERE r.message_id = ? AND r.emoji = ? AND u.id > ?
+         WHERE r.message_id = ? AND r.emoji = ? AND r.type = ? AND u.id > ?
          ORDER BY u.id ASC LIMIT ?`
         )
-        .all(messageId, emoji, after, clampedLimit) as UserRow[])
+        .all(messageId, emoji, type, after, clampedLimit) as UserRow[])
     : (db
         .prepare(
           `SELECT u.* FROM users u
        JOIN reactions r ON r.user_id = u.id
-       WHERE r.message_id = ? AND r.emoji = ?
+       WHERE r.message_id = ? AND r.emoji = ? AND r.type = ?
        ORDER BY u.id ASC LIMIT ?`
         )
-        .all(messageId, emoji, clampedLimit) as UserRow[])
+        .all(messageId, emoji, type, clampedLimit) as UserRow[])
 }

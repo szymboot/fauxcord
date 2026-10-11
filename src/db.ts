@@ -202,6 +202,39 @@ function migrateRestFaultSelectors(db: Database): void {
 }
 
 /**
+ * Rebuilds a legacy `reactions` table so normal (type 0) and burst (type 1)
+ * memberships are distinct rows. SQLite cannot alter a UNIQUE constraint in
+ * place, so the table is copied into the typed schema; every legacy row was a
+ * normal reaction and keeps its ID and creation time.
+ * @param db - Database instance
+ */
+function migrateReactionTypes(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(reactions)').all() as {
+    name: string
+  }[]
+  if (columns.some((column) => column.name === 'type')) return
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE reactions_typed (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        user_id    TEXT NOT NULL,
+        emoji      TEXT NOT NULL,
+        type       INTEGER NOT NULL DEFAULT 0 CHECK (type IN (0, 1)),
+        burst_colors TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (message_id, user_id, emoji, type)
+      );
+      INSERT INTO reactions_typed (id, message_id, user_id, emoji, created_at)
+        SELECT id, message_id, user_id, emoji, created_at FROM reactions;
+      DROP TABLE reactions;
+      ALTER TABLE reactions_typed RENAME TO reactions;
+      CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
+    `)
+  })()
+}
+
+/**
  * Initializes the database and creates tables.
  * @param dbPath - SQLite file path (":memory:" for an in-memory DB)
  * @returns Initialized Database instance
@@ -524,8 +557,10 @@ export function initializeDatabase(dbPath: string): Database {
       message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
       user_id    TEXT NOT NULL,
       emoji      TEXT NOT NULL,
+      type       INTEGER NOT NULL DEFAULT 0 CHECK (type IN (0, 1)),
+      burst_colors TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      UNIQUE (message_id, user_id, emoji)
+      UNIQUE (message_id, user_id, emoji, type)
     );
 
     CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
@@ -1044,6 +1079,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateInteractionLocale(db)
   migrateInteractionCallbackType(db)
   migrateRestFaultSelectors(db)
+  migrateReactionTypes(db)
   recoverRestFaultOutcomes(db)
 
   return db

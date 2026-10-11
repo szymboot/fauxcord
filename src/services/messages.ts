@@ -98,7 +98,12 @@ interface AttachmentRow {
 /** Reaction aggregation record type retrieved from the DB */
 interface ReactionAggRow {
   emoji: string
+  /** Normal plus burst memberships */
   count: number
+  /** Burst (super) memberships */
+  burst_count: number
+  /** JSON "#rrggbb" colors of the earliest burst membership, or null */
+  burst_colors: string | null
 }
 
 /** Reaction object */
@@ -106,10 +111,8 @@ export interface ReactionObject {
   /** Reaction count */
   count: number
   /**
-   * Per-type reaction count breakdown. Required by the Discord API spec
-   * (discord-api-types APIReactionCountDetails) — always { burst: 0,
-   * normal: count } in the mock, since super reactions (bursts) are not
-   * simulated.
+   * Per-type reaction count breakdown (discord-api-types
+   * APIReactionCountDetails); `count` is their sum.
    */
   count_details: {
     burst: number
@@ -117,7 +120,10 @@ export interface ReactionObject {
   }
   /** Whether the requesting user has reacted (always false in the mock) */
   me: boolean
-  /** Whether the requesting user super-reacted (always false in the mock) */
+  /**
+   * Whether the requesting user super-reacted. Always false: requesters are
+   * bots, and only registered humans can hold burst reactions in the mock.
+   */
   me_burst: boolean
   /** Emoji information */
   emoji: {
@@ -126,7 +132,7 @@ export interface ReactionObject {
     /** Emoji string (Unicode emoji or custom emoji name) */
     name: string
   }
-  /** Hex colors used for super reactions (always empty in the mock) */
+  /** Hex colors of the emoji's burst reactions (empty without bursts) */
   burst_colors: string[]
 }
 
@@ -279,14 +285,19 @@ export function toMessageObject(
     ...(reactions.length > 0 && {
       reactions: reactions.map((r) => ({
         count: r.count,
-        count_details: { burst: 0, normal: r.count },
+        count_details: {
+          burst: r.burst_count,
+          normal: r.count - r.burst_count,
+        },
         me: false, // Always false in the mock (the requesting user is not identified)
-        me_burst: false, // Super reactions are not simulated
+        me_burst: false, // Bots (the only requesters) cannot super-react
         emoji: {
           id: null, // Always null because these are standard emoji
           name: r.emoji,
         },
-        burst_colors: [],
+        burst_colors: r.burst_colors
+          ? (JSON.parse(r.burst_colors) as string[])
+          : [],
       })),
     }),
   }
@@ -324,7 +335,13 @@ export function hydrateMessageRow(
 
   const reactions = db
     .prepare(
-      'SELECT emoji, COUNT(*) as count FROM reactions WHERE message_id = ? GROUP BY emoji'
+      `SELECT r.emoji, COUNT(*) AS count,
+         SUM(r.type = 1) AS burst_count,
+         (SELECT b.burst_colors FROM reactions b
+          WHERE b.message_id = r.message_id AND b.emoji = r.emoji
+            AND b.type = 1
+          ORDER BY b.id LIMIT 1) AS burst_colors
+       FROM reactions r WHERE r.message_id = ? GROUP BY r.emoji`
     )
     .all(row.id) as ReactionAggRow[]
 

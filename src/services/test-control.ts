@@ -41,7 +41,7 @@ import {
   getGuildIdForChannel,
   type MessageObject,
 } from './messages'
-import { addReaction } from './reactions'
+import { addReaction, removeReaction, type ReactionBurst } from './reactions'
 import { createInteraction } from './interactions'
 import type { InteractionObject } from './interactions'
 
@@ -1029,32 +1029,38 @@ export function editTestMessage(
     : (updateMessage(db, messageId, { content }, baseUrl) ?? 'UNKNOWN_MESSAGE')
 }
 
-/**
- * Adds a normal Unicode reaction as an existing human guild member. Validates
- * all targets before using the ordinary persistence and reaction dispatch path.
- * Membership is required and never created or modified by this operation.
- * @param db - Database
- * @param channelId - Existing guild text or announcement channel
- * @param messageId - Existing public message in that channel
- * @param userId - Registered non-bot member of the channel's guild
- * @param emoji - Validated single Unicode emoji sequence
- * @returns Success or a scoped error without writes or events on rejection
- */
-export function injectTestReaction(
-  db: Database,
-  channelId: string,
-  messageId: string,
-  userId: string,
-  emoji: string
-):
-  | 'OK'
+/** Rejections shared by the human reaction add and removal controls. */
+export type TestReactionTargetError =
   | 'UNKNOWN_CHANNEL'
   | 'UNKNOWN_MESSAGE'
   | 'UNKNOWN_USER'
   | 'UNKNOWN_MEMBER'
   | 'BOT_USER'
   | 'UNSUPPORTED_SCOPE'
-  | 'WRITE_FAILED' {
+
+/** Resolved human reaction target: delivery scope, author and member. */
+interface TestReactionTarget {
+  scope: { db: Database; botId: string; token: string }
+  messageAuthorId: string
+  member: Record<string, unknown>
+}
+
+/**
+ * Resolves a human reaction target in the documented order: channel and
+ * supported guild/setup scope, message, user, bot flag, then membership.
+ * Membership is required and never created or modified.
+ * @param db - Database
+ * @param channelId - Existing guild text or announcement channel
+ * @param messageId - Existing public message in that channel
+ * @param userId - Registered non-bot member of the channel's guild
+ * @returns The resolved target, or a scoped error
+ */
+function resolveTestReactionTarget(
+  db: Database,
+  channelId: string,
+  messageId: string,
+  userId: string
+): TestReactionTarget | TestReactionTargetError {
   const channel = getChannel(db, channelId)
   if (!channel) return 'UNKNOWN_CHANNEL'
   if (!channel.guild_id || ![0, 5].includes(channel.type)) {
@@ -1077,14 +1083,68 @@ export function injectTestReaction(
   if (!actor) return 'UNKNOWN_USER'
   if (actor.bot !== 0) return 'BOT_USER'
   const member = getGuildMember(db, channel.guild_id, userId)
-  if (!member) return 'UNKNOWN_MEMBER'
-  return addReaction(db, messageId, userId, emoji, {
-    member: { ...member },
-    messageAuthorId: message.author_id,
-    scope: { ...scope, db },
-  })
+  return member
+    ? {
+        scope: { ...scope, db },
+        messageAuthorId: message.author_id,
+        member: { ...member },
+      }
+    : 'UNKNOWN_MEMBER'
+}
+
+/**
+ * Adds a normal or burst (super) Unicode reaction as an existing human guild
+ * member. Validates all targets before using the ordinary persistence and
+ * reaction dispatch path. Normal and burst memberships are independent, so a
+ * human may hold both for one emoji.
+ * @param db - Database
+ * @param channelId - Existing guild text or announcement channel
+ * @param messageId - Existing public message in that channel
+ * @param userId - Registered non-bot member of the channel's guild
+ * @param emoji - Validated single Unicode emoji sequence
+ * @param kind - Burst flag and validated colors; omitted means normal
+ * @returns Success or a scoped error without writes or events on rejection
+ */
+export function injectTestReaction(
+  db: Database,
+  channelId: string,
+  messageId: string,
+  userId: string,
+  emoji: string,
+  kind?: ReactionBurst
+): 'OK' | TestReactionTargetError | 'WRITE_FAILED' {
+  const target = resolveTestReactionTarget(db, channelId, messageId, userId)
+  if (typeof target === 'string') return target
+  return addReaction(db, messageId, userId, emoji, target, kind)
     ? 'OK'
     : 'WRITE_FAILED'
+}
+
+/**
+ * Removes a human's normal or burst reaction membership, emitting a scoped
+ * native MESSAGE_REACTION_REMOVE when a row was removed. Discord documents no
+ * REST route that removes only a burst reaction, so this control is the
+ * fixture's way to end one. Target rules match {@link injectTestReaction}.
+ * @param db - Database
+ * @param channelId - Existing guild text or announcement channel
+ * @param messageId - Existing public message in that channel
+ * @param userId - Registered non-bot member of the channel's guild
+ * @param emoji - Validated single Unicode emoji sequence
+ * @param burst - Remove the burst membership instead of the normal one
+ * @returns Success (including when nothing was held) or a scoped error
+ */
+export function removeTestReaction(
+  db: Database,
+  channelId: string,
+  messageId: string,
+  userId: string,
+  emoji: string,
+  burst: boolean
+): 'OK' | TestReactionTargetError {
+  const target = resolveTestReactionTarget(db, channelId, messageId, userId)
+  if (typeof target === 'string') return target
+  removeReaction(db, messageId, userId, emoji, burst, target.scope)
+  return 'OK'
 }
 
 /** Request body accepted by POST /_test/interactions */

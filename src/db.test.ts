@@ -567,6 +567,82 @@ describe('initializeDatabase', () => {
     }
   })
 
+  it('migrates legacy reactions to normal memberships that allow a burst twin', () => {
+    // A database created before burst support: one membership per
+    // message/user/emoji with no reaction type.
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-db-'))
+    const dbPath = path.join(dir, 'legacy.db')
+    try {
+      initializeDatabase(dbPath).close()
+      const legacy = new BetterSqlite3(dbPath)
+      legacy.exec(`
+        PRAGMA foreign_keys = OFF;
+        INSERT INTO messages (id, channel_id, author_id, content)
+          VALUES ('m1', 'c1', 'u2', 'legacy');
+        DROP TABLE reactions;
+        CREATE TABLE reactions (
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+          user_id    TEXT NOT NULL,
+          emoji      TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE (message_id, user_id, emoji)
+        );
+        INSERT INTO reactions (id, message_id, user_id, emoji, created_at)
+          VALUES (7, 'm1', 'u1', '🐝', '2024-01-01 00:00:00');
+      `)
+      legacy.close()
+
+      db = initializeDatabase(dbPath)
+      expect(
+        db
+          .prepare(
+            'SELECT id, user_id, emoji, type, burst_colors, created_at FROM reactions'
+          )
+          .all()
+      ).toEqual([
+        {
+          id: 7,
+          user_id: 'u1',
+          emoji: '🐝',
+          type: 0,
+          burst_colors: '[]',
+          created_at: '2024-01-01 00:00:00',
+        },
+      ])
+      const insert = db.prepare(
+        'INSERT OR IGNORE INTO reactions (message_id, user_id, emoji, type) VALUES (?, ?, ?, ?)'
+      )
+      expect(insert.run('m1', 'u1', '🐝', 1).changes).toBe(1)
+      expect(insert.run('m1', 'u1', '🐝', 1).changes).toBe(0)
+      expect(() =>
+        db
+          .prepare(
+            'INSERT INTO reactions (message_id, user_id, emoji, type) VALUES (?, ?, ?, ?)'
+          )
+          .run('m1', 'u1', '🐝', 2)
+      ).toThrow(/CHECK/)
+      expect(
+        db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_reactions_message'"
+          )
+          .get()
+      ).toBeDefined()
+      db.close()
+
+      // Reopening is idempotent and keeps both memberships.
+      db = initializeDatabase(dbPath)
+      expect(
+        db.prepare('SELECT type FROM reactions ORDER BY id').all()
+      ).toEqual([{ type: 0 }, { type: 1 }])
+      db.prepare('DELETE FROM messages').run()
+      expect(db.prepare('SELECT * FROM reactions').all()).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('migrates guild AFK and voice channel columns onto a legacy database', () => {
     // Simulate a database file created before voice settings existed.
     const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-db-'))

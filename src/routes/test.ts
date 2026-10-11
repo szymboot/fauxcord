@@ -6,6 +6,7 @@
 
 import type { GatewayEventControls } from '../gateway/event-controls'
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 import { createAuditLogResponseRoutes } from './audit-log-responses'
 import { createTestVoiceStateRoutes } from './test-voice-states'
 import { generateSnowflake } from '../snowflake'
@@ -35,6 +36,8 @@ import {
   injectTestMessage,
   editTestMessage,
   injectTestReaction,
+  removeTestReaction,
+  type TestReactionTargetError,
   createTestInteraction,
   SetupValidationError,
 } from '../services/test-control'
@@ -50,7 +53,10 @@ import { validateGuildMemberUpdate } from '../validators/guild'
 import { validateMemberDateFixture } from '../validators/member-dates'
 import { validateTestUserGlobalName } from '../validators/test-user-global-name'
 import { validateRestFault } from '../validators/rest-fault'
-import { validateTestReaction } from '../validators/test-reaction'
+import {
+  validateTestReaction,
+  validateTestReactionRemoval,
+} from '../validators/test-reaction'
 import { validateMessageCreate } from '../validators/message'
 import {
   validateMessageStickers,
@@ -63,6 +69,59 @@ import {
   getRestFault,
   deleteRestFault,
 } from '../services/rest-faults'
+
+/**
+ * Maps a human reaction target rejection to its Discord-style response.
+ * @param c - Hono context
+ * @param error - Rejection from the reaction target resolution
+ * @returns JSON error response
+ */
+function testReactionTargetErrorResponse(
+  c: Context,
+  error: TestReactionTargetError
+): Response {
+  switch (error) {
+    case 'UNKNOWN_CHANNEL': {
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_CHANNEL, 'Unknown Channel', 404)
+          .body,
+        404
+      )
+    }
+    case 'UNKNOWN_MESSAGE': {
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_MESSAGE, 'Unknown Message', 404)
+          .body,
+        404
+      )
+    }
+    case 'UNKNOWN_USER': {
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404).body,
+        404
+      )
+    }
+    case 'UNKNOWN_MEMBER': {
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member', 404)
+          .body,
+        404
+      )
+    }
+    case 'BOT_USER': {
+      return c.json({ message: 'User must not be a bot', code: 0 }, 400)
+    }
+    case 'UNSUPPORTED_SCOPE': {
+      return c.json(
+        {
+          message: 'Reaction requires a guild text or announcement channel',
+          code: 0,
+        },
+        400
+      )
+    }
+  }
+}
 
 /**
  * Creates the test control API routes.
@@ -632,68 +691,50 @@ export function createTestRoutes(
       if (Object.keys(errors).length > 0) {
         return c.json(validationError(errors).body, 400)
       }
-      // The validator above guarantees both fields are strings.
+      // The validator above guarantees the field types.
+      const burst = payload.burst === true
       const result = injectTestReaction(
         db,
         channelId,
         messageId,
         payload.user_id as string,
-        payload.emoji as string
+        payload.emoji as string,
+        {
+          burst,
+          burstColors: burst
+            ? ((payload.burst_colors as string[] | undefined) ?? [])
+            : [],
+        }
       )
-      switch (result) {
-        case 'OK': {
-          return c.body(null, 204)
-        }
-        case 'UNKNOWN_CHANNEL': {
-          return c.json(
-            discordError(
-              DiscordErrorCode.UNKNOWN_CHANNEL,
-              'Unknown Channel',
-              404
-            ).body,
-            404
-          )
-        }
-        case 'UNKNOWN_MESSAGE': {
-          return c.json(
-            discordError(
-              DiscordErrorCode.UNKNOWN_MESSAGE,
-              'Unknown Message',
-              404
-            ).body,
-            404
-          )
-        }
-        case 'UNKNOWN_USER': {
-          return c.json(
-            discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404)
-              .body,
-            404
-          )
-        }
-        case 'UNKNOWN_MEMBER': {
-          return c.json(
-            discordError(DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member', 404)
-              .body,
-            404
-          )
-        }
-        case 'BOT_USER': {
-          return c.json({ message: 'User must not be a bot', code: 0 }, 400)
-        }
-        case 'UNSUPPORTED_SCOPE': {
-          return c.json(
-            {
-              message: 'Reaction requires a guild text or announcement channel',
-              code: 0,
-            },
-            400
-          )
-        }
-        case 'WRITE_FAILED': {
-          return c.json({ message: 'Internal Server Error', code: 0 }, 500)
-        }
+      if (result === 'OK') return c.body(null, 204)
+      return result === 'WRITE_FAILED'
+        ? c.json({ message: 'Internal Server Error', code: 0 }, 500)
+        : testReactionTargetErrorResponse(c, result)
+    }
+  )
+
+  // DELETE /_test/channels/:channelId/messages/:messageId/reactions — Human removal
+  app.delete(
+    '/_test/channels/:channelId/messages/:messageId/reactions',
+    async (c) => {
+      const { channelId, messageId } = c.req.param()
+      const payload = await parseJsonBody(c)
+      const errors = validateTestReactionRemoval(payload)
+      if (Object.keys(errors).length > 0) {
+        return c.json(validationError(errors).body, 400)
       }
+      // The validator above guarantees the field types.
+      const result = removeTestReaction(
+        db,
+        channelId,
+        messageId,
+        payload.user_id as string,
+        payload.emoji as string,
+        payload.burst === true
+      )
+      return result === 'OK'
+        ? c.body(null, 204)
+        : testReactionTargetErrorResponse(c, result)
     }
   )
 
