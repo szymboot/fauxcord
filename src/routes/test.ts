@@ -690,6 +690,13 @@ export function createTestRoutes(
             400
           )
         }
+        case 'UNKNOWN_EMOJI': {
+          return c.json(
+            discordError(DiscordErrorCode.UNKNOWN_EMOJI, 'Unknown Emoji', 400)
+              .body,
+            400
+          )
+        }
         case 'WRITE_FAILED': {
           return c.json({ message: 'Internal Server Error', code: 0 }, 500)
         }

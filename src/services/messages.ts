@@ -12,6 +12,11 @@ import { gatewayBus } from '../gateway/bus'
 import { getGuildMember } from './guild-members'
 import { getUser, type UserObject } from './users'
 import { getMessageStickerItems } from './message-stickers'
+import {
+  CUSTOM_KEY_PREFIX,
+  reactionEmojiFromKey,
+  type ReactionEmoji,
+} from './reaction-emoji'
 // Used for compile-time type drift detection.
 // When Renovate bumps discord-api-types, `pnpm lint:tsc` will fail if the
 // safe-field subset of MessageResponse is renamed or retyped upstream.
@@ -97,8 +102,13 @@ interface AttachmentRow {
 
 /** Reaction aggregation record type retrieved from the DB */
 interface ReactionAggRow {
+  /** Persisted reaction key (Unicode sequence or `custom:<id>`) */
   emoji: string
   count: number
+  /** Current custom emoji name (null for Unicode or unavailable emoji) */
+  emoji_name?: string | null
+  /** Current custom emoji animated flag (null for Unicode or unavailable) */
+  emoji_animated?: number | null
 }
 
 /** Reaction object */
@@ -119,13 +129,8 @@ export interface ReactionObject {
   me: boolean
   /** Whether the requesting user super-reacted (always false in the mock) */
   me_burst: boolean
-  /** Emoji information */
-  emoji: {
-    /** Custom emoji ID (null for standard emoji) */
-    id: string | null
-    /** Emoji string (Unicode emoji or custom emoji name) */
-    name: string
-  }
+  /** Emoji information (custom emoji carry their ID and animated flag) */
+  emoji: ReactionEmoji
   /** Hex colors used for super reactions (always empty in the mock) */
   burst_colors: string[]
 }
@@ -282,10 +287,12 @@ export function toMessageObject(
         count_details: { burst: 0, normal: r.count },
         me: false, // Always false in the mock (the requesting user is not identified)
         me_burst: false, // Super reactions are not simulated
-        emoji: {
-          id: null, // Always null because these are standard emoji
-          name: r.emoji,
-        },
+        emoji: reactionEmojiFromKey(
+          r.emoji,
+          typeof r.emoji_name === 'string'
+            ? { name: r.emoji_name, animated: r.emoji_animated === 1 }
+            : undefined
+        ),
         burst_colors: [],
       })),
     }),
@@ -324,7 +331,11 @@ export function hydrateMessageRow(
 
   const reactions = db
     .prepare(
-      'SELECT emoji, COUNT(*) as count FROM reactions WHERE message_id = ? GROUP BY emoji'
+      `SELECT r.emoji, COUNT(*) as count, e.name AS emoji_name,
+         e.animated AS emoji_animated
+       FROM reactions r
+       LEFT JOIN emojis e ON r.emoji = '${CUSTOM_KEY_PREFIX}' || e.id
+       WHERE r.message_id = ? GROUP BY r.emoji`
     )
     .all(row.id) as ReactionAggRow[]
 

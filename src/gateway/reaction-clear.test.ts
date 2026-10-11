@@ -15,6 +15,7 @@ const BOT = '111111111111111111'
 const HUMAN = '888888888888888888'
 const SECOND = '999999999999999999'
 const CUSTOM = 'party:123456789012345678'
+const CUSTOM_ID = '123456789012345678'
 const ROOT = '/_test/gateway-event-controls'
 const EVENTS = ['MESSAGE_REACTION_REMOVE_ALL', 'MESSAGE_REACTION_REMOVE_EMOJI']
 
@@ -121,7 +122,12 @@ describe('native reaction-clear REST and Gateway contract', () => {
     expect(ack.op).toBe(11)
   }
 
-  /** Seeds multiple users through the same reaction storage as REST. */
+  /** Maps a REST emoji to the stable key persisted by the reaction service. */
+  function storedKey(emoji: string): string {
+    return emoji === CUSTOM ? `custom:${CUSTOM_ID}` : emoji
+  }
+
+  /** Seeds multiple users with the stable keys REST persists. */
   function populate(mid = message, emojis = ['🐝', '👍', CUSTOM]): void {
     for (const user of [HUMAN, SECOND]) {
       server.db
@@ -132,7 +138,7 @@ describe('native reaction-clear REST and Gateway contract', () => {
           .prepare(
             'INSERT INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?)'
           )
-          .run(mid, user, emoji)
+          .run(mid, user, storedKey(emoji))
       }
     }
   }
@@ -163,7 +169,7 @@ describe('native reaction-clear REST and Gateway contract', () => {
         ...(emoji !== undefined && {
           emoji:
             emoji === CUSTOM
-              ? { id: '123456789012345678', name: 'party' }
+              ? { id: CUSTOM_ID, name: 'party', animated: false }
               : { id: null, name: emoji },
         }),
       },
@@ -180,6 +186,11 @@ describe('native reaction-clear REST and Gateway contract', () => {
     base = server.url.replace('ws://', 'http://')
     seedBot(server.db, TOKEN, BOT)
     guild = seedGuild(server.db, TOKEN)
+    server.db
+      .prepare(
+        "INSERT INTO emojis (id, guild_id, name, user_id) VALUES (?, ?, 'party', NULL)"
+      )
+      .run(CUSTOM_ID, guild)
     channel = seedChannel(server.db, guild)
     message = seedMessage(server.db, channel, BOT, TOKEN)
   })
@@ -207,8 +218,14 @@ describe('native reaction-clear REST and Gateway contract', () => {
         expect(await response.text()).toBe('')
         if (emoji === undefined) expect(rows()).toEqual([])
         else {
-          expect(rows()).not.toContainEqual({ user_id: HUMAN, emoji })
-          expect(rows()).not.toContainEqual({ user_id: SECOND, emoji })
+          expect(rows()).not.toContainEqual({
+            user_id: HUMAN,
+            emoji: storedKey(emoji),
+          })
+          expect(rows()).not.toContainEqual({
+            user_id: SECOND,
+            emoji: storedKey(emoji),
+          })
           expect(rows()).toContainEqual({ user_id: HUMAN, emoji: '👍' })
         }
         await clearEvent(client, emoji)
@@ -394,8 +411,14 @@ describe('native reaction-clear REST and Gateway contract', () => {
       expect(event.state).toBe('held')
       expect(rows()).toHaveLength(emoji === undefined ? 0 : 4)
       if (emoji !== undefined) {
-        expect(rows()).not.toContainEqual({ user_id: HUMAN, emoji })
-        expect(rows()).not.toContainEqual({ user_id: SECOND, emoji })
+        expect(rows()).not.toContainEqual({
+          user_id: HUMAN,
+          emoji: storedKey(emoji),
+        })
+        expect(rows()).not.toContainEqual({
+          user_id: SECOND,
+          emoji: storedKey(emoji),
+        })
       }
       expect(event.envelope).toEqual({
         op: 0,
@@ -406,7 +429,7 @@ describe('native reaction-clear REST and Gateway contract', () => {
           channel_id: channel,
           message_id: message,
           ...(emoji !== undefined && {
-            emoji: { id: '123456789012345678', name: 'party' },
+            emoji: { id: CUSTOM_ID, name: 'party', animated: false },
           }),
         },
       })

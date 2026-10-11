@@ -113,6 +113,10 @@ export function createGuildEmojiRoutes(db: Database): Hono<AppEnv> {
       name: validatedPayload.name,
       userId: bot?.user_id ?? null,
       roles: payload.roles,
+      // Discord marks emoji uploaded as GIF images as animated.
+      animated:
+        typeof payload.image === 'string' &&
+        payload.image.startsWith('data:image/gif'),
     })
     return c.json(emoji, 201)
   })

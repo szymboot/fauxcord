@@ -196,7 +196,11 @@ describe('Channel Reactions API', () => {
         )
         db.prepare(
           'INSERT INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?)'
-        ).run(messageId, reactor, emoji)
+        ).run(
+          messageId,
+          reactor,
+          emoji.includes(':') ? `custom:${emoji.split(':', 2)[1]}` : emoji
+        )
         const url = `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`
 
         for (const query of ['', '?type=0', '?type=1', '?type=0']) {

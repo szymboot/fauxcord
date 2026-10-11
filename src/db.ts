@@ -9,6 +9,7 @@ import {
   recoverRestFaultOutcomes,
 } from './services/rest-faults'
 import { getRestPageHolds } from './services/rest-page-holds'
+import { parseReactionEmoji, reactionEmojiKey } from './services/reaction-emoji'
 import BetterSqlite3 from 'better-sqlite3'
 import type { Database } from 'better-sqlite3'
 
@@ -94,6 +95,47 @@ function migrateChannelsFeatureColumns(db: Database): void {
       db.exec(`ALTER TABLE channels ADD COLUMN ${name} ${ddl}`)
     }
   }
+}
+
+/**
+ * Adds the animated flag to guild emojis created before custom reaction support.
+ * @param db - Database instance
+ */
+function migrateEmojiAnimated(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(emojis)').all() as {
+    name: string
+  }[]
+  if (columns.every((column) => column.name !== 'animated')) {
+    db.exec('ALTER TABLE emojis ADD COLUMN animated INTEGER NOT NULL DEFAULT 0')
+  }
+}
+
+/**
+ * Rewrites legacy custom reaction keys (`name:id` / `a:name:id`) to the stable
+ * `custom:<id>` key, merging duplicates of the same user and emoji.
+ * @param db - Database instance
+ */
+function migrateCustomReactionKeys(db: Database): void {
+  const rows = db
+    .prepare("SELECT id, emoji FROM reactions WHERE emoji LIKE '%:%'")
+    .all() as { id: number; emoji: string }[]
+  const update = db.prepare(
+    'UPDATE OR IGNORE reactions SET emoji = ? WHERE id = ?'
+  )
+  const remove = db.prepare('DELETE FROM reactions WHERE id = ?')
+  db.transaction(() => {
+    for (const row of rows) {
+      const parsed = parseReactionEmoji(row.emoji)
+      const key = reactionEmojiKey(parsed)
+      // Compare exactly in JS: SQLite LIKE is case-insensitive, so a legacy
+      // `Custom:<id>` key must not be mistaken for a stable `custom:<id>` one.
+      if (parsed.id === null || key === row.emoji) continue
+      // A no-op update means the stable key already exists for that user.
+      if (update.run(key, row.id).changes === 0) {
+        remove.run(row.id)
+      }
+    }
+  })()
 }
 
 /**
@@ -437,6 +479,7 @@ export function initializeDatabase(dbPath: string): Database {
       name        TEXT NOT NULL,
       user_id     TEXT REFERENCES users(id) ON DELETE SET NULL,
       roles       TEXT NOT NULL DEFAULT '[]',
+      animated    INTEGER NOT NULL DEFAULT 0,
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -1036,6 +1079,8 @@ export function initializeDatabase(dbPath: string): Database {
   `)
 
   migrateUserGlobalName(db)
+  migrateEmojiAnimated(db)
+  migrateCustomReactionKeys(db)
   migrateMemberTimeout(db)
   migrateMemberPremiumSince(db)
   migrateChannelsThreadColumns(db)

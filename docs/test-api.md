@@ -1693,12 +1693,22 @@ curl -X POST http://localhost:3000/_test/channels/333333333333333333/messages/ME
 ```
 
 The JSON object requires a nonempty string `user_id` and an `emoji` string
-containing exactly one Unicode RGI emoji sequence supported by the pinned Node
-runtime. Examples include `🐝`, `👍🏽`, `👩‍💻`, `🇵🇱`, `1️⃣`, and `❤️`. Send the
-literal emoji in JSON; do not URL-encode it. Other fields are ignored. Custom
-emoji IDs, `name:id` strings, arbitrary text, multiple emoji in one string, and
-super reactions are unsupported. DMs, group DMs, threads, voice, forum, and other
+containing either exactly one Unicode RGI emoji sequence supported by the pinned
+Node runtime (for example `🐝`, `👍🏽`, `👩‍💻`, `🇵🇱`, `1️⃣`, and `❤️`) or a
+custom guild emoji in Discord's reaction form `name:id`, or animated
+`a:name:id` (for example `party:123456789012345678`). Send the literal value in
+JSON; do not URL-encode it. Other fields are ignored. Bare IDs, `<:name:id>`
+mention syntax, arbitrary text, multiple emoji in one string, and super
+reactions are unsupported. DMs, group DMs, threads, voice, forum, and other
 channel types are outside this producer's scope. Ephemeral messages are excluded.
+
+A custom emoji must exist in the source channel's guild; otherwise the request
+fails with `400 Unknown Emoji` (code `10014`), as Discord does. Only the ID
+identifies the emoji: the `name` part and the `a:` prefix may be stale or
+different (for example after a rename), and the payload always uses the
+emoji's current name and animated flag. See
+[Custom guild emoji reactions](#custom-guild-emoji-reactions) for seeding,
+renaming and the native REST routes.
 
 Returns `204 No Content`, including repeated adds of the same user/message/emoji.
 The shared reaction service inserts one row per unique tuple; a duplicate adds
@@ -1723,7 +1733,9 @@ Connect the guild's setup bot and wait for Gateway READY before adding reactions
 Sessions need the Guild Message Reactions intent (`1024`). Each new row emits
 native `MESSAGE_REACTION_ADD` through the existing bus, dispatch, capture and
 resume pipeline, containing `user_id`, `guild_id`, `channel_id`, `message_id`,
-`emoji: {"id": null, "name": "🐝"}`, the existing reactor's full `member` data,
+`emoji: {"id": null, "name": "🐝"}` (custom:
+`{"id": "123456789012345678", "name": "party", "animated": false}`), the
+existing reactor's full `member` data,
 `message_author_id`, `burst: false`, `type: 0`, and `burst_colors: []`. Delivery
 is limited to that guild's setup token and bot ID in the originating database,
 including all matching sessions with the intent. Raw and `Bot `-prefixed IDENTIFY
@@ -1740,11 +1752,13 @@ Rejected requests produce no reaction row, membership changes or add event:
 | `404` / `10008` | Unknown/deleted/ephemeral message, or message belongs to another channel.                                                                    |
 | `404` / `10013` | Unknown user.                                                                                                                                |
 | `404` / `10007` | Human is not a member of the source guild.                                                                                                   |
+| `400` / `10014` | Custom emoji does not exist in the source guild.                                                                                             |
 | `400` / `0`     | Actor is a bot, or channel/setup scope is unsupported.                                                                                       |
 | `500` / `0`     | Reaction persistence failed; no add was emitted.                                                                                             |
 
 Validation runs before target resolution. Target resolution checks channel and
-supported guild/setup scope, message, user, bot flag, then membership. The
+supported guild/setup scope, message, user, bot flag, membership, then custom
+emoji existence. The
 operation installs no pending producer and needs no fixture-specific cleanup.
 Ordinary single-user removal, emoji clear and message reaction clear remove
 these rows. Re-adding a removed reaction produces a new add event. Reaction-clear
@@ -1788,6 +1802,61 @@ Reactions intent:
 
 Reaction-user reads list the bot with `bot: true`. Duplicate adds and removals of
 absent reactions emit nothing.
+
+---
+
+## Custom guild emoji reactions
+
+Reactions with custom guild emoji work through the human reaction producer
+above and through every native reaction route. Address a custom emoji as
+`name:id`, or animated `a:name:id`, URL-encoded in REST paths (for example
+`party%3A123456789012345678`):
+
+| Route | Effect |
+| ----- | ------ |
+| `PUT /channels/:cid/messages/:mid/reactions/:emoji/@me` | Bot adds its reaction; emits `MESSAGE_REACTION_ADD`. |
+| `DELETE /channels/:cid/messages/:mid/reactions/:emoji/@me` | Bot removes its reaction; emits `MESSAGE_REACTION_REMOVE`. |
+| `DELETE /channels/:cid/messages/:mid/reactions/:emoji/:userId` | Removes one user's reaction; emits `MESSAGE_REACTION_REMOVE`. |
+| `GET /channels/:cid/messages/:mid/reactions/:emoji` | Lists reaction users (`limit`, `after`, `type` as for Unicode). |
+| `DELETE /channels/:cid/messages/:mid/reactions/:emoji` | Clears the emoji; emits `MESSAGE_REACTION_REMOVE_EMOJI`. |
+
+**Identity.** A custom reaction is identified by the emoji ID alone. The name
+and `a:` prefix in a request are not compared, so `party:ID`, `fiesta:ID` and
+`a:party:ID` all address the same reaction, count once per user, and appear as
+one entry in message `reactions`. This matches bots that key custom reactions
+by ID so identity survives renames. Unicode emoji keep their exact-string
+behavior. Reactions persisted by older Fauxcord versions under `name:id` are
+migrated to ID identity at startup.
+
+**Emoji objects.** Gateway reaction events and message `reactions[].emoji`
+carry `{ "id": "<id>", "name": "<current name>", "animated": <bool> }` for
+custom emoji, using the guild emoji's current name and animated flag. Unicode
+emoji stay `{ "id": null, "name": "🐝" }`. If the guild emoji has been deleted,
+message `reactions[].emoji.name` is `null` (Discord's "emoji data unavailable"
+form), and removal/clear events fall back to the name and `a:` prefix from the
+request path.
+
+**Unknown emoji.** Adding a custom reaction fails with `400 Unknown Emoji`
+(code `10014`) and no state or event when the emoji does not exist. The human
+producer requires the emoji in the message's guild. `PUT .../@me` accepts an
+emoji from any guild owned by the bot's setup token or in which the bot user is
+a member (only existence is checked for unregistered tokens with
+`DISABLE_AUTH`). Removal, listing and clear routes do not check existence, so
+reactions of a deleted emoji can still be cleaned up.
+
+**Seeding emoji.** Create guild emoji with the native
+`POST /guilds/:guildId/emojis` (`{"name": "party", "image": "data:image/png;base64,..."}`).
+Creation is a silent seed: it emits no Gateway event. An `image` data URI with
+type `image/gif` creates an animated emoji (`animated: true`). Use the returned
+`id` in reaction requests.
+
+**Renaming emoji.** `PATCH /guilds/:guildId/emojis/:emojiId` with
+`{"name": "fiesta"}` keeps the ID, so existing reactions are unaffected, and
+subsequent reaction events, reaction-user reads and message `reactions` use the
+new name. Every successful modify emits native `GUILD_EMOJIS_UPDATE`
+(`{"guild_id": "...", "emojis": [<full guild emoji list>]}`) to the guild
+setup's bot sessions that have the Guild Expressions intent (`8`). Emoji
+creation and deletion remain silent.
 
 ---
 
@@ -2165,10 +2234,11 @@ emits one `MESSAGE_REACTION_REMOVE_ALL` with `channel_id`, `message_id` and
 `guild_id` for guild messages. `DELETE .../reactions/:emoji` clears that emoji
 for every user and emits one `MESSAGE_REACTION_REMOVE_EMOJI` with the same IDs
 plus `emoji`: `{ "id": null, "name": "🐝" }` for Unicode, or
-`{ "id": "123456789012345678", "name": "party" }` for a stored REST key
-`party:123456789012345678`. URL-encode the emoji path segment. The existing
-storage matches emoji keys exactly. Both routes work under `/api/v10`, `/api`
-and bare paths.
+`{ "id": "123456789012345678", "name": "party", "animated": false }` for a
+custom emoji addressed as `party:123456789012345678` (see
+[Custom guild emoji reactions](#custom-guild-emoji-reactions)). URL-encode the
+emoji path segment. Unicode keys match exactly; custom emoji match by ID. Both
+routes work under `/api/v10`, `/api` and bare paths.
 
 Clear dispatches follow persisted guild setup ownership, scoped to the app's
 database, bot ID and exact setup token, with Guild Message Reactions intent.

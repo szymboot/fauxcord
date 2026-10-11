@@ -529,6 +529,83 @@ describe('initializeDatabase', () => {
     }
   })
 
+  it('migrates legacy emojis to a non-animated flag on reopening', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-emoji-db-'))
+    const dbPath = path.join(dir, 'legacy.db')
+    try {
+      const legacy = new BetterSqlite3(dbPath)
+      legacy.exec(`
+        CREATE TABLE emojis (
+          id TEXT PRIMARY KEY,
+          guild_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          user_id TEXT,
+          roles TEXT NOT NULL DEFAULT '[]',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO emojis (id, guild_id, name) VALUES ('1', '2', 'legacy');
+      `)
+      legacy.close()
+      db = initializeDatabase(dbPath)
+      expect(
+        db.prepare('SELECT name, animated FROM emojis WHERE id = ?').get('1')
+      ).toEqual({ name: 'legacy', animated: 0 })
+    } finally {
+      closeDatabase(db)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rewrites legacy custom reaction keys to stable IDs and merges duplicates', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-reaction-db-'))
+    const dbPath = path.join(dir, 'legacy.db')
+    try {
+      db = initializeDatabase(dbPath)
+      const token = testHelpers.seedBot(db, 'Bot legacy-reactions')
+      const guild = testHelpers.seedGuild(db, token)
+      const channel = testHelpers.seedChannel(db, guild)
+      const message = testHelpers.seedMessage(
+        db,
+        channel,
+        '111111111111111111',
+        token
+      )
+      const insert = db.prepare(
+        'INSERT INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?)'
+      )
+      for (const [user, emoji] of [
+        ['1', 'party:123'],
+        ['1', 'a:fiesta:123'],
+        ['2', 'a:fiesta:123'],
+        ['1', '🐝'],
+        ['1', 'custom:456'],
+        ['1', 'Custom:789'],
+        ['2', 'CUSTOM:456'],
+      ]) {
+        insert.run(message, user, emoji)
+      }
+      closeDatabase(db)
+      db = initializeDatabase(dbPath)
+      expect(
+        db
+          .prepare(
+            'SELECT user_id, emoji FROM reactions ORDER BY user_id, emoji'
+          )
+          .all()
+      ).toEqual([
+        { user_id: '1', emoji: 'custom:123' },
+        { user_id: '1', emoji: 'custom:456' },
+        { user_id: '1', emoji: 'custom:789' },
+        { user_id: '1', emoji: '🐝' },
+        { user_id: '2', emoji: 'custom:123' },
+        { user_id: '2', emoji: 'custom:456' },
+      ])
+    } finally {
+      closeDatabase(db)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('migrates thread columns onto a legacy channels table that predates thread support', () => {
     // Simulate a database file created before thread support: a `channels`
     // table without any of the thread-related columns.
