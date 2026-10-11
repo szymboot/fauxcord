@@ -749,9 +749,12 @@ async function runCleanupSteps(
 /**
  * Starts a test server that handles WebSocket upgrades over a real socket.
  * Uses an in-memory DB and lets the OS assign a port via port 0.
+ * @param options - Optional Gateway heartbeat interval (ms) for HELLO
  * @returns The db, the connection URL, and a close function for teardown
  */
-export async function createTestGatewayServer(): Promise<{
+export async function createTestGatewayServer(
+  options: { heartbeatIntervalMs?: number } = {}
+): Promise<{
   db: Database
   url: string
   sessionManager: SessionManager
@@ -761,6 +764,7 @@ export async function createTestGatewayServer(): Promise<{
   const { app, wss, sessionManager, unsubscribeGateway } = buildApp(db, {
     baseUrl: 'http://localhost:0',
     disableAuth: false,
+    gatewayHeartbeatIntervalMs: options.heartbeatIntervalMs,
   })
 
   const server = await new Promise<ReturnType<typeof serveWithGateway>>(

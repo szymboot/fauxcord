@@ -145,6 +145,7 @@ Notes:
 | `LOG_LEVEL`    | `info`                  | `debug` / `info` / `warn` / `error`            |
 | `DISABLE_AUTH` | `false`                 | `true` accepts any token                       |
 | `LATENCY_MS`   | `0`                     | Artificial latency added to all responses      |
+| `GATEWAY_HEARTBEAT_INTERVAL_MS` | `41250` | Gateway heartbeat interval in HELLO (ms), `100`–`600000`; timeout is 2× |
 | `SEED_FILE`    | _(none)_                | JSON (`{ "bots": [...] }`) loaded at startup — see `seed.example.json` |
 
 ## Gotchas

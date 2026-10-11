@@ -2786,8 +2786,9 @@ the session expired or its missed events can no longer be replayed.
 
 The TTL starts when the rejection is armed and must cover the whole gap until
 the client's RESUME. That includes a zombie's detection delay: DiscordGo needs
-up to two 41.25 s heartbeat intervals, plus its reconnect. The resume trigger
-therefore defaults to `180000` ms and allows up to `300000`.
+up to two heartbeat intervals (2 × 41.25 s by default), plus its reconnect.
+The resume trigger therefore defaults to `180000` ms and allows up to
+`300000`.
 
 Arming requires a registered session of that bot and guild setup. The socket
 may be open, dropped, waiting behind an explicit `disconnect` or silenced as a
@@ -2895,8 +2896,15 @@ The DiscordGo fork used by szymboot (`github.com/0x00-sys/discordgo
 v0.0.0-20260923174158-eda8642daf18`, `wsapi.go` `heartbeat()`) checks on each
 tick whether the previous heartbeat was acknowledged. If it was not, DiscordGo
 closes with `1012` (service restart) and calls `reconnect()`, which RESUMEs.
-With Fauxcord's fixed 41.25 s heartbeat interval, detection therefore takes
-between one and two intervals (about 41–83 s) after the zombie starts.
+Detection therefore takes between one and two heartbeat intervals after the
+zombie starts: about 41–83 s with the default 41.25 s interval.
+
+**Faster detection in tests.** Set the environment variable
+`GATEWAY_HEARTBEAT_INTERVAL_MS` (integer `100`–`600000`, default `41250`) to
+change the `heartbeat_interval` Fauxcord announces in HELLO. Clients
+heartbeat at the announced interval, so with `1000` DiscordGo detects a
+zombie within 1–2 s. The server's heartbeat timeout scales with it (two
+intervals).
 
 ### `POST /_test/gateway-zombie-connections` — Silence one connection
 
@@ -2953,12 +2961,13 @@ RESUMED. Combine with
 instead.
 
 **Heartbeat timeout interaction.** Fauxcord closes a session (`4009`) and
-discards it when no HEARTBEAT arrives for 82.5 s (two intervals). Heartbeats
+discards it when no HEARTBEAT arrives for two heartbeat intervals (82.5 s by
+default). Heartbeats
 on a zombie connection are still received and still re-arm that timeout. Only
 the ACK is withheld, so the server never reaps the session while the client
 keeps heartbeating, however long detection takes. After the client closes the
-socket, the session remains resumable until 82.5 s after the last heartbeat
-the server received. This is at least one interval for a client that detects
+socket, the session remains resumable until two intervals after the last
+heartbeat the server received. This is at least one interval for a client that detects
 on its next tick. A client that stops heartbeating entirely is reaped by the
 timeout: the record becomes `session_lost` and the RESUME gets op 9 `d: false`.
 
@@ -3037,10 +3046,11 @@ timeout: the record becomes `session_lost` and the RESUME gets op 9 `d: false`.
 
 Records are in memory and cleared by `/_test/reset` (all, or the matching
 setup token), `DELETE /_test/setup/:token`, deleting the scoped guild and
-Gateway shutdown. The HELLO heartbeat interval (41.25 s) is fixed, so a
-library's real detection delay applies. Allow for it in test timeouts and use
+Gateway shutdown. A library's real detection delay applies, so allow for it
+in test timeouts (or shorten it with `GATEWAY_HEARTBEAT_INTERVAL_MS`) and use
 `wait_ms` rather than sleeps. Focused real HTTP/WS coverage is in
-`src/gateway/connection-faults.test.ts`.
+`src/gateway/connection-faults.test.ts` and
+`src/gateway/heartbeat-interval.test.ts`.
 
 ---
 

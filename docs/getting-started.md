@@ -330,6 +330,7 @@ Fauxcord's simplified token issuance or Bot permission edits work on Discord.
 | `BASE_URL`     | `http://localhost:3000` | Used to generate attachment URLs                    |
 | `DISABLE_AUTH` | `false`                 | Set `true` to bypass authentication                 |
 | `LATENCY_MS`   | `0`                     | Artificial latency added to all responses (ms)      |
+| `GATEWAY_HEARTBEAT_INTERVAL_MS` | `41250` | Gateway heartbeat interval announced in HELLO (ms); `100`–`600000` |
 | `SEED_FILE`    | _(none)_                | Path to a JSON file loaded automatically at startup |
 
 ---

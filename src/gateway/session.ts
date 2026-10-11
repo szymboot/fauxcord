@@ -5,6 +5,9 @@ import type { GatewayPayload } from './protocol'
 /** Maximum number of events retained in the replay buffer */
 const REPLAY_BUFFER_SIZE = 100
 
+/** Default heartbeat interval (ms) announced in HELLO; matches real Discord. */
+export const DEFAULT_HEARTBEAT_INTERVAL_MS = 41_250
+
 /** Socket write progress of one Gateway frame, never application completion. */
 export type DispatchTransport = 'buffered' | 'queued' | 'sent' | 'failed'
 
@@ -79,6 +82,14 @@ export interface Session {
  * sessions.
  */
 export class SessionManager {
+  /**
+   * @param heartbeatIntervalMs - Heartbeat interval (ms) announced in HELLO;
+   * sessions without a heartbeat for twice this long are closed and removed
+   */
+  constructor(
+    readonly heartbeatIntervalMs: number = DEFAULT_HEARTBEAT_INTERVAL_MS
+  ) {}
+
   /** Test-only interception after native sequencing; true holds the envelope. */
   captureDispatch?: (
     session: Session,

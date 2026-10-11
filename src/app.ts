@@ -66,6 +66,8 @@ export interface BuildAppConfig {
   disableAuth: boolean
   /** Artificial latency (ms) applied to all responses */
   latencyMs?: number
+  /** Gateway heartbeat interval (ms) announced in HELLO; default 41250 */
+  gatewayHeartbeatIntervalMs?: number
   /** Existing no-server WebSocket server when HTTP is bound before assembly. */
   wss?: WebSocketServer
 }
@@ -110,6 +112,7 @@ export function buildApp(
   const gatewayHandler = createGatewayWebSocketHandler(db, {
     baseUrl: config.baseUrl,
     disableAuth: config.disableAuth,
+    heartbeatIntervalMs: config.gatewayHeartbeatIntervalMs,
   })
   const eventControls = new GatewayEventControls(
     db,

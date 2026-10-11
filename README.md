@@ -227,6 +227,7 @@ curl http://localhost:3000/_test/messages/1234567890123456789
 | `LOG_LEVEL`    | `info`                  | Log level (`debug` / `info` / `warn` / `error`)         |
 | `DISABLE_AUTH` | `false`                 | Set to `true` to accept any token                       |
 | `LATENCY_MS`   | `0`                     | Artificial latency added to all responses (ms)          |
+| `GATEWAY_HEARTBEAT_INTERVAL_MS` | `41250` | Gateway heartbeat interval announced in HELLO (ms); `100`–`600000` |
 | `SEED_FILE`    | _(none)_                | Path to a JSON file loaded automatically at startup     |
 
 ### Using SEED_FILE

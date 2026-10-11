@@ -377,12 +377,9 @@ describe('HEARTBEAT', () => {
     ws.close()
   })
 
-  // The 4009 (SessionTimedOut) close path requires HEARTBEAT_TIMEOUT_MS
-  // (~82.5s) of real inactivity, which is impractical for a real-socket test.
-  // vi.useFakeTimers() is not used here because this suite drives an actual
-  // TCP/WebSocket connection (via the `ws` package and Node's HTTP server),
-  // and faking timers would also stall the network I/O the test depends on,
-  // making the test flaky or hang rather than deterministic.
+  // The 4009 (SessionTimedOut) close path is covered with a short configured
+  // heartbeat interval in heartbeat-interval.test.ts; the default (~82.5s
+  // timeout) is impractical for a real-socket test.
 })
 
 describe('Intent filtering', () => {

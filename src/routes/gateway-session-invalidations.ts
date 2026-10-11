@@ -40,7 +40,7 @@ function validateRequest(
   const trigger = data.trigger === undefined ? 'immediate' : data.trigger
   if (typeof trigger !== 'string' || !TRIGGERS.has(trigger)) return undefined
   // An armed rejection must outlive a client's zombie detection (DiscordGo:
-  // up to two 41.25 s heartbeat intervals) plus its reconnect.
+  // up to two heartbeat intervals, 41.25 s each by default) plus its reconnect.
   const limits = trigger as InvalidationTrigger
   const ttlMs = data.ttl_ms === undefined ? DEFAULT_TTL_MS[limits] : data.ttl_ms
   const {
