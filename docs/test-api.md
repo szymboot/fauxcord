@@ -3860,12 +3860,17 @@ buffer, so a client that was disconnected receives them on `RESUME`.
 
 Each Fauxcord guild belongs to exactly one setup (`guilds.bot_token`), and that
 ownership is the **fixture lifetime**: the guild, its channels, roles, messages,
-human memberships, voice states, bans and test controls live until the explicit
-`DELETE /guilds/:guildId`, `DELETE /_test/setup/:token` or `POST /_test/reset`
-(cleanup stays silent). The bot's **membership** is separate: leaving, a kick
-or a ban only deletes the bot's own membership (and connected voice state),
-records a ban when applicable, and detaches the bot from the guild. A real bot
-leaving does not destroy the server, so neither does Fauxcord.
+human memberships, voice states and bans live until the guild is deleted
+explicitly (`DELETE /guilds/:guildId`) or its setup is deleted
+(`DELETE /_test/setup/:token`); both are destructive and silent for detached
+guilds. `POST /_test/reset` is a selective, silent cleanup instead: it keeps
+guilds, channels, members, bans and bot registrations (and therefore a
+detached guild and its detached state) and only clears posted data and control
+records. It neither deletes nor reattaches a guild the bot left. The bot's
+**membership** is separate: leaving, a kick or a ban only deletes the bot's own
+membership (and connected voice state), records a ban when applicable, and
+detaches the bot from the guild. A real bot leaving does not destroy the
+server, so neither does Fauxcord.
 
 After the bot is detached:
 
