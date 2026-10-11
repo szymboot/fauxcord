@@ -12,10 +12,22 @@ import {
   getChannel,
   updateChannel,
   deleteChannel,
-  type ChannelUpdatePayload,
+  isVoiceCapableChannelType,
+  type ChannelUpdatePayload as ValidatedChannelUpdate,
 } from '../services/channels'
+import { listVoiceRegions } from '../services/catalog'
 import { getThread } from '../services/threads'
-import { validateChannelUpdate } from '../validators/channel'
+import {
+  bitrateTooHigh,
+  isStageBitrateTooHigh,
+  normalizeVoiceChannelSettings,
+  parseChannelType,
+  pickVoiceChannelSettings,
+  validateChannelTypeChange,
+  validateChannelUpdate,
+  validateVoiceChannelSettings,
+  type ChannelUpdatePayload,
+} from '../validators/channel'
 import type { AppEnv } from '../middleware/auth'
 import { requireEntity, parseJsonBody } from '../lib/route-helpers'
 import { createChannelPinRoutes } from './channel-pins'
@@ -66,14 +78,44 @@ export function createChannelRoutes(
     const { channelId } = c.req.param()
     const payload = (await parseJsonBody(c)) as ChannelUpdatePayload
 
-    const errors = validateChannelUpdate(payload)
+    const current = getChannel(db, channelId)
+    // Discord applies voice settings to voice and stage channels only.
+    const voice = current !== null && isVoiceCapableChannelType(current.type)
+    const guild = current?.guild_id
+      ? (db
+          .prepare('SELECT premium_tier FROM guilds WHERE id = ?')
+          .get(current.guild_id) as { premium_tier: number } | undefined)
+      : undefined
+    const parsedType = parseChannelType(payload.type)
+    const errors = {
+      ...validateChannelUpdate(payload),
+      ...parsedType.errors,
+      ...(current && validateChannelTypeChange(current.type, parsedType.type)),
+      ...(voice &&
+        validateVoiceChannelSettings(
+          payload,
+          current.type,
+          guild?.premium_tier ?? 0,
+          listVoiceRegions().map((region) => region.id)
+        )),
+    }
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
+    }
+    if (voice && isStageBitrateTooHigh(payload.bitrate, current.type)) {
+      return c.json(bitrateTooHigh().body, 400)
     }
 
     const updated = requireEntity(
       c,
-      updateChannel(db, channelId, payload),
+      updateChannel(db, channelId, {
+        ...(payload as ValidatedChannelUpdate),
+        ...(voice &&
+          normalizeVoiceChannelSettings(
+            pickVoiceChannelSettings(payload),
+            current.type
+          )),
+      }),
       DiscordErrorCode.UNKNOWN_CHANNEL,
       'Unknown Channel'
     )

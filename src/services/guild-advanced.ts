@@ -2,10 +2,10 @@
 import type { Database } from '../db'
 import { runInTransaction } from '../db'
 import { generateSnowflake } from '../snowflake'
-import { setTestGuildVoiceState } from './voice-states'
+import { setRestGuildVoiceState } from './voice-states'
 import type {
-  VoiceStateFixtureError,
   VoiceStateFixtureMutation,
+  VoiceStateWriteError,
 } from './voice-states'
 
 export { getGuildVoiceState } from './voice-states'
@@ -1039,13 +1039,17 @@ export function getGuildOnboarding(db: Database, guildId: string): JsonObject {
   }
 }
 
-/** Applies ordinary stage fields through the shared validated voice storage. */
+/**
+ * Applies ordinary stage fields through the shared validated voice storage.
+ * Joins and moves performed by `actorId` honour the channel's user limit.
+ */
 export function setGuildVoiceState(
   db: Database,
   guildId: string,
   userId: string,
-  payload: unknown
-): VoiceStateFixtureMutation | VoiceStateFixtureError {
+  payload: unknown,
+  actorId: string
+): VoiceStateFixtureMutation | VoiceStateWriteError {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload))
     return 'INVALID_INPUT'
   return Object.keys(payload).some(
@@ -1055,7 +1059,7 @@ export function setGuildVoiceState(
       field !== 'request_to_speak_timestamp'
   )
     ? 'INVALID_INPUT'
-    : setTestGuildVoiceState(db, guildId, userId, payload)
+    : setRestGuildVoiceState(db, guildId, userId, payload, actorId)
 }
 
 /** Gets or updates welcome-screen settings. */

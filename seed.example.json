@@ -10,6 +10,8 @@
         {
           "id": "9876543210987654321",
           "name": "Test Guild",
+          "afk_channel_id": "1234567890123456790",
+          "afk_timeout": 900,
           "channels": [
             {
               "id": "1234567890123456789",
@@ -19,6 +21,14 @@
             {
               "name": "bot-log",
               "type": 0
+            },
+            {
+              "id": "1234567890123456790",
+              "name": "AFK",
+              "type": 2,
+              "bitrate": 64000,
+              "user_limit": 10,
+              "rtc_region": null
             }
           ]
         }

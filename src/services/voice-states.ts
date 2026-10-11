@@ -3,6 +3,8 @@ import type { APIVoiceState } from 'discord-api-types/v10'
 import { runInTransaction, type Database } from '../db'
 import { validateTestVoiceState } from '../validators/voice-state'
 import type { TestVoiceStatePatch } from '../validators/voice-state'
+import { getChannel, type ChannelObject } from './channels'
+import { PermissionBit, resolveChannelPermissions } from './guild-permissions'
 
 /** Native guild voice state with explicit streaming and guild identity. */
 export interface GuildVoiceState extends APIVoiceState {
@@ -370,5 +372,116 @@ export function setTestGuildVoiceState(
   const payload = validateTestVoiceState(input)
   return payload
     ? applyGuildVoiceStatePatch(db, guildId, userId, payload)
+    : 'INVALID_INPUT'
+}
+
+/** REST voice-state failures: fixture failures plus a full channel. */
+export type VoiceStateWriteError = VoiceStateFixtureError | 'CHANNEL_FULL'
+
+/** Permissions a timed-out member keeps: VIEW_CHANNEL and READ_MESSAGE_HISTORY. */
+const TIMED_OUT_PERMISSIONS = PermissionBit.VIEW_CHANNEL | (1n << 16n)
+
+/**
+ * Whether a user holds MOVE_MEMBERS in a channel. Owners and guild-level
+ * administrators always do; any other member with an active timeout keeps
+ * only VIEW_CHANNEL and READ_MESSAGE_HISTORY
+ * (https://docs.discord.com/developers/topics/permissions#permissions-for-timed-out-members).
+ * @param db - Database
+ * @param channel - Guild channel
+ * @param channel.guild_id - Guild owning the channel
+ * @param channel.permission_overwrites - The channel's overwrites
+ * @param userId - User to check
+ * @returns true when the user may bypass the channel's user limit
+ */
+function canMoveMembers(
+  db: Database,
+  channel: {
+    guild_id: string
+    permission_overwrites: ChannelObject['permission_overwrites']
+  },
+  userId: string
+): boolean {
+  const resolved = resolveChannelPermissions(
+    db,
+    channel.guild_id,
+    channel.permission_overwrites,
+    userId
+  )
+  if (!resolved) return false
+  if (resolved.privileged) return true
+  const member = db
+    .prepare(
+      'SELECT communication_disabled_until FROM guild_members WHERE guild_id = ? AND user_id = ?'
+    )
+    .get(channel.guild_id, userId) as
+    { communication_disabled_until: string | null } | undefined
+  const timedOut =
+    member?.communication_disabled_until != null &&
+    Date.parse(member.communication_disabled_until) > Date.now()
+  const permissions = timedOut
+    ? resolved.permissions & TIMED_OUT_PERMISSIONS
+    : resolved.permissions
+  return (permissions & PermissionBit.MOVE_MEMBERS) !== 0n
+}
+
+/**
+ * Checks Discord's user limit for a join or move into a voice/stage channel
+ * of `guildId`: with `user_limit` > 0, a channel already holding that many
+ * connected users admits only users with MOVE_MEMBERS (Discord staff,
+ * discord-api-docs#58). A move performed by someone else (the REST caller) is
+ * admitted when that caller has MOVE_MEMBERS.
+ * @param db - Database
+ * @param guildId - Guild the write targets
+ * @param channelId - Target channel
+ * @param userId - Joining user (excluded from the occupancy count)
+ * @param actorId - REST caller performing the join or move
+ * @returns true when the channel is full for this join
+ */
+function isChannelFullFor(
+  db: Database,
+  guildId: string,
+  channelId: string,
+  userId: string,
+  actorId: string
+): boolean {
+  const channel = getChannel(db, channelId)
+  if (channel?.guild_id !== guildId || !channel.user_limit) return false
+  const connected = getGuildVoiceStates(db, guildId).filter(
+    (state) => state.channel_id === channelId && state.user_id !== userId
+  ).length
+  if (connected < channel.user_limit) return false
+  const scoped = { ...channel, guild_id: guildId }
+  return [userId, actorId].every((id) => !canMoveMembers(db, scoped, id))
+}
+
+/**
+ * Validates and applies a REST voice-state write performed by `actorId`.
+ * Unlike the fixture API (a privileged override), joins and moves honour the
+ * target channel's `user_limit` (see `isChannelFullFor`); everything else is
+ * the shared `applyGuildVoiceStatePatch`, in the same transaction.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - User whose voice state changes
+ * @param input - Untrusted voice-state patch
+ * @param actorId - REST caller (bot user ID)
+ * @returns The committed mutation, or a failure code
+ */
+export function setRestGuildVoiceState(
+  db: Database,
+  guildId: string,
+  userId: string,
+  input: unknown,
+  actorId: string
+): VoiceStateFixtureMutation | VoiceStateWriteError {
+  const payload = validateTestVoiceState(input)
+  return payload
+    ? runInTransaction(db, () => {
+        const target = payload.channel_id
+        return typeof target === 'string' &&
+          target !== getGuildVoiceState(db, guildId, userId)?.channel_id &&
+          isChannelFullFor(db, guildId, target, userId, actorId)
+          ? 'CHANNEL_FULL'
+          : applyGuildVoiceStatePatch(db, guildId, userId, payload)
+      })
     : 'INVALID_INPUT'
 }

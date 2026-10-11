@@ -659,7 +659,11 @@ const LEGACY_MANIFEST: LegacySpecEndpoint[] = [
       init: {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: 'Updated Guild' }),
+        body: JSON.stringify({
+          name: 'Updated Guild',
+          afk_channel_id: f.voiceChannelId,
+          afk_timeout: 900,
+        }),
       },
     }),
   },
@@ -2979,10 +2983,14 @@ function mutationEffectFor(
     case 'patch /guilds/{guild_id} 200': {
       return rowEffect(
         f,
-        'target guild name to equal Updated Guild',
-        'SELECT name FROM guilds WHERE id = ?',
+        'target guild name and AFK settings to be updated',
+        'SELECT name, afk_channel_id, afk_timeout FROM guilds WHERE id = ?',
         [f.guildId],
-        { name: 'Updated Guild' }
+        {
+          name: 'Updated Guild',
+          afk_channel_id: f.voiceChannelId,
+          afk_timeout: 900,
+        }
       )
     }
     case 'post /guilds/{guild_id}/channels 201': {

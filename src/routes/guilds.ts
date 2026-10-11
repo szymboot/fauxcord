@@ -9,11 +9,30 @@ import { Hono } from 'hono'
 import type { Database } from '../db'
 import type { GatewayEventControls } from '../gateway/event-controls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
-import { getGuild, updateGuild, removeGuildFromBot } from '../services/guilds'
-import { getGuildChannels, createGuildChannel } from '../services/channels'
+import {
+  getGuild,
+  updateGuild,
+  removeGuildFromBot,
+  isValidAfkChannel,
+} from '../services/guilds'
+import {
+  getGuildChannels,
+  createGuildChannel,
+  isVoiceCapableChannelType,
+} from '../services/channels'
+import { listVoiceRegions } from '../services/catalog'
+import {
+  bitrateTooHigh,
+  isStageBitrateTooHigh,
+  normalizeVoiceChannelSettings,
+  parseChannelType,
+  pickVoiceChannelSettings,
+  validateVoiceChannelSettings,
+} from '../validators/channel'
 import { getGuildWebhooks } from '../services/webhooks'
 import {
   validateChannelCreate,
+  validateGuildAfk,
   validateGuildName,
   GUILD_LIMITS,
   type ChannelCreatePayload,
@@ -60,21 +79,33 @@ export function createGuildRoutes(
     // empty (no-op) payload rather than crashing on JSON.parse of an empty
     // body (same idiom as PATCH /users/@me and POST .../bans).
     const parsed: unknown = await c.req.json().catch(() => ({}))
-    const payload: { name?: string } =
+    const payload: {
+      name?: string
+      afk_channel_id?: unknown
+      afk_timeout?: unknown
+    } =
       typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
         ? parsed
         : {}
 
-    if (payload.name !== undefined) {
-      const errors = validateGuildName(payload.name)
-      if (Object.keys(errors).length > 0) {
-        return c.json(validationError(errors).body, 400)
-      }
+    const errors = {
+      ...(payload.name !== undefined && validateGuildName(payload.name)),
+      ...validateGuildAfk(payload, (channelId) =>
+        isValidAfkChannel(db, guildId, channelId)
+      ),
+    }
+    // An unknown guild is reported as 404 rather than as an AFK form error.
+    if (Object.keys(errors).length > 0 && getGuild(db, guildId)) {
+      return c.json(validationError(errors).body, 400)
     }
 
     const updated = requireEntity(
       c,
-      updateGuild(db, guildId, { name: payload.name }),
+      updateGuild(db, guildId, {
+        name: payload.name,
+        afk_channel_id: payload.afk_channel_id as string | null | undefined,
+        afk_timeout: payload.afk_timeout as number | undefined,
+      }),
       DiscordErrorCode.UNKNOWN_GUILD,
       'Unknown Guild'
     )
@@ -139,15 +170,36 @@ export function createGuildRoutes(
 
     const payload = (await parseJsonBody(c)) as unknown as ChannelCreatePayload
 
-    const errors = validateChannelCreate(payload)
+    // Parse `type` once so the voice decision, validation and the stored row
+    // all use the same integer (numeric strings such as "2" are converted).
+    const parsedType = parseChannelType(payload.type)
+    const type = parsedType.type ?? 0
+    // Discord applies voice settings to voice and stage channels only.
+    const voice = isVoiceCapableChannelType(type)
+    const errors = {
+      ...validateChannelCreate(payload),
+      ...parsedType.errors,
+      ...(voice &&
+        validateVoiceChannelSettings(
+          payload,
+          type,
+          guild.premium_tier,
+          listVoiceRegions().map((region) => region.id)
+        )),
+    }
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
     }
+    if (voice && isStageBitrateTooHigh(payload.bitrate, type)) {
+      return c.json(bitrateTooHigh().body, 400)
+    }
 
     const newChannel = createGuildChannel(db, {
+      ...(voice &&
+        normalizeVoiceChannelSettings(pickVoiceChannelSettings(payload), type)),
       guildId,
       name: payload.name,
-      type: payload.type,
+      type,
       topic: payload.topic,
       nsfw: payload.nsfw,
       parentId: payload.parent_id,

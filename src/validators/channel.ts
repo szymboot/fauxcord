@@ -4,6 +4,11 @@
  * Validation follows the Discord API error format (code 50035).
  */
 
+import {
+  DiscordErrorCode,
+  discordError,
+  type DiscordErrorResponse,
+} from '../errors'
 import { maxLengthError, requiredError, typeError } from './common'
 import type { FieldError, ValidationErrors } from './common'
 
@@ -89,7 +94,8 @@ export const CHANNEL_LIMITS = {
 } as const
 
 /** Channel update (PATCH) payload (unknown fields until validated) */
-export interface ChannelUpdatePayload {
+export interface ChannelUpdatePayload extends VoiceChannelSettingsPayload {
+  type?: unknown
   name?: unknown
   topic?: unknown
   nsfw?: unknown
@@ -153,6 +159,86 @@ export function validateChannelUpdate(
   )
 
   return errors
+}
+
+/** Result of parsing an untrusted channel `type` field. */
+export interface ParsedChannelType {
+  /** Integer type, or undefined when omitted or null. */
+  type?: number
+  /** Field errors when the value is not an integer. */
+  errors: ValidationErrors
+}
+
+/**
+ * Parses an untrusted channel `type`. Integer fields accept numeric strings
+ * (e.g. `"2"`), which are converted before any type-dependent decision so
+ * that the same number is validated and stored; other non-integers return
+ * `NUMBER_TYPE_COERCE`.
+ * @param value - Untrusted `type` field
+ * @returns The parsed type and any field errors
+ */
+export function parseChannelType(value: unknown): ParsedChannelType {
+  if (value === undefined || value === null) return { errors: {} }
+  const type =
+    typeof value === 'string' && /^\d{1,9}$/.test(value) ? Number(value) : value
+  return typeof type === 'number' && Number.isSafeInteger(type) && type >= 0
+    ? { type, errors: {} }
+    : {
+        errors: {
+          type: {
+            _errors: [
+              {
+                code: 'NUMBER_TYPE_COERCE',
+                message: `Value "${typeof value === 'string' ? value : JSON.stringify(value)}" is not int.`,
+              },
+            ],
+          },
+        },
+      }
+}
+
+/**
+ * Whether an untrusted channel type value denotes a voice (2) or stage (13)
+ * channel.
+ * @param type - Channel type value
+ * @returns true for voice-capable channel types
+ */
+function isVoiceCapable(type: unknown): boolean {
+  return type === 2 || type === 13
+}
+
+/**
+ * Validates a requested channel `type` against the stored type. Discord only
+ * converts between text (0) and announcement (5) channels, so a voice or
+ * stage channel can never change type and no other channel can become voice
+ * or stage. Other non-voice conversions are not modeled and stay ignored.
+ * @param currentType - Stored channel type
+ * @param requested - Untrusted `type` field from the PATCH payload
+ * @returns Validation error map (empty when the request is acceptable)
+ */
+export function validateChannelTypeChange(
+  currentType: number,
+  requested: unknown
+): ValidationErrors {
+  if (
+    requested === undefined ||
+    requested === null ||
+    requested === currentType ||
+    (!isVoiceCapable(currentType) && !isVoiceCapable(requested))
+  )
+    return {}
+  const choices =
+    currentType === 0 || currentType === 5 ? '(0, 5)' : `(${currentType})`
+  return {
+    type: {
+      _errors: [
+        {
+          code: 'BASE_TYPE_CHOICES',
+          message: `Value must be one of ${choices}.`,
+        },
+      ],
+    },
+  }
 }
 
 /** Permission overwrite request payload (unknown fields until validated) */
@@ -286,4 +372,232 @@ export function validateVoiceStatus(
   }
 
   return errors
+}
+
+/** Voice and stage channel setting limits (from the Discord docs). */
+export const VOICE_CHANNEL_LIMITS = {
+  BITRATE_MIN: 8000,
+  /** Voice channel bitrate ceiling indexed by guild boost tier (0-3). */
+  VOICE_BITRATE_MAX_BY_TIER: [96_000, 128_000, 256_000, 384_000],
+  STAGE_BITRATE_MAX: 64_000,
+  VOICE_USER_LIMIT_MAX: 99,
+  STAGE_USER_LIMIT_MAX: 10_000,
+  VIDEO_QUALITY_MODES: [1, 2],
+  /** Discord's default bitrate for new voice and stage channels. */
+  DEFAULT_BITRATE: 64_000,
+} as const
+
+/**
+ * Discord's default `user_limit` for a channel type: 0 (unlimited) for voice
+ * channels and 10000 for stage channels.
+ * @param channelType - Voice (2) or stage (13) channel type
+ * @returns Default user limit
+ */
+export function defaultUserLimit(channelType: number): number {
+  return channelType === 13 ? VOICE_CHANNEL_LIMITS.STAGE_USER_LIMIT_MAX : 0
+}
+
+/**
+ * Applies Discord's silent truncation of stage channel user limits above
+ * 10000 (confirmed by Discord staff in discord-api-docs#5929).
+ * @param settings - Validated settings
+ * @param channelType - Channel type the settings apply to
+ * @returns Settings with a stage `user_limit` capped at 10000
+ */
+export function normalizeVoiceChannelSettings(
+  settings: VoiceChannelSettings,
+  channelType: number
+): VoiceChannelSettings {
+  return channelType === 13 &&
+    typeof settings.user_limit === 'number' &&
+    settings.user_limit > VOICE_CHANNEL_LIMITS.STAGE_USER_LIMIT_MAX
+    ? { ...settings, user_limit: VOICE_CHANNEL_LIMITS.STAGE_USER_LIMIT_MAX }
+    : settings
+}
+
+/** Voice/stage channel settings (unknown fields until validated). */
+export interface VoiceChannelSettingsPayload {
+  bitrate?: unknown
+  user_limit?: unknown
+  rtc_region?: unknown
+  video_quality_mode?: unknown
+}
+
+/** Validated voice/stage channel settings; null restores the default. */
+export interface VoiceChannelSettings {
+  bitrate?: number | null
+  user_limit?: number | null
+  rtc_region?: string | null
+  video_quality_mode?: number | null
+}
+
+/**
+ * Builds Discord's form-body error for an integer field, matching responses
+ * observed from the live API (e.g. `int value should be less than or equal
+ * to 96000.` with code `NUMBER_TYPE_MAX`).
+ * @param value - Untrusted field value
+ * @param min - Inclusive lower bound
+ * @param max - Inclusive upper bound, or undefined when unbounded
+ * @returns Field error, or null when the value is acceptable
+ */
+function intFieldError(
+  value: unknown,
+  min: number,
+  max?: number
+): FieldError | null {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value))
+    return {
+      code: 'NUMBER_TYPE_COERCE',
+      // JSON.stringify never invokes user-controlled coercion methods.
+      message: `Value "${typeof value === 'string' ? value : JSON.stringify(value)}" is not int.`,
+    }
+  if (value < min)
+    return {
+      code: 'NUMBER_TYPE_MIN',
+      message: `int value should be greater than or equal to ${min}.`,
+    }
+  return max !== undefined && value > max
+    ? {
+        code: 'NUMBER_TYPE_MAX',
+        message: `int value should be less than or equal to ${max}.`,
+      }
+    : null
+}
+
+/**
+ * Validates voice/stage channel settings for a channel of the given type,
+ * following Discord's documented limits and observed responses:
+ * - `bitrate` is at least 8000; voice channels allow at most
+ *   96000/128000/256000/384000 by boost tier 0-3 (the `VIP_REGIONS` feature
+ *   is not modeled). A stage bitrate above 64000 is not a form error but
+ *   error 30052, see `isStageBitrateTooHigh`.
+ * - `user_limit` is 0-99 for voice channels; stage channels accept any
+ *   non-negative integer and Discord truncates it to 10000, see
+ *   `normalizeVoiceChannelSettings`.
+ * - `rtc_region` is a voice region ID from `GET /voice/regions` or null
+ *   (automatic); `video_quality_mode` is 1 (auto) or 2 (full).
+ * Null restores each field's default.
+ * @param payload - Untrusted settings
+ * @param channelType - Voice (2) or stage (13) channel type
+ * @param premiumTier - Guild boost tier (0-3)
+ * @param regionIds - Accepted voice region IDs
+ * @returns Validation error map (empty when valid)
+ */
+export function validateVoiceChannelSettings(
+  payload: VoiceChannelSettingsPayload,
+  channelType: number,
+  premiumTier: number,
+  regionIds: readonly string[]
+): ValidationErrors {
+  const errors: ValidationErrors = {}
+  const stage = channelType === 13
+
+  if (payload.bitrate !== undefined && payload.bitrate !== null) {
+    const error = intFieldError(
+      payload.bitrate,
+      VOICE_CHANNEL_LIMITS.BITRATE_MIN,
+      stage
+        ? undefined
+        : (VOICE_CHANNEL_LIMITS.VOICE_BITRATE_MAX_BY_TIER[premiumTier] ??
+            VOICE_CHANNEL_LIMITS.VOICE_BITRATE_MAX_BY_TIER[0])
+    )
+    if (error) errors.bitrate = { _errors: [error] }
+  }
+
+  if (payload.user_limit !== undefined && payload.user_limit !== null) {
+    const error = intFieldError(
+      payload.user_limit,
+      0,
+      stage ? undefined : VOICE_CHANNEL_LIMITS.VOICE_USER_LIMIT_MAX
+    )
+    if (error) errors.user_limit = { _errors: [error] }
+  }
+
+  if (
+    payload.rtc_region !== undefined &&
+    payload.rtc_region !== null &&
+    (typeof payload.rtc_region !== 'string' ||
+      !regionIds.includes(payload.rtc_region))
+  ) {
+    errors.rtc_region = {
+      _errors: [
+        {
+          code: 'BASE_TYPE_CHOICES',
+          message: `Value must be one of (${regionIds.join(', ')}).`,
+        },
+      ],
+    }
+  }
+
+  if (
+    payload.video_quality_mode !== undefined &&
+    payload.video_quality_mode !== null &&
+    VOICE_CHANNEL_LIMITS.VIDEO_QUALITY_MODES.every(
+      (mode) => mode !== payload.video_quality_mode
+    )
+  ) {
+    errors.video_quality_mode = {
+      _errors: [
+        { code: 'BASE_TYPE_CHOICES', message: 'Value must be one of (1, 2).' },
+      ],
+    }
+  }
+
+  return errors
+}
+
+/**
+ * Builds Discord's JSON error 30052 for a stage bitrate above 64000.
+ * @returns Discord error response (HTTP 400)
+ */
+export function bitrateTooHigh(): DiscordErrorResponse {
+  return discordError(
+    DiscordErrorCode.BITRATE_TOO_HIGH,
+    'Bitrate is too high for channel of this type',
+    400
+  )
+}
+
+/**
+ * Whether a (form-valid) bitrate exceeds the stage channel ceiling. Discord
+ * reports this as JSON error 30052 "Bitrate is too high for channel of this
+ * type" rather than as a form-body field error.
+ * @param bitrate - Validated bitrate, null or undefined
+ * @param channelType - Channel type
+ * @returns true for a stage channel bitrate above 64000
+ */
+export function isStageBitrateTooHigh(
+  bitrate: unknown,
+  channelType: number
+): boolean {
+  return (
+    channelType === 13 &&
+    typeof bitrate === 'number' &&
+    bitrate > VOICE_CHANNEL_LIMITS.STAGE_BITRATE_MAX
+  )
+}
+
+/**
+ * Picks the voice settings present in a payload that already passed
+ * `validateVoiceChannelSettings`.
+ * @param payload - Validated payload
+ * @returns Only the provided settings, typed
+ */
+export function pickVoiceChannelSettings(
+  payload: VoiceChannelSettingsPayload
+): VoiceChannelSettings {
+  return {
+    ...(payload.bitrate !== undefined && {
+      bitrate: payload.bitrate as number | null,
+    }),
+    ...(payload.user_limit !== undefined && {
+      user_limit: payload.user_limit as number | null,
+    }),
+    ...(payload.rtc_region !== undefined && {
+      rtc_region: payload.rtc_region as string | null,
+    }),
+    ...(payload.video_quality_mode !== undefined && {
+      video_quality_mode: payload.video_quality_mode as number | null,
+    }),
+  }
 }

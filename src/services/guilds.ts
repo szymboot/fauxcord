@@ -34,6 +34,8 @@ interface GuildRow {
   explicit_content_filter: number
   premium_tier: number
   preferred_locale: string
+  afk_channel_id: string | null
+  afk_timeout: number
 }
 
 /** Guild object for API responses */
@@ -101,8 +103,8 @@ function toGuildObject(row: GuildRow, roles: RoleObject[]): GuildObject {
     owner_id: row.owner_id,
     application_id: null,
     region: 'deprecated',
-    afk_channel_id: null,
-    afk_timeout: 300,
+    afk_channel_id: row.afk_channel_id,
+    afk_timeout: row.afk_timeout,
     system_channel_id: null,
     system_channel_flags: 0,
     widget_enabled: false,
@@ -163,16 +165,41 @@ export function getGuild(
   return guild
 }
 
-/** Guild update parameters */
+/**
+ * Publishes a guild object as `GUILD_UPDATE` to the sessions of the bot that
+ * owns the guild's setup (Discord sends the plain guild object, without the
+ * `GUILD_CREATE` extra fields).
+ * @param db - Database the guild belongs to
+ * @param guild - Current guild object
+ */
+function emitGuildUpdate(db: Database, guild: GuildObject): void {
+  const owner = db
+    .prepare(
+      'SELECT bots.user_id, bots.token FROM guilds JOIN bots ON bots.token = guilds.bot_token WHERE guilds.id = ?'
+    )
+    .get(guild.id) as { user_id: string; token: string } | undefined
+  if (!owner) return
+  gatewayBus.emit('guild.update', {
+    guild: guild as unknown as Record<string, unknown>,
+    scope: { db, botId: owner.user_id, token: owner.token },
+  })
+}
+
+/** Guild update parameters (already validated by the caller) */
 export interface GuildUpdateParams {
   name?: string
+  /** Voice channel (type 2) in this guild, or null to clear. */
+  afk_channel_id?: string | null
+  /** One of `GUILD_LIMITS.AFK_TIMEOUTS`. */
+  afk_timeout?: number
 }
 
 /**
- * Updates a guild's information.
+ * Updates a guild's information and, when anything changed, dispatches
+ * `GUILD_UPDATE` to the owning setup's Gateway sessions.
  * @param db - Database
  * @param guildId - Guild ID
- * @param payload - Update payload
+ * @param payload - Validated update payload
  * @returns Updated guild object, or null
  */
 export function updateGuild(
@@ -180,19 +207,52 @@ export function updateGuild(
   guildId: string,
   payload: GuildUpdateParams
 ): GuildObject | null {
-  const current = db
-    .prepare('SELECT * FROM guilds WHERE id = ?')
-    .get(guildId) as GuildRow | undefined
-  if (!current) return null
+  const before = getGuild(db, guildId)
+  if (!before) return null
 
-  if (payload.name !== undefined) {
-    db.prepare('UPDATE guilds SET name = ? WHERE id = ?').run(
-      payload.name,
+  const updates: Record<string, unknown> = {
+    ...(payload.name !== undefined && { name: payload.name }),
+    ...(payload.afk_channel_id !== undefined && {
+      afk_channel_id: payload.afk_channel_id,
+    }),
+    ...(payload.afk_timeout !== undefined && {
+      afk_timeout: payload.afk_timeout,
+    }),
+  }
+  if (Object.keys(updates).length > 0) {
+    const setClauses = Object.keys(updates)
+      .map((column) => `${column} = ?`)
+      .join(', ')
+    db.prepare(`UPDATE guilds SET ${setClauses} WHERE id = ?`).run(
+      ...Object.values(updates),
       guildId
     )
   }
 
-  return getGuild(db, guildId)
+  const after = getGuild(db, guildId)
+  if (after && JSON.stringify(after) !== JSON.stringify(before)) {
+    emitGuildUpdate(db, after)
+  }
+  return after
+}
+
+/**
+ * Checks whether a channel can serve as the guild's AFK channel: Discord
+ * only accepts a voice channel (type 2) that belongs to the same guild.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param channelId - Candidate channel ID
+ * @returns true when the channel is a voice channel in the guild
+ */
+export function isValidAfkChannel(
+  db: Database,
+  guildId: string,
+  channelId: string
+): boolean {
+  const channel = db
+    .prepare('SELECT guild_id, type FROM channels WHERE id = ?')
+    .get(channelId) as { guild_id: string | null; type: number } | undefined
+  return channel?.guild_id === guildId && channel.type === 2
 }
 
 /**

@@ -9,10 +9,19 @@ import { disconnectGuildVoiceChannelMembers } from './voice-states'
 import { publishGuildVoiceStateMutation } from './voice-state-events'
 import { runInTransaction, type Database } from '../db'
 // Used for compile-time type drift detection.
-import type { APIGuildTextChannel, APIOverwrite } from 'discord-api-types/v10'
+import type {
+  APIGuildTextChannel,
+  APIGuildVoiceChannel,
+  APIOverwrite,
+} from 'discord-api-types/v10'
 import type { ChannelType } from 'discord-api-types/v10'
 import { generateSnowflake } from '../snowflake'
 import { gatewayBus } from '../gateway/bus'
+import {
+  defaultUserLimit,
+  VOICE_CHANNEL_LIMITS,
+  type VoiceChannelSettings,
+} from '../validators/channel'
 
 /**
  * Compile-time guard: ensures the safe-field subset of ChannelObject is
@@ -27,6 +36,23 @@ type _ChannelCompatGuard =
   > extends Pick<
     ChannelObject,
     'id' | 'guild_id' | 'position' | 'name' | 'flags'
+  >
+    ? true
+    : never
+
+/**
+ * Compile-time guard: ensures the voice settings on ChannelObject stay
+ * structurally compatible with APIGuildVoiceChannel (API ⟶ local direction;
+ * `video_quality_mode` is widened to `number` as stored in the DB).
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _VoiceChannelCompatGuard =
+  Pick<
+    APIGuildVoiceChannel,
+    'bitrate' | 'user_limit' | 'rtc_region' | 'video_quality_mode'
+  > extends Pick<
+    ChannelObject,
+    'bitrate' | 'user_limit' | 'rtc_region' | 'video_quality_mode'
   >
     ? true
     : never
@@ -48,6 +74,15 @@ type _OverwriteCompatGuard =
     ? true
     : never
 
+/**
+ * Whether a channel type carries voice connections (voice 2 or stage 13).
+ * @param type - Channel type
+ * @returns true for voice-capable channel types
+ */
+export function isVoiceCapableChannelType(type: number): boolean {
+  return type === 2 || type === 13
+}
+
 /** Channel record type retrieved from the DB */
 interface ChannelRow {
   id: string
@@ -62,6 +97,10 @@ interface ChannelRow {
   last_message_id: string | null
   voice_status: string | null
   owner_id: string | null
+  bitrate: number | null
+  user_limit: number | null
+  rtc_region: string | null
+  video_quality_mode: number | null
 }
 
 /** Channel permission overwrite object for API responses */
@@ -92,6 +131,14 @@ export interface ChannelObject {
   parent_id: string | null
   permission_overwrites: ChannelOverwriteObject[]
   voice_status?: string | null
+  /** Voice/stage only: bitrate in bits per second (default 64000). */
+  bitrate?: number
+  /** Voice/stage only: user limit, 0 meaning unlimited. */
+  user_limit?: number
+  /** Voice/stage only: voice region ID, null meaning automatic. */
+  rtc_region?: string | null
+  /** Voice/stage only, present once set: 1 = auto, 2 = full (720p). */
+  video_quality_mode?: number
   recipients?: ChannelRecipientUser[]
   icon?: string | null
   owner_id?: string
@@ -271,6 +318,17 @@ function toChannelObject(
     parent_id: row.parent_id,
     permission_overwrites: overwrites,
     ...(row.voice_status !== null && { voice_status: row.voice_status }),
+    // Discord sends bitrate/user_limit/rtc_region on every voice and stage
+    // channel, and video_quality_mode only once it has been set ("1 when not
+    // present").
+    ...(isVoiceCapableChannelType(row.type) && {
+      bitrate: row.bitrate ?? VOICE_CHANNEL_LIMITS.DEFAULT_BITRATE,
+      user_limit: row.user_limit ?? defaultUserLimit(row.type),
+      rtc_region: row.rtc_region,
+      ...(row.video_quality_mode !== null && {
+        video_quality_mode: row.video_quality_mode,
+      }),
+    }),
     ...((row.type === 1 || row.type === 3) && { recipients }),
     ...(row.type === 3 && {
       icon: null,
@@ -386,8 +444,32 @@ export function setVoiceStatus(
   return toChannelObject(updated, getChannelOverwrites(db, updated.id))
 }
 
-/** Channel update request type */
-export interface ChannelUpdatePayload {
+/**
+ * Maps provided voice settings to their DB columns (null = type default).
+ * @param settings - Validated voice settings
+ * @returns Column/value pairs for the provided settings
+ */
+function voiceSettingColumns(
+  settings: VoiceChannelSettings
+): Record<string, unknown> {
+  return {
+    ...(settings.bitrate !== undefined && { bitrate: settings.bitrate }),
+    ...(settings.user_limit !== undefined && {
+      user_limit: settings.user_limit,
+    }),
+    ...(settings.rtc_region !== undefined && {
+      rtc_region: settings.rtc_region,
+    }),
+    ...(settings.video_quality_mode !== undefined && {
+      video_quality_mode: settings.video_quality_mode,
+    }),
+  }
+}
+
+/** Channel update request type (voice settings apply to voice/stage only) */
+export interface ChannelUpdatePayload extends VoiceChannelSettings {
+  /** Accepted only when unchanged; see validateChannelTypeChange. */
+  type?: number
   name?: string
   topic?: string | null
   nsfw?: boolean
@@ -420,6 +502,8 @@ export function updateChannel(
       rate_limit_per_user: payload.rate_limit_per_user,
     }),
     ...(payload.position !== undefined && { position: payload.position }),
+    ...(isVoiceCapableChannelType(current.type) &&
+      voiceSettingColumns(payload)),
   }
 
   if (Object.keys(updates).length > 0) {
@@ -514,7 +598,7 @@ export function getGuildChannels(
 }
 
 /** Guild channel creation parameters */
-export interface GuildChannelCreateParams {
+export interface GuildChannelCreateParams extends VoiceChannelSettings {
   guildId: string
   name: string
   type?: number
@@ -535,18 +619,25 @@ export function createGuildChannel(
   params: GuildChannelCreateParams
 ): ChannelObject {
   const channelId = generateSnowflake()
+  const type = params.type ?? 0
+  const voice = isVoiceCapableChannelType(type)
   db.prepare(
-    `INSERT INTO channels (id, guild_id, name, type, topic, nsfw, position, parent_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO channels (id, guild_id, name, type, topic, nsfw, position, parent_id,
+       bitrate, user_limit, rtc_region, video_quality_mode)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     channelId,
     params.guildId,
     params.name,
-    params.type ?? 0,
+    type,
     params.topic ?? null,
     params.nsfw ? 1 : 0,
     params.position,
-    params.parentId ?? null
+    params.parentId ?? null,
+    voice ? (params.bitrate ?? null) : null,
+    voice ? (params.user_limit ?? null) : null,
+    voice ? (params.rtc_region ?? null) : null,
+    voice ? (params.video_quality_mode ?? null) : null
   )
 
   const row = db

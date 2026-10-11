@@ -28,6 +28,7 @@ export const DiscordErrorCode = {
   MAX_WEBHOOKS_REACHED: 30_007,
   MAX_CHANNELS_REACHED: 30_013,
   MAX_ATTACHMENTS: 30_015,
+  BITRATE_TOO_HIGH: 30_052,
   // 40xxx — Other errors
   UNAUTHORIZED: 40_001,
   REQUEST_TOO_LARGE: 40_005,
@@ -126,6 +127,8 @@ export const ERROR_MESSAGES = {
     'Maximum number of guild channels reached (500)',
   [DiscordErrorCode.MAX_ATTACHMENTS]:
     'Maximum number of attachments in a message reached (10)',
+  [DiscordErrorCode.BITRATE_TOO_HIGH]:
+    'Bitrate is too high for channel of this type',
   [DiscordErrorCode.UNAUTHORIZED]: 'Unauthorized',
   [DiscordErrorCode.REQUEST_TOO_LARGE]: 'Request entity too large',
   [DiscordErrorCode.ALREADY_PINNED]: 'This message was already pinned',

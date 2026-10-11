@@ -567,6 +567,86 @@ describe('initializeDatabase', () => {
     }
   })
 
+  it('migrates guild AFK and voice channel columns onto a legacy database', () => {
+    // Simulate a database file created before voice settings existed.
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-db-'))
+    const dbPath = path.join(dir, 'legacy-voice.db')
+    try {
+      const legacy = new BetterSqlite3(dbPath)
+      legacy.exec(`
+        CREATE TABLE bots (token TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+          username TEXT NOT NULL, discriminator TEXT NOT NULL DEFAULT '0');
+        CREATE TABLE guilds (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, icon TEXT,
+          owner_id TEXT NOT NULL,
+          bot_token TEXT NOT NULL REFERENCES bots(token) ON DELETE CASCADE,
+          verification_level INTEGER NOT NULL DEFAULT 0,
+          default_message_notifications INTEGER NOT NULL DEFAULT 0,
+          explicit_content_filter INTEGER NOT NULL DEFAULT 0,
+          premium_tier INTEGER NOT NULL DEFAULT 0,
+          preferred_locale TEXT NOT NULL DEFAULT 'en-US',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE channels (
+          id TEXT PRIMARY KEY,
+          guild_id TEXT REFERENCES guilds(id) ON DELETE CASCADE,
+          type INTEGER NOT NULL DEFAULT 0, name TEXT
+        );
+        INSERT INTO bots (token, user_id, username) VALUES ('Bot legacy', '1', 'B');
+        INSERT INTO guilds (id, name, owner_id, bot_token)
+          VALUES ('10', 'Legacy', '1', 'Bot legacy');
+        INSERT INTO channels (id, guild_id, type, name)
+          VALUES ('20', '10', 2, 'voice'), ('21', '10', 2, 'afk');
+      `)
+      legacy.close()
+
+      db = initializeDatabase(dbPath)
+      const columns = (table: string) =>
+        (
+          db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+        ).map((column) => column.name)
+      expect(columns('guilds')).toEqual(
+        expect.arrayContaining(['afk_channel_id', 'afk_timeout'])
+      )
+      expect(columns('channels')).toEqual(
+        expect.arrayContaining([
+          'bitrate',
+          'user_limit',
+          'rtc_region',
+          'video_quality_mode',
+        ])
+      )
+      expect(
+        db.prepare('SELECT afk_channel_id, afk_timeout FROM guilds').get()
+      ).toEqual({ afk_channel_id: null, afk_timeout: 300 })
+
+      // Deleting the AFK channel clears the reference; deleting the guild
+      // still cascades through channels without foreign-key violations.
+      db.prepare(
+        "UPDATE guilds SET afk_channel_id = '21' WHERE id = '10'"
+      ).run()
+      db.prepare("DELETE FROM channels WHERE id = '21'").run()
+      expect(
+        db.prepare('SELECT afk_channel_id FROM guilds WHERE id = ?').get('10')
+      ).toEqual({ afk_channel_id: null })
+      db.prepare(
+        "UPDATE guilds SET afk_channel_id = '20' WHERE id = '10'"
+      ).run()
+      db.prepare("DELETE FROM guilds WHERE id = '10'").run()
+      expect(db.prepare('SELECT COUNT(*) AS n FROM channels').get()).toEqual({
+        n: 0,
+      })
+      expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+      closeDatabase(db)
+
+      // Reopening is idempotent and keeps the migrated schema.
+      db = initializeDatabase(dbPath)
+      expect(columns('guilds')).toContain('afk_timeout')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('creates the voice_status column and poll/recipient tables', () => {
     const db = initializeDatabase(':memory:')
 
