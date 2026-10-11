@@ -64,7 +64,7 @@ curl -X POST http://localhost:3000/_test/setup \
 For subsequent calls, delete the existing data first via `/_test/reset` or `DELETE /_test/setup/:token`.
 
 `guilds[].channels[].type` must be a non-negative integer when given; strings
-such as `"2"` return `400`.
+such as `"2"` return `400`. `null` behaves like omission.
 
 Reusing an existing channel ID updates that channel in place, with Discord's
 channel-type rules: voice (`2`) and stage (`13`) channels cannot become other

@@ -151,6 +151,25 @@ describe('Voice channel type stability', () => {
     expect(getGuildVoiceStates(context.db, guildId)).toHaveLength(1)
   })
 
+  it('treats type null like omission for reused and new channels', async () => {
+    const response = await setup('Bot second', [
+      { id: voiceId, name: 'null-voice', type: null },
+      { id: '667', name: 'null-new', type: null },
+    ])
+    expect(response.status).toBe(201)
+    await expect(response.json()).resolves.toMatchObject({
+      guilds: [
+        {
+          channels: [
+            { id: voiceId, type: 2 },
+            { id: '667', type: 0 },
+          ],
+        },
+      ],
+    })
+    expect(getGuildVoiceStates(context.db, guildId)).toHaveLength(1)
+  })
+
   it('still defaults new channels without type to text', async () => {
     const response = await setup('Bot second', [{ id: '666', name: 'fresh' }])
     await expect(response.json()).resolves.toMatchObject({

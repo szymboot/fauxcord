@@ -75,7 +75,8 @@ export interface SetupGuildRequest {
 export interface SetupChannelRequest {
   id?: string
   name: string
-  type?: number
+  /** Channel type; omission or null keeps a reused channel's stored type. */
+  type?: number | null
   /** Voice/stage only; omission preserves, null restores 64000. */
   bitrate?: unknown
   /** Voice/stage only; omission preserves, null restores 0 (unlimited). */
@@ -461,8 +462,10 @@ export function setupTestEnvironment(
 
       const channelRequests = guildReq.channels ?? []
       for (const channelReq of channelRequests) {
+        // null behaves like omission (preserve the stored type, else text).
         if (
           channelReq.type !== undefined &&
+          channelReq.type !== null &&
           (typeof channelReq.type !== 'number' ||
             !Number.isSafeInteger(channelReq.type) ||
             channelReq.type < 0)
