@@ -890,4 +890,51 @@ describe('native voice capture controls over HTTP and WebSockets', () => {
     ).toEqual(['MESSAGE_REACTION_ADD', 'MESSAGE_DELETE'])
     expect(voices()).toHaveLength(0)
   })
+  it('captures, holds and releases VOICE_STATE_UPDATE produced by Modify Guild Member', async () => {
+    const joined = await transition({ channel_id: channel })
+    await fence()
+    expect(voices()).toHaveLength(1)
+    const id = await arm()
+    const muted = await request(
+      `/api/v10/guilds/${guild}/members/${HUMAN_ID}`,
+      'PATCH',
+      { mute: true }
+    )
+    expect(muted.status).toBe(200)
+    const disconnected = await request(
+      `/guilds/${guild}/members/${HUMAN_ID}`,
+      'PATCH',
+      { channel_id: null }
+    )
+    expect(disconnected.status).toBe(200)
+    await fence()
+    expect(voices()).toHaveLength(1)
+    const observation = await observe(id)
+    expect(observation.events_captured.map((event) => event.state)).toEqual([
+      'held',
+      'held',
+    ])
+    const [mute, disconnect] = observation.events_captured
+    expect(mute.envelope.d).toMatchObject({
+      channel_id: channel,
+      session_id: joined.session_id,
+      mute: true,
+      member: { mute: true, user: { id: HUMAN_ID } },
+    })
+    expect(disconnect.envelope.d).toMatchObject({
+      channel_id: null,
+      session_id: joined.session_id,
+    })
+    expect(
+      await status(`${ROOT}/${id}/release`, 'POST', {
+        event_ids: [disconnect.id, mute.id],
+      })
+    ).toBe(200)
+    await fence()
+    expect(
+      voices()
+        .slice(1)
+        .map((frame) => frame.d)
+    ).toEqual([disconnect.envelope.d, mute.envelope.d])
+  })
 })

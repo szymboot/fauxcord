@@ -166,8 +166,20 @@ function disconnectOtherGuilds(
   })
 }
 
-/** Applies a validated patch after checking every referenced entity. */
-function applyTestGuildVoiceState(
+/**
+ * Applies a validated patch after checking every referenced entity.
+ * Server `mute`/`deaf` are owned by the guild member: omitted values default to
+ * the member's persisted flags (server mute survives reconnects, as on
+ * Discord), and the committed values are written back to `guild_members` so
+ * REST member reads and embedded VOICE_STATE_UPDATE members never diverge.
+ * Shared by the fixture, stage and Modify Guild Member voice moderation paths.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - Member user ID
+ * @param payload - Already validated patch
+ * @returns Committed mutation, or an error before any write
+ */
+export function applyGuildVoiceStatePatch(
   db: Database,
   guildId: string,
   userId: string,
@@ -178,14 +190,12 @@ function applyTestGuildVoiceState(
       return 'UNKNOWN_GUILD'
     if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(userId))
       return 'UNKNOWN_USER'
-    if (
-      !db
-        .prepare(
-          'SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ?'
-        )
-        .get(guildId, userId)
-    )
-      return 'UNKNOWN_MEMBER'
+    const member = db
+      .prepare(
+        'SELECT mute, deaf FROM guild_members WHERE guild_id = ? AND user_id = ?'
+      )
+      .get(guildId, userId) as { mute: number; deaf: number } | undefined
+    if (!member) return 'UNKNOWN_MEMBER'
     const existing = getGuildVoiceState(db, guildId, userId)
     if (!existing && payload.channel_id === undefined) return 'INVALID_INPUT'
     const channelId =
@@ -213,8 +223,8 @@ function applyTestGuildVoiceState(
         existing && (channelId === null || existing.channel_id !== null)
           ? existing.session_id
           : randomUUID(),
-      deaf: payload.deaf ?? existing?.deaf ?? false,
-      mute: payload.mute ?? existing?.mute ?? false,
+      deaf: payload.deaf ?? member.deaf === 1,
+      mute: payload.mute ?? member.mute === 1,
       self_deaf: payload.self_deaf ?? existing?.self_deaf ?? false,
       self_mute: payload.self_mute ?? existing?.self_mute ?? false,
       self_stream:
@@ -237,6 +247,9 @@ function applyTestGuildVoiceState(
     const displaced =
       channelId === null ? [] : disconnectOtherGuilds(db, guildId, userId, emit)
     writeGuildVoiceState(db, state)
+    db.prepare(
+      'UPDATE guild_members SET mute = ?, deaf = ? WHERE guild_id = ? AND user_id = ?'
+    ).run(Number(state.mute), Number(state.deaf), guildId, userId)
     return {
       state,
       previous: existing,
@@ -265,6 +278,6 @@ export function setTestGuildVoiceState(
 ): VoiceStateFixtureMutation | VoiceStateFixtureError {
   const payload = validateTestVoiceState(input)
   return payload
-    ? applyTestGuildVoiceState(db, guildId, userId, payload)
+    ? applyGuildVoiceStatePatch(db, guildId, userId, payload)
     : 'INVALID_INPUT'
 }

@@ -27,6 +27,35 @@ import {
   parseJsonBody,
 } from '../lib/route-helpers'
 import type { AppEnv } from '../middleware/auth'
+import {
+  checkVoiceModeration,
+  hasVoiceChange,
+  modifyGuildMember,
+  type VoiceModerationError,
+} from '../services/voice-moderation'
+
+/** Discord error code, message and HTTP status per voice moderation failure. */
+const VOICE_MODERATION_ERRORS: Record<
+  VoiceModerationError,
+  readonly [number, string, 400 | 403 | 404]
+> = {
+  NOT_CONNECTED: [
+    DiscordErrorCode.TARGET_USER_NOT_CONNECTED_TO_VOICE,
+    'Target user is not connected to voice.',
+    400,
+  ],
+  UNKNOWN_CHANNEL: [DiscordErrorCode.UNKNOWN_CHANNEL, 'Unknown Channel', 404],
+  INVALID_CHANNEL_TYPE: [
+    DiscordErrorCode.CANNOT_EXECUTE_ON_THIS_CHANNEL_TYPE,
+    'Cannot execute action on this channel type',
+    400,
+  ],
+  MISSING_PERMISSIONS: [
+    DiscordErrorCode.MISSING_PERMISSIONS,
+    'Missing Permissions',
+    403,
+  ],
+}
 
 /**
  * Creates the guild members API routes.
@@ -76,11 +105,10 @@ export function createGuildMemberRoutes(db: Database): Hono<AppEnv> {
     if (guild instanceof Response) return guild
 
     const payload = (await parseJsonBody(c)) as GuildMemberUpdatePayload
-    const currentMemberPayload = {
-      nick: payload.nick,
-      roles: payload.roles,
-      mute: payload.mute,
-    }
+    // Modify Current Member only documents nick (plus unmodeled avatar,
+    // banner and bio); voice moderation fields are ignored like other
+    // unknown fields. Use the /:userId route to moderate the bot itself.
+    const currentMemberPayload = { nick: payload.nick }
     const errors = validateGuildMemberUpdate(currentMemberPayload)
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
@@ -122,7 +150,8 @@ export function createGuildMemberRoutes(db: Database): Hono<AppEnv> {
     return member instanceof Response ? member : c.json(member)
   })
 
-  // PATCH /guilds/:guildId/members/:userId — Update member information
+  // PATCH /guilds/:guildId/members/:userId — Update member information,
+  // including server mute/deaf and voice move/disconnect (channel_id)
   app.patch('/guilds/:guildId/members/:userId', async (c) => {
     const { guildId, userId } = c.req.param()
 
@@ -154,7 +183,42 @@ export function createGuildMemberRoutes(db: Database): Hono<AppEnv> {
       }
     }
 
-    const updated = updateGuildMember(db, guildId, userId, payload)
+    if (!getGuildMember(db, guildId, userId)) {
+      const err = discordError(
+        DiscordErrorCode.UNKNOWN_MEMBER,
+        'Unknown Member',
+        404
+      )
+      return c.json(err.body, 404)
+    }
+
+    // Voice moderation is a bot action; an OAuth2 Bearer user has no
+    // moderation permissions to evaluate here.
+    const bot = c.get('bot')
+    if (!bot && c.get('accessToken') && hasVoiceChange(payload)) {
+      const [code, message, status] =
+        VOICE_MODERATION_ERRORS.MISSING_PERMISSIONS
+      return c.json(discordError(code, message, status).body, status)
+    }
+    // A dummy DISABLE_AUTH bot (unregistered token) has no persisted
+    // permissions to evaluate, so permission checks only apply to real bots.
+    const actorId =
+      bot && db.prepare('SELECT 1 FROM bots WHERE token = ?').get(bot.token)
+        ? bot.user_id
+        : null
+    const voiceError = checkVoiceModeration(
+      db,
+      guildId,
+      userId,
+      actorId,
+      payload
+    )
+    if (voiceError) {
+      const [code, message, status] = VOICE_MODERATION_ERRORS[voiceError]
+      return c.json(discordError(code, message, status).body, status)
+    }
+
+    const updated = modifyGuildMember(db, guildId, userId, payload)
     const result = requireEntity(
       c,
       updated,
@@ -162,6 +226,8 @@ export function createGuildMemberRoutes(db: Database): Hono<AppEnv> {
       'Unknown Member'
     )
     if (result instanceof Response) return result
+    // The spec documents both 200 and 204 for this endpoint; a roles + mute
+    // update without a timeout exercises the 204 branch (spec/manifest.ts).
     return payload.roles !== undefined &&
       payload.mute !== undefined &&
       payload.communication_disabled_until === undefined

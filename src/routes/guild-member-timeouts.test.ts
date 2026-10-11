@@ -6,6 +6,8 @@ import {
   seedMember,
   seedRole,
   seedBearerCredential,
+  seedVoiceChannel,
+  seedVoiceState,
 } from '../test-helpers'
 import { getGuildMember, updateGuildMember } from '../services/guild-members'
 import { gatewayBus } from '../gateway/bus'
@@ -91,6 +93,13 @@ describe('guild member timeouts', () => {
       .run(guildId, userId)
     const otherGuild = seedGuild(context.db, token, '666666666666666666')
     seedMember(context.db, otherGuild, userId)
+    // Server mute through REST requires a voice connection.
+    seedVoiceState(
+      context.db,
+      guildId,
+      userId,
+      seedVoiceChannel(context.db, guildId)
+    )
     const before = getGuildMember(context.db, guildId, userId)
     const listener = vi.fn()
     gatewayBus.on('guild.member.update', listener)
@@ -135,6 +144,12 @@ describe('guild member timeouts', () => {
   })
 
   it('returns the updated member when timeout, roles and mute are patched together', async () => {
+    seedVoiceState(
+      context.db,
+      guildId,
+      userId,
+      seedVoiceChannel(context.db, guildId)
+    )
     const response = await patch({
       communication_disabled_until: deadline,
       roles: [],
