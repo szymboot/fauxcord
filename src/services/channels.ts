@@ -5,7 +5,9 @@
  */
 
 import { getRestFaultRuntime } from './rest-faults'
-import type { Database } from '../db'
+import { disconnectGuildVoiceChannelMembers } from './voice-states'
+import { publishGuildVoiceStateMutation } from './voice-state-events'
+import { runInTransaction, type Database } from '../db'
 // Used for compile-time type drift detection.
 import type { APIGuildTextChannel, APIOverwrite } from 'discord-api-types/v10'
 import type { ChannelType } from 'discord-api-types/v10'
@@ -443,7 +445,11 @@ export function updateChannel(
 }
 
 /**
- * Deletes a channel.
+ * Deletes a channel. Members connected to a deleted voice or stage channel are
+ * disconnected first: their states are retained with `channel_id: null` and
+ * one `VOICE_STATE_UPDATE` per member (numeric user ID order) is published
+ * before `CHANNEL_DELETE`, so clients can still resolve the old channel from
+ * their cache while handling the disconnects.
  * @param db - Database
  * @param channelId - Channel ID
  * @returns Deleted channel object, or null if it does not exist
@@ -452,17 +458,27 @@ export function deleteChannel(
   db: Database,
   channelId: string
 ): ChannelObject | null {
-  const row = db
-    .prepare('SELECT * FROM channels WHERE id = ?')
-    .get(channelId) as ChannelRow | undefined
-  if (!row) return null
+  const deleted = runInTransaction(db, () => {
+    const row = db
+      .prepare('SELECT * FROM channels WHERE id = ?')
+      .get(channelId) as ChannelRow | undefined
+    if (!row) return null
 
-  // Build the response before deleting: the DELETE cascades to
-  // channel_overwrites, so overwrites must be read first.
-  const result = toChannelObject(row, getChannelOverwrites(db, row.id))
-  db.prepare('DELETE FROM channels WHERE id = ?').run(channelId)
+    // Build the response before deleting: the DELETE cascades to
+    // channel_overwrites, so overwrites must be read first.
+    const channel = toChannelObject(row, getChannelOverwrites(db, row.id))
+    // Disconnect before deleting: the FK cascade would otherwise silently
+    // drop the voice states referencing this channel.
+    const disconnects = disconnectGuildVoiceChannelMembers(db, channelId)
+    db.prepare('DELETE FROM channels WHERE id = ?').run(channelId)
+    return { channel, disconnects }
+  })
+  if (!deleted) return null
+  const { channel: result, disconnects } = deleted
   getRestFaultRuntime(db).prune()
 
+  for (const mutation of disconnects)
+    publishGuildVoiceStateMutation(db, mutation)
   gatewayBus.emit('channel.delete', {
     channel: result as unknown as Record<string, unknown>,
   })
