@@ -17,6 +17,7 @@ import {
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import type { AppEnv } from '../middleware/auth'
 import { parseLimitQuery } from '../lib/route-helpers'
+import { findGuildEmoji, parseReactionEmoji } from '../services/reaction-emoji'
 
 /**
  * Safely decodes a percent-encoded emoji path segment. Returns a Discord-format
@@ -63,6 +64,38 @@ function messageBelongsToChannel(
 }
 
 /**
+ * Checks whether the authenticated bot may react with a decoded emoji. Unicode
+ * emoji are always allowed; a custom emoji must exist in a guild of the bot's
+ * setup or a guild the bot user is a member of. Unregistered bots (auth
+ * disabled or isolated route tests) only need the emoji to exist.
+ * @param db - Database
+ * @param emoji - Decoded emoji path segment
+ * @param bot - Authenticated bot, when known
+ * @param bot.token - Bot token
+ * @param bot.user_id - Bot user ID
+ * @returns Whether the reaction may be added
+ */
+function canUseReactionEmoji(
+  db: Database,
+  emoji: string,
+  bot: { token: string; user_id: string } | undefined
+): boolean {
+  const parsed = parseReactionEmoji(emoji)
+  if (parsed.id === null) return true
+  const current = findGuildEmoji(db, parsed.id)
+  if (!current) return false
+  return !bot ||
+    !db.prepare('SELECT 1 FROM bots WHERE token = ?').get(bot.token)
+    ? true
+    : db
+        .prepare(
+          `SELECT 1 FROM guilds g WHERE g.id = ? AND (g.bot_token = ? OR EXISTS (
+           SELECT 1 FROM guild_members m WHERE m.guild_id = g.id AND m.user_id = ?))`
+        )
+        .get(current.guild_id, bot.token, bot.user_id) !== undefined
+}
+
+/**
  * Creates the standard Unknown Message response for message-scoped routes.
  * @param c - Hono context
  * @returns Discord 404 response
@@ -98,6 +131,13 @@ export function createChannelReactionRoutes(db: Database): Hono<AppEnv> {
         return unknownMessageResponse(c)
       }
       const decodedEmoji = decodedResult
+      if (!canUseReactionEmoji(db, decodedEmoji, bot)) {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_EMOJI, 'Unknown Emoji', 400)
+            .body,
+          400
+        )
+      }
 
       addReaction(db, messageId, userId, decodedEmoji)
       return c.body(null, 204)

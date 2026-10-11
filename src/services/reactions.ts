@@ -9,6 +9,11 @@ import type { UserRow } from './messages'
 import { gatewayBus, type GatewayBusEvents } from '../gateway/bus'
 import { getGuildIdForChannel } from './messages'
 import { getGuildMember } from './guild-members'
+import {
+  parseReactionEmoji,
+  reactionEmojiKey,
+  resolveReactionEmoji,
+} from './reaction-emoji'
 
 /**
  * Gets the channel ID that a message belongs to, given its message ID.
@@ -58,18 +63,12 @@ function getReactionClearDispatch(
     : undefined
 }
 
-/** Converts the stored REST emoji key into Discord's partial emoji object. */
-function toReactionEmoji(emoji: string): { id: string | null; name: string } {
-  const custom = /^([^:]+):(\d+)$/.exec(emoji)
-  return custom ? { id: custom[2], name: custom[1] } : { id: null, name: emoji }
-}
-
 /**
  * Adds a reaction.
  * @param db - Database
  * @param messageId - Message ID
  * @param userId - User ID
- * @param emoji - Emoji
+ * @param emoji - Unicode emoji, or custom `name:id` / `a:name:id`
  * @param dispatch - Optional member snapshot and delivery scope for human
  * fixtures; without it the reactor's current guild member is resolved
  * @returns true on successful addition
@@ -84,13 +83,14 @@ export function addReaction(
     'scope' | 'member' | 'messageAuthorId'
   >
 ): boolean {
+  const parsed = parseReactionEmoji(emoji)
   let inserted: boolean
   try {
     const result = db
       .prepare(
         'INSERT OR IGNORE INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?)'
       )
-      .run(messageId, userId, emoji)
+      .run(messageId, userId, reactionEmojiKey(parsed))
     inserted = result.changes > 0
   } catch {
     return false
@@ -116,7 +116,7 @@ export function addReaction(
         channelId: message.channel_id,
         messageId,
         userId,
-        emoji: { id: null, name: emoji },
+        emoji: resolveReactionEmoji(db, parsed),
         ...(member && { member: { ...member } }),
         messageAuthorId: message.author_id,
         ...dispatch,
@@ -132,7 +132,7 @@ export function addReaction(
  * @param db - Database
  * @param messageId - Message ID
  * @param userId - User ID
- * @param emoji - Emoji
+ * @param emoji - Unicode emoji, or custom `name:id` / `a:name:id`
  */
 export function removeReaction(
   db: Database,
@@ -140,11 +140,12 @@ export function removeReaction(
   userId: string,
   emoji: string
 ): void {
+  const parsed = parseReactionEmoji(emoji)
   const result = db
     .prepare(
       'DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?'
     )
-    .run(messageId, userId, emoji)
+    .run(messageId, userId, reactionEmojiKey(parsed))
 
   // Only emit when a reaction was actually deleted, so removing a
   // non-existent reaction does not produce a misleading
@@ -158,7 +159,7 @@ export function removeReaction(
       channelId,
       messageId,
       userId,
-      emoji: { id: null, name: emoji },
+      emoji: resolveReactionEmoji(db, parsed),
     })
   }
 }
@@ -167,22 +168,23 @@ export function removeReaction(
  * Removes all reactions for the specified emoji.
  * @param db - Database
  * @param messageId - Message ID
- * @param emoji - Emoji
+ * @param emoji - Unicode emoji, or custom `name:id` / `a:name:id`
  */
 export function removeEmojiReactions(
   db: Database,
   messageId: string,
   emoji: string
 ): void {
+  const parsed = parseReactionEmoji(emoji)
   const result = db
     .prepare('DELETE FROM reactions WHERE message_id = ? AND emoji = ?')
-    .run(messageId, emoji)
+    .run(messageId, reactionEmojiKey(parsed))
   if (result.changes === 0) return
   const dispatch = getReactionClearDispatch(db, messageId)
   if (dispatch) {
     gatewayBus.emit('message.reaction.remove.emoji', {
       ...dispatch,
-      emoji: toReactionEmoji(emoji),
+      emoji: resolveReactionEmoji(db, parsed),
     })
   }
 }
@@ -205,7 +207,7 @@ export function removeAllReactions(db: Database, messageId: string): void {
  * Retrieves the list of users who reacted with the requested reaction type.
  * @param db - Database
  * @param messageId - Message ID
- * @param emoji - Emoji
+ * @param emoji - Unicode emoji, or custom `name:id` / `a:name:id`
  * @param limit - Number of items to retrieve (clamped to 100, default 25)
  * @param after - Pagination cursor (user ID)
  * @param type - Normal (0, default) or burst (1); burst persistence is unsupported
@@ -223,6 +225,7 @@ export function getReactionUsers(
   if (type === 1) return []
 
   const clampedLimit = Math.min(limit, 100)
+  const key = reactionEmojiKey(parseReactionEmoji(emoji))
   return after
     ? (db
         .prepare(
@@ -231,7 +234,7 @@ export function getReactionUsers(
          WHERE r.message_id = ? AND r.emoji = ? AND u.id > ?
          ORDER BY u.id ASC LIMIT ?`
         )
-        .all(messageId, emoji, after, clampedLimit) as UserRow[])
+        .all(messageId, key, after, clampedLimit) as UserRow[])
     : (db
         .prepare(
           `SELECT u.* FROM users u
@@ -239,5 +242,5 @@ export function getReactionUsers(
        WHERE r.message_id = ? AND r.emoji = ?
        ORDER BY u.id ASC LIMIT ?`
         )
-        .all(messageId, emoji, clampedLimit) as UserRow[])
+        .all(messageId, key, clampedLimit) as UserRow[])
 }

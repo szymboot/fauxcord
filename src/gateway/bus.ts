@@ -1,6 +1,8 @@
 import { EventEmitter } from 'node:events'
 import type { Database } from '../db'
 import type { GatewayVoiceStateUpdateDispatchData } from 'discord-api-types/v10'
+import type { ReactionEmoji } from '../services/reaction-emoji'
+import type { EmojiObject } from '../services/guild-emojis'
 
 /** Mapping of event names to their payloads exchanged over gatewayBus */
 export interface GatewayBusEvents {
@@ -42,7 +44,7 @@ export interface GatewayBusEvents {
     channelId: string
     messageId: string
     userId: string
-    emoji: Record<string, unknown>
+    emoji: ReactionEmoji
     /** Existing human member and exact setup scope for test reactions. */
     member?: Record<string, unknown>
     messageAuthorId?: string
@@ -53,7 +55,7 @@ export interface GatewayBusEvents {
     channelId: string
     messageId: string
     userId: string
-    emoji: Record<string, unknown>
+    emoji: ReactionEmoji
   }
   'message.reaction.remove.all': {
     guildId: string | undefined
@@ -65,10 +67,17 @@ export interface GatewayBusEvents {
     guildId: string | undefined
     channelId: string
     messageId: string
-    emoji: { id: string | null; name: string }
+    emoji: ReactionEmoji
     scope: { db: Database; botId: string; token: string }
   }
   'guild.create': { guild: Record<string, unknown> }
+  'guild.emojis.update': {
+    guildId: string
+    /** Full current emoji list of the guild. */
+    emojis: EmojiObject[]
+    /** Exact setup scope of the guild. */
+    scope: { db: Database; botId: string; token: string }
+  }
   'guild.update': {
     guild: Record<string, unknown>
     /** Exact setup scope of the updated guild. */

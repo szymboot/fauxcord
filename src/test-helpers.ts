@@ -1023,18 +1023,20 @@ export function seedRole(
  * @param guildId - Guild ID
  * @param userId - Creator user ID (nullable)
  * @param name - Emoji name
+ * @param animated - Whether the emoji is animated
  * @returns Generated emoji ID
  */
 export function seedEmoji(
   db: Database,
   guildId: string,
   userId: string | null,
-  name = 'test_emoji'
+  name = 'test_emoji',
+  animated = false
 ): string {
   const emojiId = generateSnowflake()
   db.prepare(
-    "INSERT INTO emojis (id, guild_id, name, user_id, roles) VALUES (?, ?, ?, ?, '[]')"
-  ).run(emojiId, guildId, name, userId)
+    "INSERT INTO emojis (id, guild_id, name, user_id, roles, animated) VALUES (?, ?, ?, ?, '[]', ?)"
+  ).run(emojiId, guildId, name, userId, animated ? 1 : 0)
   return emojiId
 }
 

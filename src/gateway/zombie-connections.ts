@@ -138,11 +138,11 @@ export class GatewayZombieConnections {
     private readonly db: Database,
     private readonly manager: SessionManager
   ) {
-    manager.observeSilencedHeartbeat = (session, sequence) => {
+    manager.observeSilencedHeartbeat = (session, sequence, at) => {
       const record = this.zombieOf(session)
       if (!record) return
       record.heartbeats_unacknowledged += 1
-      record.last_heartbeat_at = Date.now()
+      record.last_heartbeat_at = at
       record.last_heartbeat_sequence =
         typeof sequence === 'number' ? sequence : null
       this.notify(record.id)
