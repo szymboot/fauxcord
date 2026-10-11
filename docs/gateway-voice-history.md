@@ -38,6 +38,22 @@ Disconnected states (`channel_id: null`), removed members, deleted users or
 channels, and states pointing into another guild do not appear. With no
 connected states, `voice_states` is an empty array.
 
+The `voice_states` snapshot does not depend on the `GuildVoiceStates` intent;
+only live `VOICE_STATE_UPDATE` dispatches require it. Discord's documentation
+describes `voice_states` as an unconditional
+[GUILD_CREATE extra field](https://docs.discord.com/developers/events/gateway-events#guild-create-guild-create-extra-fields),
+lists only `VOICE_STATE_UPDATE` and `VOICE_CHANNEL_EFFECT_SEND` under
+[`GUILD_VOICE_STATES`](https://docs.discord.com/developers/events/gateway#list-of-intents),
+and documents only `GUILD_PRESENCES` as changing `GUILD_CREATE` content
+(`members` and `presences`). Fauxcord follows the documented contract; if real
+Discord is observed to empty `voice_states` without the intent, that would be a
+separate change.
+
+A voice or stage channel keeps its type for its whole lifetime (see
+[`POST /_test/setup`](test-api.md#post-_testsetup--create-an-environment)), so a
+saved state can only disappear from `voice_states` through a disconnect or a
+deletion, never through a channel conversion.
+
 A new socket using fresh IDENTIFY receives a new snapshot of saved state,
 including changes prepared while an earlier connection existed. This is
 distinct from RESUME, which follows the existing replay behavior and does not

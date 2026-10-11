@@ -59,7 +59,13 @@ describe('GUILD_CREATE historical voice states', () => {
   })
 
   /** Sends true IDENTIFY and consumes READY plus the expected guild snapshots. */
-  async function identify(url: string, token: string, guildCount = 1) {
+  async function identify(
+    url: string,
+    token: string,
+    guildCount = 1,
+    intents: number = GatewayIntentBits.Guilds |
+      GatewayIntentBits.GuildVoiceStates
+  ) {
     const socket = new WebSocket(url)
     sockets.push(socket)
     const next = frameReader(socket)
@@ -69,8 +75,7 @@ describe('GUILD_CREATE historical voice states', () => {
         op: GatewayOp.Identify,
         d: {
           token,
-          intents:
-            GatewayIntentBits.Guilds | GatewayIntentBits.GuildVoiceStates,
+          intents,
         },
       })
     )
@@ -122,6 +127,43 @@ describe('GUILD_CREATE historical voice states', () => {
     seedGuild(server.db, token)
     const { guilds } = await identify(server.url, token)
     expect(guilds[0].voice_states).toEqual([])
+  })
+
+  // Discord documents GUILD_CREATE.voice_states unconditionally ("States of
+  // members currently in voice channels"); GUILD_VOICE_STATES lists only the
+  // VOICE_STATE_UPDATE and VOICE_CHANNEL_EFFECT_SEND events, and the only
+  // documented GUILD_CREATE intent caveat concerns GUILD_PRESENCES. The mock
+  // therefore keeps the snapshot for sessions without GuildVoiceStates.
+  it('keeps voice_states for a Guilds-only session while live updates stay gated', async () => {
+    const server = await createTestGatewayServer()
+    close = server.close
+    const token = seedBot(server.db)
+    const guildId = seedGuild(server.db, token)
+    const human = seedMember(server.db, guildId)
+    const voice = seedVoiceChannel(server.db, guildId)
+    const state = await fixture(server.url, guildId, human, {
+      channel_id: voice,
+      self_stream: true,
+    })
+    const { guilds, next } = await identify(
+      server.url,
+      token,
+      1,
+      GatewayIntentBits.Guilds
+    )
+    expect(guilds[0].voice_states).toEqual([state])
+    expect(guilds[0].members.map((member) => member.user.id)).toContain(human)
+    const leave = await fetch(
+      `${server.url.replace('ws://', 'http://')}/_test/guilds/${guildId}/voice-states/${human}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel_id: null }),
+        signal: AbortSignal.timeout(2000),
+      }
+    )
+    expect(leave.status).toBe(200)
+    await expect(next()).rejects.toThrow('Gateway frame timed out')
   })
 
   it('discovers human streams and bot voice-only sessions across voice and stage channels at startup', async () => {
