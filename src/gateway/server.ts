@@ -534,11 +534,13 @@ function handleHeartbeat(
 ): void {
   const sessionId = sessionIdByWs.get(ws)
   const session = sessionId ? sessionManager.get(sessionId) : undefined
+  // One receipt time keeps the zombie record and the session in agreement.
+  const now = Date.now()
   // A silenced (test zombie) connection never gets HEARTBEAT_ACK, but its
   // heartbeats still arrive and keep the session alive below, so the server's
   // own timeout cannot reap the session before the client detects the zombie.
   if (session && sessionManager.isSilenced(ws.raw as never)) {
-    sessionManager.observeSilencedHeartbeat?.(session, sequence)
+    sessionManager.observeSilencedHeartbeat?.(session, sequence, now)
   } else {
     ws.send(encodePayload({ op: GatewayOp.HeartbeatAck, d: null }))
   }
@@ -546,7 +548,6 @@ function handleHeartbeat(
     return
   }
 
-  const now = Date.now()
   session.lastHeartbeatAt = now
   if (!sessionManager.isSilenced(ws.raw as never))
     session.lastHeartbeatAckAt = now
