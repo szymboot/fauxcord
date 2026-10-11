@@ -3911,8 +3911,8 @@ After the bot is detached:
   never see the guild again, and once another setup takes the guild over, its
   Bot token (and OAuth2 credentials linked to it) are denied with `403`
   `Missing Access` on every guild-scoped native REST route (`/guilds/:id…`,
-  `/channels/:id…`, `/webhooks/:id…`, `/invites/:code`,
-  `/users/@me/guilds/:id/member`, `/applications/:id/guilds/:id…`; token-based
+  `/channels/:id…`, `/webhooks/:id…`, `/invites/:code`, `/lobbies/:id…`
+  (when linked to a guild channel), `/users/@me/guilds/:id/member`, `/applications/:id/guilds/:id…`; token-based
   webhook execution is unauthenticated and unaffected), even when the new setup
   reuses the same bot user ID. Until a takeover, a detached guild under the
   removed setup keeps the limitations described below (an earlier removal is recorded per

@@ -7,7 +7,8 @@ import type { AppEnv } from './auth'
  * Resolves the guild a native REST path belongs to: `/guilds/:id…`,
  * `/users/@me/guilds/:id/member`, `/applications/:id/guilds/:id…`, and the
  * guild resources addressed by their own ID (`/channels/:id…`,
- * `/webhooks/:id…` and `/invites/:code`).
+ * `/webhooks/:id…`, `/invites/:code` and `/lobbies/:id…` linked to a guild
+ * channel).
  * @param db - Database
  * @param path - Request path without a version prefix
  * @returns The guild ID, or undefined for paths outside any guild
@@ -33,6 +34,16 @@ function pathGuildId(db: Database, path: string): string | undefined {
          WHERE w.id = ?`
       )
       .get(webhook[1]) as { guild_id: string | null } | undefined
+    return row?.guild_id ?? undefined
+  }
+  const lobby = /^\/lobbies\/([^/]+)/.exec(path)
+  if (lobby) {
+    const row = db
+      .prepare(
+        `SELECT c.guild_id FROM lobbies l JOIN channels c ON c.id = l.linked_channel_id
+         WHERE l.id = ?`
+      )
+      .get(lobby[1]) as { guild_id: string | null } | undefined
     return row?.guild_id ?? undefined
   }
   const invite = /^\/invites\/([^/]+)/.exec(path)

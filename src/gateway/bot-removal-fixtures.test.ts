@@ -14,6 +14,7 @@ import {
   seedVoiceChannel,
   seedVoiceState,
   seedInvite,
+  seedLobby,
   seedWebhook,
 } from '../test-helpers'
 import { createAuthCode } from '../services/oauth2'
@@ -572,6 +573,19 @@ describe('guild fixtures survive the bot leaving, being kicked or banned', () =>
       await statusOf('/invites/oldcode', 'GET', undefined, OTHER_TOKEN)
     ).toBe(200)
     expect(await statusOf(`/users/@me/guilds/${GUILD}/member`)).toBe(403)
+    // A lobby the new owner linked to a guild channel resolves to the guild.
+    db.prepare(
+      `INSERT OR IGNORE INTO applications (id, owner_id, name, verify_key)
+       VALUES (?, ?, 'Twin', 'verify')`
+    ).run(BOT, BOT)
+    const { lobbyId } = seedLobby(db, BOT, BOT, CHANNEL)
+    expect(await statusOf(`/lobbies/${lobbyId}`)).toBe(403)
+    expect(
+      await statusOf(`/lobbies/${lobbyId}/messages`, 'POST', { content: 'old' })
+    ).toBe(403)
+    expect(
+      await statusOf(`/lobbies/${lobbyId}`, 'GET', undefined, OTHER_TOKEN)
+    ).toBe(200)
     expect(
       await statusOf(
         `/channels/${CHANNEL}/messages`,
