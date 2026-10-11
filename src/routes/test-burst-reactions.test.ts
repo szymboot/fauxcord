@@ -259,6 +259,28 @@ describe('burst (super) reactions over the test control and REST routes', () => 
     }
   })
 
+  it('pages with one comparator for IDs whose JavaScript and SQLite lengths differ', async () => {
+    // '😀' is one SQLite character but two UTF-16 code units in JavaScript, so
+    // a JavaScript-computed cursor length would skip the two-character 'ab'.
+    for (const id of ['ab', '😀']) {
+      db.prepare(
+        "INSERT INTO users (id, username, discriminator, bot) VALUES (?, ?, '0', 0)"
+      ).run(id, `User ${id}`)
+      db.prepare(
+        'INSERT INTO guild_members (guild_id, user_id) VALUES (?, ?)'
+      ).run(guild, id)
+      expect(
+        await statusOf(
+          control('POST', { user_id: id, emoji: '🐝', burst: true })
+        )
+      ).toBe(204)
+    }
+    expect(await users('1')).toEqual(['😀', 'ab'])
+    expect(await users('1', '🐝', `after=${encodeURIComponent('😀')}`)).toEqual(
+      ['ab']
+    )
+  })
+
   it('treats a repeated burst add as a no-op without an event, even with new colors', async () => {
     const body = { user_id: HUMAN_ID, emoji: '🐝', burst: true }
     expect(await statusOf(control('POST', body))).toBe(204)

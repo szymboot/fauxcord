@@ -250,10 +250,12 @@ export function getReactionUsers(
   const clampedLimit = Math.min(limit, 100)
   // Snowflake IDs are stored as TEXT and vary in length, so order (and page)
   // numerically by length first, then lexicographically within one length.
+  // The cursor's length is computed by SQLite too, so ordering and cursor use
+  // one comparator even for IDs whose JavaScript length differs.
   const cursor =
     after === undefined
       ? ''
-      : 'AND (length(u.id) > ? OR (length(u.id) = ? AND u.id > ?))'
+      : 'AND (length(u.id) > length(?) OR (length(u.id) = length(?) AND u.id > ?))'
   return db
     .prepare(
       `SELECT u.* FROM users u
@@ -265,7 +267,7 @@ export function getReactionUsers(
       messageId,
       emoji,
       type,
-      ...(after === undefined ? [] : [after.length, after.length, after]),
+      ...(after === undefined ? [] : [after, after, after]),
       clampedLimit
     ) as UserRow[]
 }
