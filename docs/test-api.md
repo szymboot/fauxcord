@@ -160,12 +160,12 @@ members' voice states.
 
 Allowed input fields:
 
-| Field                                                                             | Meaning                                                                                                                             |
-| --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `channel_id`                                                                      | Voice (type 2) or stage (type 13) channel in the same guild, or `null` to disconnect. Required on first creation.                   |
-| `deaf`, `mute`, `self_deaf`, `self_mute`, `self_stream`, `self_video`, `suppress` | Strict JSON booleans. Defaults are `false`; omitted fields retain their existing values.                                            |
-| `request_to_speak_timestamp`                                                      | Valid ISO8601 datetime with timezone, normalized to Discord timestamp format, or `null`. Defaults to `null`; omission preserves it. |
-| `emit`                                                                            | Strict boolean, defaults to `true`. `false` requests silent historical preparation even with active sessions.                       |
+| Field                                                                             | Meaning                                                                                                                              |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `channel_id`                                                                      | Voice (type 2) or stage (type 13) channel in the same guild, or `null` to disconnect. Required on first creation.                    |
+| `deaf`, `mute`, `self_deaf`, `self_mute`, `self_stream`, `self_video`, `suppress` | Strict JSON booleans. Defaults are `false`; omitted fields retain their existing values. Server `mute`/`deaf` default to the member. |
+| `request_to_speak_timestamp`                                                      | Valid ISO8601 datetime with timezone, normalized to Discord timestamp format, or `null`. Defaults to `null`; omission preserves it.  |
+| `emit`                                                                            | Strict boolean, defaults to `true`. `false` requests silent historical preparation even with active sessions.                        |
 
 To join, send `{"channel_id":"VOICE_CHANNEL_ID"}`. To stream or stop streaming
 while staying connected, send `{"self_stream":true}` or `{"self_stream":false}`.
@@ -176,6 +176,16 @@ flags. A disconnected state cannot enable streaming/video or set a nonnull
 request timestamp. The session ID stays stable through flag changes, moves and
 the disconnect response; rejoining after disconnect creates a fresh session.
 IDs and session identity are server-owned and cannot be overridden.
+
+Server `mute` and `deaf` belong to the guild member, as on Discord, where a
+server mute survives reconnects. When omitted, they default to the member's
+stored `guild_members.mute`/`deaf`, and every successful write copies the
+committed values back to the member. `GET /guilds/:guildId/members/:userId`,
+`GUILD_CREATE` members and the `member` embedded in `VOICE_STATE_UPDATE`
+therefore always agree with the voice state. This mirroring is silent: the
+fixture emits no `GUILD_MEMBER_UPDATE`. Use the production
+[Modify Guild Member voice moderation](#server-voice-moderation-through-modify-guild-member)
+to model the bot's own mute/deafen/move/disconnect actions.
 
 ### One voice connection per human user
 
@@ -268,6 +278,10 @@ setups and memberships remain intact.
   commits, or `INVALID_INPUT`, `UNKNOWN_GUILD`, `UNKNOWN_USER`, `UNKNOWN_MEMBER`,
   `UNKNOWN_CHANNEL` before writes. The route returns only `state`. A native
   publisher can use `changed && emit` after success; this service emits nothing.
+- `applyGuildVoiceStatePatch(db, guildId, userId, patch)`, the same
+  transaction for an already validated `TestVoiceStatePatch`. It is shared by
+  the fixture, stage and Modify Guild Member voice moderation paths and mirrors
+  server `mute`/`deaf` into `guild_members`.
 
 `src/services/voice-state-events.ts` exports
 `publishGuildVoiceStateMutation(db, mutation)`. The fixture and stage routes
@@ -2481,7 +2495,10 @@ can never invalidate the replacement session.
   "close_code": 4009,
   "transport": "sent",
   "status": "identified",
-  "replacement": { "session_id": "fedcba9876543210fedcba9876543210", "...": "same shape as identifies[n]" },
+  "replacement": {
+    "session_id": "fedcba9876543210fedcba9876543210",
+    "...": "same shape as identifies[n]"
+  },
   "ttl_ms": 60000,
   "invalidated_at": 1791936000000,
   "expires_at": 1791936060000,
@@ -2787,6 +2804,100 @@ message reads, edits, deletes, or other Discord endpoints, and does not yet
 enforce feature-specific send permissions such as TTS, attachments, replies,
 stickers or polls. It supplies Fauxcord prerequisites for bot integration tests;
 the bot harness and end-to-end handler coverage remain downstream work.
+
+## Server voice moderation through Modify Guild Member
+
+`PATCH /guilds/:guildId/members/:userId` (also `/api` and `/api/v10`) applies
+Discord's voice moderation fields, see
+[Modify Guild Member](https://docs.discord.com/developers/resources/guild#modify-guild-member):
+
+| Field        | Effect                                                                                     | Required permission                                                                                                             |
+| ------------ | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `mute`       | Server mute (`true`) or unmute (`false`).                                                  | `MUTE_MEMBERS` (`4194304`) in the target's current channel                                                                      |
+| `deaf`       | Server deafen (`true`) or undeafen (`false`).                                              | `DEAFEN_MEMBERS` (`8388608`) in the target's current channel                                                                    |
+| `channel_id` | Move to another voice (`2`) or stage (`13`) channel of the same guild; `null` disconnects. | `MOVE_MEMBERS` (`16777216`) in the current channel; a different destination also needs `CONNECT` (`1048576`) and `MOVE_MEMBERS` |
+
+Connect the member first with
+[`PATCH /_test/guilds/:guildId/voice-states/:userId`](#patch-_testguildsguildidvoice-statesuserid--prepare-a-voice-state).
+A successful request returns `200` with the updated member (or the existing
+empty `204` when `roles` and `mute` are combined without a timeout, the spec's
+documented alternative success response), persists
+`guild_members.mute`/`deaf` and the voice state together, and then publishes
+`GUILD_MEMBER_UPDATE` followed by one `VOICE_STATE_UPDATE` if the voice state
+changed. The voice event goes through the shared voice-state publisher, so
+`GuildVoiceStates` intent filtering, sequencing, the replay buffer and
+[capture/hold/release/replay](#scoped-gateway-capture-hold-release-and-replay)
+behave exactly like fixture-driven voice events. Combined fields (for example
+`{"mute":true,"nick":"Quiet"}`) produce a single voice event whose embedded
+member already contains every change. Re-sending an unchanged flag emits only
+`GUILD_MEMBER_UPDATE`.
+
+- **Move**: keeps the voice `session_id`, `self_mute`, `self_deaf` and
+  `self_video`; ends Go Live (`self_stream: false`); clears
+  `request_to_speak_timestamp`; and sets `suppress` to `true` for a stage
+  destination (audience) or `false` for a voice channel. Moving to the current
+  channel changes nothing.
+- **Disconnect** (`"channel_id": null`): same semantics as the fixture
+  disconnect. `channel_id` becomes `null` with the previous `session_id`;
+  streaming, video and request-to-speak are cleared; server mute/deaf remain on
+  the member and apply again on the next join.
+
+Errors (checked in this order; rejected requests write nothing and emit no
+event, even for other fields in the same payload):
+
+1. Unknown guild: `404`, code `10004`.
+2. Non-boolean `mute`/`deaf` or a non-snowflake-string `channel_id`: `400`,
+   code `50035` (`BASE_TYPE_BOOLEAN` / `NUMBER_TYPE_COERCE`).
+3. Unknown role or member: `404` (`10011`, `10007`).
+4. Target not connected to voice (no voice state, or a disconnected one) with
+   any non-null `mute`/`deaf` or any `channel_id`, including `null`: `400`, code
+   `40032` (`Target user is not connected to voice.`). `mute: null` and
+   `deaf: null` are no-ops and do not require a connection.
+5. Destination that does not exist or belongs to another guild: `404`, code
+   `10003`. A non-voice/stage destination: `400`, code `50024`.
+6. Missing permission: `403`, code `50013` (`Missing Permissions`). An OAuth2
+   Bearer token cannot moderate voice and always receives this error for
+   voice fields.
+
+Permissions are resolved like
+[message-send permissions](#exercise-actual-message-send-permissions): `@everyone`
+and assigned roles, then everyone, role and member overwrites of the relevant
+channel. Missing `VIEW_CHANNEL` or `CONNECT` in that channel implicitly denies
+every voice moderation permission there (Discord's
+[implicit permissions](https://docs.discord.com/developers/topics/permissions#implicit-permissions)).
+The guild owner and members with guild-level `ADMINISTRATOR` bypass all checks.
+**The default `POST /_test/setup` bot owns its guilds, so existing setups need no
+extra grants.** If `guilds[].owner_id` selects a human owner (or another setup
+takes over ownership), grant the bot a role with the bits above (or
+`ADMINISTRATOR`) through `POST /guilds/:guildId/roles` and
+`PUT /guilds/:guildId/members/:botId/roles/:roleId`; the default `@everyone`
+permissions (`1071698660929`) include `VIEW_CHANNEL` and `CONNECT` but none of
+the moderation bits. Only the voice fields are permission-checked; `nick`,
+`roles` and `communication_disabled_until` keep their unchecked behavior. With
+`DISABLE_AUTH=true` and an unregistered token, the dummy bot has no stored
+permissions and skips these checks.
+
+REST fault controls for `PATCH /guilds/:guildId/members/:userId` still run
+first: an injected failure writes nothing and emits no voice event, and a later
+retry applies normally. This endpoint records no audit-log entries and ignores
+`X-Audit-Log-Reason`, as before.
+
+`PATCH /guilds/:guildId/members/@me` (Modify Current Member) does not accept
+voice fields on Discord. Fauxcord ignores `mute`, `deaf` and `channel_id` there,
+like other unknown fields, and only applies `nick`. Target the bot's own user ID
+on the route above to moderate the bot itself.
+
+Discord does not document several details; Fauxcord's choices:
+
+- Error precedence (`40032` before channel and permission errors), the codes
+  for invalid destinations (`10003`/`50024`), and requiring `MOVE_MEMBERS` in
+  both source and destination.
+- Gateway order: `GUILD_MEMBER_UPDATE` is published before
+  `VOICE_STATE_UPDATE`.
+- Move side effects (Go Live ends, stage destinations start suppressed
+  regardless of the target's stage moderator status).
+- Role hierarchy, timeouts of the acting bot, channel user limits and
+  `PRIORITY_SPEAKER` are not modeled for voice moderation.
 
 ## REST pagination page holds
 

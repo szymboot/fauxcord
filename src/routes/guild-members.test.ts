@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { Hono } from 'hono'
 import { createGuildMemberRoutes } from './guild-members'
 import { initializeDatabase, closeDatabase } from '../db'
-import { seedBot, seedGuild, createFullTestApp } from '../test-helpers'
+import {
+  seedBot,
+  seedGuild,
+  seedVoiceChannel,
+  seedVoiceState,
+  createFullTestApp,
+} from '../test-helpers'
 import type { Database } from '../db'
 
 describe('Guild Members API', () => {
@@ -88,6 +94,7 @@ describe('Guild Members API', () => {
 
     it('assigns roles to a member', async () => {
       const userId = seedMember('555555555555555555')
+      seedVoiceState(db, guildId, userId, seedVoiceChannel(db, guildId))
       const roleId = seedRole('444444444444444444')
       const res = await app.request(`/guilds/${guildId}/members/${userId}`, {
         method: 'PATCH',

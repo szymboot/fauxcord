@@ -285,11 +285,18 @@ export interface GuildMemberUpdateParams {
   nick?: string | null
   roles?: string[]
   mute?: boolean | null
+  deaf?: boolean | null
   communication_disabled_until?: string | null
 }
 
-/** Emits a native member snapshot only to its registered guild owner. */
-function emitMemberUpdate(
+/**
+ * Emits a native GUILD_MEMBER_UPDATE snapshot only to its registered guild
+ * owner.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param member - Committed member snapshot
+ */
+export function publishGuildMemberUpdate(
   db: Database,
   guildId: string,
   member: GuildMemberObject
@@ -308,14 +315,15 @@ function emitMemberUpdate(
 }
 
 /**
- * Updates a guild member's nickname, roles, voice mute and/or timeout deadline.
+ * Persists a guild member's nickname, roles, server mute/deaf and/or timeout
+ * deadline without emitting any Gateway event.
  * @param db - Database
  * @param guildId - Guild ID
  * @param userId - User ID
  * @param payload - Update payload
  * @returns Updated guild member object, or null
  */
-export function updateGuildMember(
+export function persistGuildMemberUpdate(
   db: Database,
   guildId: string,
   userId: string,
@@ -349,6 +357,12 @@ export function updateGuildMember(
     ).run(payload.mute ? 1 : 0, guildId, userId)
   }
 
+  if (payload.deaf !== undefined && payload.deaf !== null) {
+    db.prepare(
+      'UPDATE guild_members SET deaf = ? WHERE guild_id = ? AND user_id = ?'
+    ).run(payload.deaf ? 1 : 0, guildId, userId)
+  }
+
   if (payload.roles !== undefined) {
     const roles = payload.roles
     const replaceRoles = db.transaction(() => {
@@ -365,9 +379,28 @@ export function updateGuildMember(
     replaceRoles()
   }
 
-  const updated = getGuildMember(db, guildId, userId)
+  return getGuildMember(db, guildId, userId)
+}
+
+/**
+ * Updates a guild member and emits GUILD_MEMBER_UPDATE for the result.
+ * This low-level writer stores `mute`/`deaf` on the member only; the Modify
+ * Guild Member route applies Discord's voice connection and permission rules.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - User ID
+ * @param payload - Update payload
+ * @returns Updated guild member object, or null
+ */
+export function updateGuildMember(
+  db: Database,
+  guildId: string,
+  userId: string,
+  payload: GuildMemberUpdateParams
+): GuildMemberObject | null {
+  const updated = persistGuildMemberUpdate(db, guildId, userId, payload)
   if (updated) {
-    emitMemberUpdate(db, guildId, updated)
+    publishGuildMemberUpdate(db, guildId, updated)
   }
   return updated
 }
@@ -443,7 +476,7 @@ export function addMemberRole(
   // emit in that case so subscribers never spread a null member payload.
   const memberObject = getGuildMember(db, guildId, userId)
   if (memberObject) {
-    emitMemberUpdate(db, guildId, memberObject)
+    publishGuildMemberUpdate(db, guildId, memberObject)
   }
   return true
 }
@@ -475,7 +508,7 @@ export function removeMemberRole(
   // emit in that case so subscribers never spread a null member payload.
   const memberObject = getGuildMember(db, guildId, userId)
   if (memberObject) {
-    emitMemberUpdate(db, guildId, memberObject)
+    publishGuildMemberUpdate(db, guildId, memberObject)
   }
   return true
 }

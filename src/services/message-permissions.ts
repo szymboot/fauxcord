@@ -6,11 +6,9 @@ import {
   type DiscordErrorResponse,
 } from '../errors'
 import { getChannel } from './channels'
+import { PermissionBit, resolveChannelPermissions } from './guild-permissions'
 
-const ADMINISTRATOR = 1n << 3n
-const VIEW_CHANNEL = 1n << 10n
-const SEND_MESSAGES = 1n << 11n
-const EMBED_LINKS = 1n << 14n
+const { VIEW_CHANNEL, SEND_MESSAGES, EMBED_LINKS } = PermissionBit
 
 /** A send denial with the HTTP statuses produced by this permission check. */
 export interface MessageSendError extends DiscordErrorResponse {
@@ -55,70 +53,28 @@ export function getMessageSendError(
       400
     )
 
-  const guildId = channel.guild_id
-  const guild = db
-    .prepare('SELECT owner_id FROM guilds WHERE id = ?')
-    .get(guildId) as { owner_id: string } | undefined
-  // seedGuild intentionally uses the fixture bot as owner. Owners inherently
-  // have access even in the minimal helper fixture without a member row.
-  if (guild?.owner_id === userId) return null
+  const resolved = resolveChannelPermissions(
+    db,
+    channel.guild_id,
+    channel.permission_overwrites,
+    userId
+  )
+  if (!resolved)
+    return sendError(DiscordErrorCode.MISSING_ACCESS, 'Missing Access', 403)
+  if (resolved.privileged) return null
+  const { permissions } = resolved
+
+  if (!(permissions & VIEW_CHANNEL))
+    return sendError(DiscordErrorCode.MISSING_ACCESS, 'Missing Access', 403)
 
   const member = db
     .prepare(
       'SELECT communication_disabled_until FROM guild_members WHERE guild_id = ? AND user_id = ?'
     )
-    .get(guildId, userId) as
+    .get(channel.guild_id, userId) as
     { communication_disabled_until: string | null } | undefined
-  if (!member)
-    return sendError(DiscordErrorCode.MISSING_ACCESS, 'Missing Access', 403)
-
-  const roles = db
-    .prepare(
-      `SELECT id, permissions FROM roles
-       WHERE guild_id = ? AND (id = ? OR id IN (
-         SELECT role_id FROM member_roles WHERE guild_id = ? AND user_id = ?
-       ))`
-    )
-    .all(guildId, guildId, guildId, userId) as {
-    id: string
-    permissions: string
-  }[]
-  let permissions = 0n
-  const roleIds = new Set<string>()
-  for (const role of roles) {
-    permissions |= BigInt(role.permissions)
-    if (role.id !== guildId) roleIds.add(role.id)
-  }
-  if (permissions & ADMINISTRATOR) return null
-
-  const everyone = channel.permission_overwrites.find(
-    (overwrite) => overwrite.type === 0 && overwrite.id === guildId
-  )
-  if (everyone)
-    permissions =
-      (permissions & ~BigInt(everyone.deny)) | BigInt(everyone.allow)
-
-  let allow = 0n
-  let deny = 0n
-  for (const overwrite of channel.permission_overwrites) {
-    if (overwrite.type !== 0 || !roleIds.has(overwrite.id)) continue
-    allow |= BigInt(overwrite.allow)
-    deny |= BigInt(overwrite.deny)
-  }
-  permissions = (permissions & ~deny) | allow
-
-  const personal = channel.permission_overwrites.find(
-    (overwrite) => overwrite.type === 1 && overwrite.id === userId
-  )
-  if (personal)
-    permissions =
-      (permissions & ~BigInt(personal.deny)) | BigInt(personal.allow)
-
-  if (!(permissions & VIEW_CHANNEL))
-    return sendError(DiscordErrorCode.MISSING_ACCESS, 'Missing Access', 403)
-
   const timedOut =
-    member.communication_disabled_until !== null &&
+    member?.communication_disabled_until != null &&
     Date.parse(member.communication_disabled_until) > Date.now()
   return timedOut ||
     !(permissions & SEND_MESSAGES) ||

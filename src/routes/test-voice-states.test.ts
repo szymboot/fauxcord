@@ -140,7 +140,18 @@ describe('Test voice-state fixtures', () => {
     )
     const next = (await rejoined.json()) as GuildVoiceState
     expect(next.session_id).not.toBe(initial.session_id)
-    expect(snapshot().slice(1)).toEqual(identities)
+    // Server mute is owned by the member: the fixture mirrors it into
+    // guild_members, survives disconnect and is restored on rejoin.
+    expect(next.mute).toBe(true)
+    const [members, ...others] = identities
+    expect(snapshot().slice(1)).toEqual([
+      (members as Record<string, unknown>[]).map((row) =>
+        row.guild_id === guild && row.user_id === user
+          ? { ...row, mute: 1 }
+          : row
+      ),
+      ...others,
+    ])
     expect(emit).not.toHaveBeenCalled()
   })
 
