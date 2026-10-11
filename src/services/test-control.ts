@@ -13,7 +13,7 @@ import { toDiscordTimestamp } from '../timestamp'
 import { gatewayBus } from '../gateway/bus'
 import { buildGuildCreatePayload } from './guilds'
 import { getGuildMember, type GuildMemberObject } from './guild-members'
-import { getChannel } from './channels'
+import { getChannel, isVoiceCapableChannelType } from './channels'
 import { getUser, type UserObject } from './users'
 import { resetAuditLogResponses } from './audit-log-responses'
 import { resetRestFaults } from './rest-faults'
@@ -78,6 +78,30 @@ export interface SetupResponse {
 }
 
 /**
+ * Rejects setup reuse of a channel ID that would change what Discord treats
+ * as immutable: voice-capable channels (voice 2, stage 13) cannot become
+ * other types or vice versa (Discord only converts text <-> announcement),
+ * and voice-capable channels cannot move to another guild. Either change
+ * would orphan stored voice states and AFK channel references.
+ * @param existing - Stored guild and type of the reused channel
+ * @param guildId - Guild the setup request places the channel in
+ * @param type - Requested (or preserved) channel type
+ * @throws Error with INVALID_CHANNEL_TYPE_CHANGE or VOICE_CHANNEL_GUILD_CHANGE
+ */
+function assertStableChannelIdentity(
+  existing: { guild_id: string | null; type: number },
+  guildId: string,
+  type: number
+): void {
+  if (
+    isVoiceCapableChannelType(existing.type) !== isVoiceCapableChannelType(type)
+  )
+    throw new Error('INVALID_CHANNEL_TYPE_CHANGE')
+  if (isVoiceCapableChannelType(existing.type) && existing.guild_id !== guildId)
+    throw new Error('VOICE_CHANNEL_GUILD_CHANGE')
+}
+
+/**
  * Sets up the test environment.
  * @param db - Database
  * @param request - Setup request
@@ -85,7 +109,9 @@ export interface SetupResponse {
  * @throws Error with CONFLICT for duplicate tokens, INVALID_OWNER_ID for
  * malformed owner IDs, INVALID_GUILD_ICON for malformed icon hashes,
  * INVALID_GUILD_PREMIUM_TIER for invalid boost tiers, UNKNOWN_USER for
- * missing owners, or BOT_OWNER for bots
+ * missing owners, BOT_OWNER for bots, INVALID_CHANNEL_TYPE_CHANGE for
+ * voice-capable <-> other type changes, or VOICE_CHANNEL_GUILD_CHANGE for
+ * cross-guild moves of voice-capable channels
  */
 export function setupTestEnvironment(
   db: Database,
@@ -266,7 +292,15 @@ export function setupTestEnvironment(
       const channelRequests = guildReq.channels ?? []
       for (const channelReq of channelRequests) {
         const channelId = channelReq.id ?? generateSnowflake()
-        const channelType = channelReq.type ?? 0
+        const existingChannel = db
+          .prepare('SELECT guild_id, type FROM channels WHERE id = ?')
+          .get(channelId) as
+          { guild_id: string | null; type: number } | undefined
+        // A reused channel keeps its stored type unless one is given.
+        const channelType = channelReq.type ?? existingChannel?.type ?? 0
+        if (existingChannel) {
+          assertStableChannelIdentity(existingChannel, guildId, channelType)
+        }
 
         // Create the channel (if the same ID still exists, overwrite its contents and reuse it = idempotent)
         db.prepare(

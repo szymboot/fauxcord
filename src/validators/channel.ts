@@ -155,6 +155,50 @@ export function validateChannelUpdate(
   return errors
 }
 
+/**
+ * Whether an untrusted channel type value denotes a voice (2) or stage (13)
+ * channel.
+ * @param type - Channel type value
+ * @returns true for voice-capable channel types
+ */
+function isVoiceCapable(type: unknown): boolean {
+  return type === 2 || type === 13
+}
+
+/**
+ * Validates a requested channel `type` against the stored type. Discord only
+ * converts between text (0) and announcement (5) channels, so a voice or
+ * stage channel can never change type and no other channel can become voice
+ * or stage. Other non-voice conversions are not modeled and stay ignored.
+ * @param currentType - Stored channel type
+ * @param requested - Untrusted `type` field from the PATCH payload
+ * @returns Validation error map (empty when the request is acceptable)
+ */
+export function validateChannelTypeChange(
+  currentType: number,
+  requested: unknown
+): ValidationErrors {
+  if (
+    requested === undefined ||
+    requested === null ||
+    requested === currentType ||
+    (!isVoiceCapable(currentType) && !isVoiceCapable(requested))
+  )
+    return {}
+  const choices =
+    currentType === 0 || currentType === 5 ? '(0, 5)' : `(${currentType})`
+  return {
+    type: {
+      _errors: [
+        {
+          code: 'BASE_TYPE_CHOICES',
+          message: `Value must be one of ${choices}.`,
+        },
+      ],
+    },
+  }
+}
+
 /** Permission overwrite request payload (unknown fields until validated) */
 export interface PermissionOverwritePayload {
   type?: unknown

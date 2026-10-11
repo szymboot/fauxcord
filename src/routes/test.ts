@@ -223,6 +223,31 @@ export function createTestRoutes(
           404
         )
       }
+      if (
+        err instanceof Error &&
+        err.message === 'INVALID_CHANNEL_TYPE_CHANGE'
+      ) {
+        return c.json(
+          {
+            message:
+              'Channel type cannot change between voice-capable (2, 13) and other types',
+            code: 0,
+          },
+          400
+        )
+      }
+      if (
+        err instanceof Error &&
+        err.message === 'VOICE_CHANNEL_GUILD_CHANGE'
+      ) {
+        return c.json(
+          {
+            message: 'Voice-capable channels cannot move to another guild',
+            code: 0,
+          },
+          400
+        )
+      }
       if (err instanceof Error && err.message === 'BOT_OWNER') {
         return c.json(
           { message: 'Guild owner must not be a bot', code: 0 },

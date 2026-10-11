@@ -50,12 +50,23 @@ curl -X POST http://localhost:3000/_test/setup \
 | `guilds[].channels`        | —        | Array of channels to create                              |
 | `guilds[].channels[].id`   | —        | Channel ID (auto-generated if omitted)                   |
 | `guilds[].channels[].name` | ✅       | Channel name                                             |
-| `guilds[].channels[].type` | —        | Channel type (`0`: text, default: `0`)                   |
+| `guilds[].channels[].type` | —        | Channel type (`0`: text, default: `0`; a reused channel ID keeps its stored type when omitted) |
 
 **Response**: The setup result (including any auto-generated IDs)
 
 **Note**: Calling this twice with the same token returns `409 Conflict`.  
 For subsequent calls, delete the existing data first via `/_test/reset` or `DELETE /_test/setup/:token`.
+
+Reusing an existing channel ID updates that channel in place, with Discord's
+channel-type rules: voice (`2`) and stage (`13`) channels cannot become other
+types, other channels cannot become voice or stage channels, and a voice or
+stage channel cannot move to another guild. Such requests return `400` with no
+partial fixture state or Gateway events, so voice states can never be left
+attached to a channel that no longer accepts them. Switching between voice and
+stage (`2` ↔ `13`) remains a privileged fixture override. The ordinary Discord
+`PATCH /channels/{channel.id}` rejects any `type` change on a voice or stage
+channel and any change into one with `50035` (`BASE_TYPE_CHOICES`); other
+`type` values there are still ignored.
 
 To seed a guild icon, pass `guilds[].icon`, for example
 `"a_0123456789abcdef0123456789abcdef"`. The value is stored verbatim and appears

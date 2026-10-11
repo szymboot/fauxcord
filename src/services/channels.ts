@@ -46,6 +46,15 @@ type _OverwriteCompatGuard =
     ? true
     : never
 
+/**
+ * Whether a channel type carries voice connections (voice 2 or stage 13).
+ * @param type - Channel type
+ * @returns true for voice-capable channel types
+ */
+export function isVoiceCapableChannelType(type: number): boolean {
+  return type === 2 || type === 13
+}
+
 /** Channel record type retrieved from the DB */
 interface ChannelRow {
   id: string
@@ -386,6 +395,8 @@ export function setVoiceStatus(
 
 /** Channel update request type */
 export interface ChannelUpdatePayload {
+  /** Accepted only when unchanged; see validateChannelTypeChange. */
+  type?: number
   name?: string
   topic?: string | null
   nsfw?: boolean
