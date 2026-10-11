@@ -54,6 +54,7 @@ interface Outage {
   expires_at: number
   ended_at: number | null
   retained_until: number | null
+  recovery_snapshot: boolean | null
   guild_deletes: DispatchObservation[]
   guild_deletes_skipped: number
   guild_creates: DispatchObservation[]
@@ -364,7 +365,11 @@ describe('Gateway guild outage control', () => {
     })
 
     const ended = await end(outage.id)
-    expect(ended).toMatchObject({ status: 'recovered', ended_by: 'request' })
+    expect(ended).toMatchObject({
+      status: 'recovered',
+      ended_by: 'request',
+      recovery_snapshot: true,
+    })
     expect(ended.ended_at).toBeGreaterThanOrEqual(outage.started_at)
     expect(ended.retained_until).toBe(Number(ended.ended_at) + RETAIN_MS)
     for (const target of [client, second]) {
@@ -792,6 +797,41 @@ describe('Gateway guild outage control', () => {
     ).toEqual([])
   })
 
+  it('never recovers with a snapshot of a guild another setup took over', async () => {
+    const other = await connect(OTHER_TOKEN, INTENTS, [OTHER_GUILD])
+    const outage = await start()
+    await frame(client, (entry) => entry.t === 'GUILD_DELETE')
+    expect(
+      await status('/_test/setup', 'POST', {
+        token: 'Bot outage-takeover',
+        user: { id: '131313131313131313' },
+        guilds: [{ id: GUILD_A, name: 'Taken over', channels: [] }],
+      })
+    ).toBe(201)
+    // Setup's own GUILD_CREATE broadcast predates the end of the outage.
+    await fence(other)
+    const otherBefore = lastSequence(other)
+
+    const ended = await end(outage.id)
+    expect(ended).toMatchObject({
+      status: 'recovered',
+      recovery_snapshot: false,
+      guild_creates: [],
+    })
+    await fence(client)
+    await fence(other)
+    expect(
+      client.frames.filter(
+        (entry) => entry.t === 'GUILD_CREATE' && entry.d?.name === 'Taken over'
+      )
+    ).toEqual([])
+    expect(
+      other.frames.filter(
+        (entry) => entry.t === 'GUILD_CREATE' && Number(entry.s) > otherBefore
+      )
+    ).toEqual([])
+  })
+
   it('validates requests and query parameters', async () => {
     for (const body of [
       'not json',
@@ -994,6 +1034,50 @@ describe('GatewayGuildOutages limits', () => {
           (result as { status: string }).status === 'recovered'
       )
     ).toBe(true)
+    controls.reset(undefined, false)
+  })
+
+  it('keeps waiters blocked until every recovery write settled', async () => {
+    const { manager, controls, ids } = setup(1)
+    // A session awaiting RESUME reports `buffered` synchronously first.
+    const dropped = session(manager)
+    ;(dropped.ws as unknown as { readyState: number }).readyState = 3
+    const callbacks: ((error?: Error) => void)[] = []
+    manager.create({
+      botId: '111111111111111111',
+      token: 'limits',
+      intents: 1,
+      ws: {
+        readyState: 1,
+        send: (_data: string, callback?: (error?: Error) => void) => {
+          if (callback) callbacks.push(callback)
+        },
+      } as never,
+    })
+    const record = controls.create({
+      bot_id: '111111111111111111',
+      guild_id: ids[0] ?? '',
+      ttl_ms: 60_000,
+    }) as { id: string }
+    for (const callback of callbacks.splice(0)) callback()
+    let settled = false
+    const waiting = controls.wait(record.id, 30_000).then((result) => {
+      settled = true
+      return result
+    })
+    controls.end(record.id)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    expect(callbacks).toHaveLength(1)
+    callbacks[0]?.()
+    const result = (await waiting) as {
+      guild_creates: { transport: string }[]
+    }
+    expect(result.guild_creates.map((entry) => entry.transport)).toEqual([
+      'buffered',
+      'sent',
+    ])
     controls.reset(undefined, false)
   })
 

@@ -94,6 +94,10 @@ interface OutageRecord {
   expires_at: number
   ended_at: number | null
   retained_until: number | null
+  /** Whether recovery wrote snapshots; false when the guild left the setup */
+  recovery_snapshot: boolean | null
+  /** True while recovery dispatches are still being registered. */
+  recovering: boolean
   timer: NodeJS.Timeout
   guild_deletes: GuildDeleteObservation[]
   guild_deletes_skipped: number
@@ -367,6 +371,8 @@ export class GatewayGuildOutages {
       expires_at: now + request.ttl_ms,
       ended_at: null,
       retained_until: null,
+      recovery_snapshot: null,
+      recovering: false,
       timer,
       guild_deletes: [],
       guild_deletes_skipped: 0,
@@ -428,13 +434,26 @@ export class GatewayGuildOutages {
     record.status = 'recovered'
     record.ended_by = reason
     record.ended_at = Date.now()
-    const guild = buildGuildCreatePayload(this.db, record.guild_id)
+    // A reused setup may have moved the guild to another bot token meanwhile;
+    // its snapshot must never reach the original setup's sessions.
+    const guild =
+      this.ownerToken(record.bot_id, record.guild_id) === record.token
+        ? buildGuildCreatePayload(this.db, record.guild_id)
+        : null
+    record.recovery_snapshot = guild !== null
     if (!guild) return
-    for (const session of this.sessionsInScope(record)) {
-      if (!hasIntent(session.intents, GatewayIntentBits.Guilds)) continue
-      sendDispatch(this.manager, session, 'GUILD_CREATE', guild, (payload) =>
-        this.observeCreate(record, session, payload)
-      )
+    // Waiters must not settle on an early session's synchronous transport
+    // status before every recovery GUILD_CREATE has been registered.
+    record.recovering = true
+    try {
+      for (const session of this.sessionsInScope(record)) {
+        if (!hasIntent(session.intents, GatewayIntentBits.Guilds)) continue
+        sendDispatch(this.manager, session, 'GUILD_CREATE', guild, (payload) =>
+          this.observeCreate(record, session, payload)
+        )
+      }
+    } finally {
+      record.recovering = false
     }
   }
 
@@ -454,6 +473,7 @@ export class GatewayGuildOutages {
           expires_at: record.expires_at,
           ended_at: record.ended_at,
           retained_until: record.retained_until,
+          recovery_snapshot: record.recovery_snapshot,
           guild_deletes: record.guild_deletes,
           guild_deletes_skipped: record.guild_deletes_skipped,
           guild_creates: record.guild_creates,
@@ -487,7 +507,9 @@ export class GatewayGuildOutages {
       const current = this.records.get(record.id)
       return (
         !current ||
-        (current.status === 'recovered' && settledTransports(current))
+        (current.status === 'recovered' &&
+          !current.recovering &&
+          settledTransports(current))
       )
     }
     if (waitMs === 0 || settled()) return this.inspect(record.id)

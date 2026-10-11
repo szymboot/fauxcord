@@ -3175,6 +3175,7 @@ session is allowed; it then only affects later IDENTIFYs.
   "expires_at": 1791936060000,
   "ended_at": 1791936012000,
   "retained_until": 1791936132000,
+  "recovery_snapshot": true,
   "guild_deletes": [
     {
       "session_id": "0123456789abcdef0123456789abcdef",
@@ -3223,6 +3224,10 @@ session is allowed; it then only affects later IDENTIFYs.
 
 - `status`: `unavailable` while active, `recovered` after it ended;
   `ended_by` is `request` (end route, DELETE or reset) or `ttl`.
+- `recovery_snapshot`: `null` while active; `true` when recovery wrote
+  `GUILD_CREATE` snapshots; `false` when the guild no longer belongs to the
+  setup at recovery time (for example another `/_test/setup` reused the guild
+  ID), in which case nothing is sent to the original setup's sessions.
 - `started_at`/`ended_at`/`dispatched_at` are server epoch milliseconds;
   `expires_at` is when the TTL would end the outage.
 - `guild_deletes`: one entry per written outage `GUILD_DELETE`, with the
