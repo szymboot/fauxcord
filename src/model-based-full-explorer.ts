@@ -564,8 +564,22 @@ async function runGatewayEventCatalog(
     const botMemberPath = `${API_PREFIX}/guilds/${guildId}/members/@me`
     await call('PATCH', botMemberPath, { nick: 'Coverage Bot' })
     await expectDispatch('GUILD_MEMBER_UPDATE', { guild_id: guildId })
-    const removeBotMemberPath = `${API_PREFIX}/guilds/${guildId}/members/${botId}`
-    await call('DELETE', removeBotMemberPath, undefined, 204)
+    // Kicking the bot itself would remove the guild, so kick a human member.
+    const humanId = '444444444444444444'
+    for (const [path_, body] of [
+      ['/_test/users', { id: humanId, username: 'Coverage Human' }],
+      [`/_test/guilds/${guildId}/members/${humanId}`, {}],
+    ] as const) {
+      const fixture = await request(server.baseUrl, path_, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      observe(observation, 'POST', path_, fixture)
+      assert(fixture.status === 201, `${path_} returned ${fixture.status}`)
+    }
+    const removeMemberPath = `${API_PREFIX}/guilds/${guildId}/members/${humanId}`
+    await call('DELETE', removeMemberPath, undefined, 204)
     await expectDispatch('GUILD_MEMBER_REMOVE', { guild_id: guildId })
 
     const commandPath = `${API_PREFIX}/applications/${botId}/commands`
@@ -609,6 +623,14 @@ async function runGatewayEventCatalog(
 
     await call('DELETE', `${API_PREFIX}/channels/${channelId}`, undefined, 200)
     await expectDispatch('CHANNEL_DELETE', { id: channelId })
+    // Leaving last ends the guild's lifecycle for this bot with GUILD_DELETE.
+    await call(
+      'DELETE',
+      `${API_PREFIX}/users/@me/guilds/${guildId}`,
+      undefined,
+      204
+    )
+    await expectDispatch('GUILD_DELETE', { id: guildId })
     const expectedEvents = [
       'GUILD_CREATE',
       'GUILD_MEMBER_ADD',
@@ -626,9 +648,10 @@ async function runGatewayEventCatalog(
       'GUILD_MEMBER_REMOVE',
       'INTERACTION_CREATE',
       'CHANNEL_DELETE',
+      'GUILD_DELETE',
     ]
     assert(
-      new Set(expectedEvents).size === 16,
+      new Set(expectedEvents).size === 17,
       'Gateway event catalog contains duplicate names'
     )
     observation.checks.push(

@@ -353,11 +353,13 @@ describe('message-send permissions over real HTTP and WebSocket', () => {
             break
           }
           case 'membership': {
-            await request(
-              `/guilds/${GUILD}/members/${BOT}`,
-              undefined,
-              'DELETE'
-            )
+            // Kicking the bot itself removes the whole guild, so revoke
+            // only the member row as a direct fixture change.
+            server.db
+              .prepare(
+                'DELETE FROM guild_members WHERE guild_id = ? AND user_id = ?'
+              )
+              .run(GUILD, BOT)
             break
           }
           case 'channel': {

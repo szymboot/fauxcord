@@ -7,7 +7,12 @@
 import { Hono } from 'hono'
 import type { Database } from '../db'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
-import { getGuild } from '../services/guilds'
+import type { GatewayEventControls } from '../gateway/event-controls'
+import {
+  getGuild,
+  getGuildBotUserId,
+  removeGuildFromBot,
+} from '../services/guilds'
 import { getRole } from '../services/guild-roles'
 import {
   getGuildMember,
@@ -60,9 +65,13 @@ const VOICE_MODERATION_ERRORS: Record<
 /**
  * Creates the guild members API routes.
  * @param db - Database
+ * @param eventControls - Gateway test controls cleared when the bot is kicked
  * @returns Hono router instance
  */
-export function createGuildMemberRoutes(db: Database): Hono<AppEnv> {
+export function createGuildMemberRoutes(
+  db: Database,
+  eventControls?: Pick<GatewayEventControls, 'deleteGuild'>
+): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
 
   // GET /guilds/:guildId/members — List a guild's members
@@ -330,6 +339,14 @@ export function createGuildMemberRoutes(db: Database): Hono<AppEnv> {
       'Unknown Guild'
     )
     if (guild instanceof Response) return guild
+
+    // Kicking the guild's own bot removes the guild from that bot
+    // (GUILD_MEMBER_REMOVE + GUILD_DELETE, then the guild is deleted).
+    if (userId === getGuildBotUserId(db, guildId)) {
+      removeGuildFromBot(db, guildId, 'kick')
+      eventControls?.deleteGuild(guildId)
+      return c.body(null, 204)
+    }
 
     const removed = removeGuildMember(db, guildId, userId)
     if (!removed) {

@@ -200,6 +200,10 @@ ENDPOINTS = json.loads((COMMON_DIR / "endpoints.json").read_text(encoding="utf-8
 
 BOT = SETUP["user"]["id"]
 GUILD = SETUP["guilds"][0]["id"]
+# Ban a synthetic, never-a-member user ID rather than the bot itself:
+# banning the guild's own bot removes the guild from that bot (Fauxcord
+# sends GUILD_DELETE and deletes it), which would break every later check.
+BAN_TARGET = "700000000000000001"
 CH = SETUP["guilds"][0]["channels"][0]["id"]
 # HTTPClient.request() adds "Bot " itself, so the prefix from setup.json's
 # token is stripped before login() (see module docstring).
@@ -393,7 +397,7 @@ async def main() -> None:
             pass  # reaction endpoints may still exercise the wire format
 
         try:
-            await client.create_guild_ban(GUILD, BOT)
+            await client.create_guild_ban(GUILD, BAN_TARGET)
         except Exception:
             pass  # bootstrap best-effort; some rows depend on the ban existing
 
@@ -606,15 +610,15 @@ async def main() -> None:
             "GET /gateway/bot": (client.get_gateway_bot, None),
             "GET /gateway": (client.get_gateway, None),
             "DELETE /guilds/{guild_id}/bans/{user_id}": (
-                lambda: client.remove_guild_ban(GUILD, BOT),
+                lambda: client.remove_guild_ban(GUILD, BAN_TARGET),
                 None,
             ),
             "GET /guilds/{guild_id}/bans/{user_id}": (
-                lambda: client.get_guild_ban(GUILD, BOT),
+                lambda: client.get_guild_ban(GUILD, BAN_TARGET),
                 None,
             ),
             "PUT /guilds/{guild_id}/bans/{user_id}": (
-                lambda: client.create_guild_ban(GUILD, BOT),
+                lambda: client.create_guild_ban(GUILD, BAN_TARGET),
                 None,
             ),
             "GET /guilds/{guild_id}/bans": (lambda: client.get_guild_bans(GUILD), None),

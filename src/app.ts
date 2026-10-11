@@ -189,13 +189,13 @@ export function buildApp(
   const routePrefix = ['/api/v10', '/api', '']
 
   for (const prefix of routePrefix) {
-    app.route(prefix, createGuildAdvancedRoutes(db))
+    app.route(prefix, createGuildAdvancedRoutes(db, gatewayControls))
     app.route(
       prefix,
       createChannelRoutes(db, config.baseUrl, config.uploadPath)
     )
     app.route(prefix, createGuildRoutes(db, gatewayControls))
-    app.route(prefix, createUserRoutes(db))
+    app.route(prefix, createUserRoutes(db, gatewayControls))
     app.route(prefix, createGatewayRoutes(db, config.baseUrl))
     app.route(prefix, createSoundboardRoutes(db))
     // Webhook routes are also enabled for all prefixes (to support /api/v10/webhooks/...)

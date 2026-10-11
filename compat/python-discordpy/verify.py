@@ -290,8 +290,12 @@ async def main() -> None:
         except Exception:
             pass  # reaction endpoints may still exercise the wire format
 
+        # Ban a synthetic, never-a-member user ID rather than the bot itself:
+        # banning the guild's own bot removes the guild from that bot (Fauxcord
+        # sends GUILD_DELETE and deletes it), which would break every later check.
+        BAN_TARGET = discord.Object(id=700000000000000001)
         try:
-            await guild.ban(member)
+            await guild.ban(BAN_TARGET)
         except Exception:
             pass  # bootstrap best-effort; some rows depend on the ban existing
 
@@ -550,14 +554,14 @@ async def main() -> None:
                 "connection",
             ),
             "DELETE /guilds/{guild_id}/bans/{user_id}": (
-                lambda: guild.unban(member),
+                lambda: guild.unban(BAN_TARGET),
                 None,
             ),
             "GET /guilds/{guild_id}/bans/{user_id}": (
-                lambda: guild.fetch_ban(member),
+                lambda: guild.fetch_ban(BAN_TARGET),
                 None,
             ),
-            "PUT /guilds/{guild_id}/bans/{user_id}": (lambda: guild.ban(member), None),
+            "PUT /guilds/{guild_id}/bans/{user_id}": (lambda: guild.ban(BAN_TARGET), None),
             "GET /guilds/{guild_id}/bans": (fetch_bans, None),
             "GET /guilds/{guild_id}/channels": (guild.fetch_channels, None),
             "POST /guilds/{guild_id}/channels": (
