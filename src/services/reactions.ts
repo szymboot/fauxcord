@@ -146,8 +146,9 @@ export function addReaction(
 
 /**
  * Removes one user's reaction membership of the given type. The documented
- * REST delete routes carry no reaction type, so they remove the normal
- * membership (the default type) and leave a burst membership intact.
+ * single-user REST delete routes have no reaction-type selector and Discord
+ * does not document which membership they remove; as a mock assumption they
+ * remove the normal membership and leave a burst membership intact.
  * @param db - Database
  * @param messageId - Message ID
  * @param userId - User ID

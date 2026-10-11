@@ -1818,13 +1818,17 @@ absent reactions emit nothing.
 
 ### Removing burst reactions
 
-Discord documents no REST route that removes a burst reaction. `DELETE
-.../reactions/:emoji/@me` and `DELETE .../reactions/:emoji/:userId` take no
-reaction type, so Fauxcord treats them as removing the **normal** membership
-(the documented default type, `0`) and leaves a burst membership intact. Bots
-cannot super-react, so `@me` never holds a burst reaction. Both routes keep
-their existing behavior, emitting `MESSAGE_REACTION_REMOVE` with `burst: false`
-and `type: 0`. Use the following control to end a human's burst reaction.
+Discord's documented `DELETE .../reactions/:emoji/@me` and
+`DELETE .../reactions/:emoji/:userId` routes have no reaction-type selector, and
+the docs do not say which of a user's memberships they remove (the documented
+`type` default of `0` belongs to Get Reactions only). So there is no documented
+way to remove only one user's burst reaction; the emoji and message clear routes
+remove both types. As a mock assumption, not verified Discord behavior,
+Fauxcord treats both single-user routes as removing the **normal** membership
+and leaves a burst membership intact. Bots cannot super-react, so `@me` never
+holds a burst reaction. Both routes keep their existing behavior, emitting
+`MESSAGE_REACTION_REMOVE` with `burst: false` and `type: 0`. Use the following
+control to end a human's burst reaction.
 
 ## `DELETE /_test/channels/:channelId/messages/:messageId/reactions` — Remove a human reaction
 

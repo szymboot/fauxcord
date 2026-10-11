@@ -1123,8 +1123,9 @@ export function injectTestReaction(
 /**
  * Removes a human's normal or burst reaction membership, emitting a scoped
  * native MESSAGE_REACTION_REMOVE when a row was removed. Discord documents no
- * REST route that removes only a burst reaction, so this control is the
- * fixture's way to end one. Target rules match {@link injectTestReaction}.
+ * way to remove only one user's burst reaction (clears remove both types), so
+ * this control is the fixture's way to end one. Target rules match
+ * {@link injectTestReaction}.
  * @param db - Database
  * @param channelId - Existing guild text or announcement channel
  * @param messageId - Existing public message in that channel
