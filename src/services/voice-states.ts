@@ -44,6 +44,24 @@ export function toGuildVoiceState(row: VoiceStateRow): GuildVoiceState {
   }
 }
 
+/**
+ * Builds the fixture-disconnect form of a state: the voice session and other
+ * flags are kept while the channel, streaming, video and request-to-speak are
+ * cleared. Used for members removed from the guild, whose stored state is
+ * deleted with the membership and so cannot go through a disconnect patch.
+ */
+export function toDisconnectedVoiceState(
+  previous: GuildVoiceState
+): GuildVoiceState {
+  return {
+    ...previous,
+    channel_id: null,
+    self_stream: false,
+    self_video: false,
+    request_to_speak_timestamp: null,
+  }
+}
+
 /** Reads a stored state, including a retained disconnected state. */
 export function getGuildVoiceState(
   db: Database,

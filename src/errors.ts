@@ -49,6 +49,8 @@ export const DiscordErrorCode = {
   FILE_TOO_LARGE: 50_045,
   // 160xxx — Threads
   THREAD_ALREADY_CREATED: 160_004,
+  // 500xxx — Moderation
+  FAILED_TO_BAN_USERS: 500_000,
 } as const
 
 /** Error response type */

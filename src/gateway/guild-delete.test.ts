@@ -346,10 +346,13 @@ describe('GUILD_DELETE when the bot loses a guild', () => {
       banned_users: [humanId, BOT],
       failed_users: [],
     })
-    expect(await nextTypes(client, 2)).toEqual([
-      'GUILD_MEMBER_REMOVE',
-      'GUILD_DELETE',
+    // The human's removal is published before the bot loses the guild.
+    const removed = [await client.next(), await client.next()]
+    expect(removed).toMatchObject([
+      { t: 'GUILD_MEMBER_REMOVE', d: { user: { id: humanId } } },
+      { t: 'GUILD_MEMBER_REMOVE', d: { user: { id: BOT } } },
     ])
+    expect(await nextTypes(client, 1)).toEqual(['GUILD_DELETE'])
     expect(client.ws.readyState).toBe(WebSocket.OPEN)
     expect(await client.drain()).toEqual([])
     expect(await statusOf(http(`/guilds/${GUILD}`))).toBe(404)

@@ -90,6 +90,11 @@ export interface GatewayBusEvents {
     /** Exact delivery scope; omitted by legacy unscoped removals. */
     scope?: { db: Database; botId: string; token: string }
   }
+  'guild.ban.add': {
+    guildId: string
+    user: Record<string, unknown>
+    scope: { db: Database; botId: string; token: string }
+  }
   'guild.delete': {
     guildId: string
     /** The bot (and exact setup token) that lost access to the guild. */

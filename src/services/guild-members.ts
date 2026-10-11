@@ -10,7 +10,6 @@ import { runInTransaction, type Database } from '../db'
 import type { APIGuildMember, APIUser } from 'discord-api-types/v10'
 import { gatewayBus } from '../gateway/bus'
 import { toDiscordTimestamp, formatStoredTimestamp } from '../timestamp'
-import { getUser } from './users'
 import { publishVoiceStateSnapshot } from './voice-state-publisher'
 import {
   applyGuildVoiceStatePatch,
@@ -465,43 +464,6 @@ export function updateGuildMember(
         getGuildMember(db, memberGuildId, memberUserId)
     )
   return changes.member
-}
-
-/**
- * Removes a member from a guild.
- * @param db - Database
- * @param guildId - Guild ID
- * @param userId - User ID
- * @returns true on successful removal
- */
-export function removeGuildMember(
-  db: Database,
-  guildId: string,
-  userId: string
-): boolean {
-  const result = db
-    .prepare('DELETE FROM guild_members WHERE guild_id = ? AND user_id = ?')
-    .run(guildId, userId)
-  if (result.changes === 0) return false
-
-  // Also delete the role assignments the member had (member_roles has no
-  // FK to guild_members, so these would otherwise become orphaned rows).
-  db.prepare('DELETE FROM member_roles WHERE guild_id = ? AND user_id = ?').run(
-    guildId,
-    userId
-  )
-
-  // Deleting guild_members/member_roles does not delete the users row, so the
-  // user info is still available here for the dispatch payload.
-  // Use the API user helper to normalize SQLite's numeric bot flag.
-  const user = getUser(db, userId)
-  gatewayBus.emit('guild.member.remove', {
-    guildId,
-    userId,
-    user: user as unknown as Record<string, unknown>,
-  })
-
-  return true
 }
 
 /**

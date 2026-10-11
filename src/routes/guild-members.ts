@@ -18,10 +18,10 @@ import {
   getGuildMember,
   getGuildMembers,
   updateGuildMember,
-  removeGuildMember,
   addMemberRole,
   removeMemberRole,
 } from '../services/guild-members'
+import { removeGuildMember } from '../services/member-removal'
 import {
   validateGuildMemberUpdate,
   type GuildMemberUpdatePayload,

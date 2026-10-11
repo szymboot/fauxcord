@@ -1,7 +1,11 @@
 import type { Database } from '../db'
-import { getGuildMember } from './guild-members'
+import { getGuildMember, type GuildMemberObject } from './guild-members'
 import { publishVoiceStateSnapshot } from './voice-state-publisher'
-import type { VoiceStateFixtureMutation } from './voice-states'
+import {
+  toDisconnectedVoiceState,
+  type GuildVoiceState,
+  type VoiceStateFixtureMutation,
+} from './voice-states'
 
 /**
  * Publishes a committed voice transition with its member and setup scope.
@@ -14,5 +18,33 @@ export function publishGuildVoiceStateMutation(
 ): void {
   publishVoiceStateSnapshot(db, mutation, (guildId, userId) =>
     getGuildMember(db, guildId, userId)
+  )
+}
+
+/**
+ * Publishes the voice disconnect Discord sends when a connected member is
+ * removed from the guild. The payload matches a fixture disconnect: the voice
+ * session is kept, streaming, video and request-to-speak are cleared, and the
+ * departing member (read before deletion) is embedded. Disconnected kept
+ * states have no live session and publish nothing.
+ * @param db - Database
+ * @param previous - Voice state read before the member was deleted
+ * @param member - Member object read before the member was deleted
+ */
+export function publishRemovedMemberVoiceDisconnect(
+  db: Database,
+  previous: GuildVoiceState,
+  member: GuildMemberObject
+): void {
+  publishVoiceStateSnapshot(
+    db,
+    {
+      state: toDisconnectedVoiceState(previous),
+      previous,
+      changed: true,
+      emit: true,
+      displaced: [],
+    },
+    () => member
   )
 }

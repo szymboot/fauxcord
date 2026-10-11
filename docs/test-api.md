@@ -292,6 +292,74 @@ order when the same code must also run against real Discord.
 The deletion and disconnects are committed in one transaction before any event
 is published. `/_test/reset`, setup cleanup and guild deletion remain silent.
 
+### Member removal disconnects voice
+
+Removing a connected member through the Discord API publishes the voice
+disconnect real Discord sends, before the member removal event:
+
+| Removal                                   | Gateway events, in order (all with consecutive `s`)                                                  |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `DELETE /guilds/:guildId/members/:userId` | `VOICE_STATE_UPDATE`¹, `GUILD_MEMBER_REMOVE`                                                         |
+| `PUT /guilds/:guildId/bans/:userId`       | `GUILD_BAN_ADD`³, `VOICE_STATE_UPDATE`¹, `GUILD_MEMBER_REMOVE`²                                      |
+| `POST /guilds/:guildId/bulk-ban`          | per banned user, in `user_ids` order: `GUILD_BAN_ADD`, `VOICE_STATE_UPDATE`¹, `GUILD_MEMBER_REMOVE`² |
+
+1. Only when the member had a connected voice/stage state. The payload has the
+   same semantics as a fixture disconnect: `channel_id: null`, the previous
+   voice `session_id`, `self_stream`/`self_video` `false`,
+   `request_to_speak_timestamp: null`, other flags (`deaf`, `mute`,
+   `self_mute`, `suppress`, …) unchanged, and the departing member's `member`
+   object read before deletion. Members without a voice state, or with a kept
+   disconnected state (`channel_id: null`), get no voice event.
+2. Only when the banned user was a member.
+3. Only when the ban is new. Banning a non-member publishes only
+   `GUILD_BAN_ADD`. Re-banning an already banned user returns `204`, publishes
+   nothing and keeps the original reason (the new reason is ignored).
+
+Bulk ban reports unknown users and users that are already banned in
+`failed_users`, without changes or events. When no user could be banned, it
+returns `400` with `{"message": "Failed to ban users", "code": 500000}`
+instead of a body, as documented for
+[Bulk Guild Ban](https://docs.discord.com/developers/resources/guild#bulk-guild-ban).
+
+Each event uses its own intent (`GuildVoiceStates`, `GuildMembers`,
+`GuildModeration`) and is delivered to the guild's registered Bot token and
+app database only. Events use normal sequencing and the replay buffer, so
+RESUME replays them, and `VOICE_STATE_UPDATE` capture/hold/release/replay
+controls see the removal disconnect like any other voice transition. The
+voice-state row is deleted with the membership.
+
+Discord documents the event set ("Sent when a user is removed from a guild
+(leave/kick/ban)" for `GUILD_MEMBER_REMOVE`, "Sent when a user is banned from
+a guild" for `GUILD_BAN_ADD`, see the
+[Gateway events reference](https://docs.discord.com/developers/events/gateway-events))
+but not the relative order of these events. The ban order above, the silent
+re-ban and the bulk-ban `500000` response were observed on real Discord
+(October 2026) by banning a member connected to a voice channel. The kick
+order was not observed and follows the ban: the voice disconnect precedes
+`GUILD_MEMBER_REMOVE`, so a client sees the member leave voice while still
+cached as a member.
+
+Known differences from that observation:
+
+- Real Discord omits `self_stream` from the disconnect payload; Fauxcord sends
+  `false`, like every other fixture disconnect.
+- Real Discord also sends `THREAD_MEMBERS_UPDATE`,
+  `VOICE_CHANNEL_START_TIME_UPDATE` and `VOICE_CHANNEL_STATUS_UPDATE` between
+  the ban and the member removal, and `GUILD_AUDIT_LOG_ENTRY_CREATE` afterwards.
+  Fauxcord emits none of these.
+- Discord only sends `GUILD_BAN_ADD` to bots with `BAN_MEMBERS` or
+  `VIEW_AUDIT_LOG`. Fauxcord does not model that check, because bans can only
+  be created by the guild's own bot through REST.
+
+Test cleanup stays silent: `/_test/reset`, `DELETE /_test/setup/:token` and
+`DELETE /guilds/:guildId` remove memberships and voice states without any
+`VOICE_STATE_UPDATE`, `GUILD_MEMBER_REMOVE` or `GUILD_BAN_ADD`. Leaving,
+kicking or banning the guild's own bot follows
+[Remove a guild from the bot](#remove-a-guild-from-the-bot-through-discord-rest-guild_delete)
+instead and publishes no voice event. In a bulk ban that also names the bot,
+the other users' events come first, then the bot's `GUILD_MEMBER_REMOVE` and
+`GUILD_DELETE`.
+
 ### Shared service contract for Gateway integrations
 
 `src/services/voice-states.ts` exports:
@@ -306,6 +374,9 @@ is published. `/_test/reset`, setup cleanup and guild deletion remain silent.
   users, memberships, channels, cross-guild channels and channels other than
   voice/stage. Legacy nullable `self_stream` serializes as `false`.
 - `toGuildVoiceState(row)`, the shared SQLite-to-native serializer.
+- `toDisconnectedVoiceState(previous)`, the shared fixture-disconnect form
+  (session and flags kept; channel, streaming, video and request-to-speak
+  cleared), used for the disconnect of a member removed from the guild.
 - `setTestGuildVoiceState(db, guildId, userId, input)`, validating untrusted
   input and returning `{ state, previous, changed, emit }` after its transaction
   commits, or `INVALID_INPUT`, `UNKNOWN_GUILD`, `UNKNOWN_USER`, `UNKNOWN_MEMBER`,
@@ -336,6 +407,18 @@ and channel deletion call it after the shared storage transaction returns
 successfully. It attaches the existing member/user, resolves the guild's
 Bot/token scope and emits the typed `voice.state.update` domain event. Gateway subscriptions filter it by
 database, token and intent before normal dispatch sequencing.
+`publishRemovedMemberVoiceDisconnect(db, previous, member)` publishes the
+disconnect for a member removed from the guild through the same
+`publishVoiceStateSnapshot` publisher, injecting the member snapshot read
+before deletion; it ignores disconnected states.
+`src/services/voice-state-publisher.ts` also exports
+`getGuildDispatchScope(db, guildId)`, which resolves the shared Bot/token
+scope.
+
+`src/services/member-removal.ts` exports `snapshotDepartingMember`,
+`deleteGuildMembership`, `publishMemberDeparture`, `publishGuildBanAdd` and
+`removeGuildMember` (kick). Any new non-cleanup member removal should snapshot
+the member before deleting it and call `publishMemberDeparture` after commit.
 
 `src/validators/voice-state.ts` exports `TestVoiceStatePatch` and
 `validateTestVoiceState(input)`, which returns normalized typed input or `null`.
@@ -1273,7 +1356,9 @@ curl -X POST http://localhost:3000/_test/guilds/222222222222222222/members/55555
 ```
 
 DELETE returns `204`, removes membership and role assignments, and emits
-`GUILD_MEMBER_REMOVE` through the existing Gateway path. The user profile remains
+`GUILD_MEMBER_REMOVE` through the existing Gateway path (preceded by a voice
+disconnect when the member was connected; see
+[Member removal disconnects voice](#member-removal-disconnects-voice)). The user profile remains
 registered, so the next test join returns `201` and emits a new `GUILD_MEMBER_ADD`.
 This endpoint operates on current state; event replay is not provided.
 
@@ -1908,7 +1993,10 @@ routes, or `DELETE /channels/:channelId` of an occupied voice/stage channel).
 The selected session must have the Guild Voice States intent; filtering
 happens before capture. Silent `emit: false` fixtures, no-op writes, rejected
 requests, and changes to an already disconnected state produce no event to
-capture. Voice dispatches follow the guild's registered bot, exact setup token,
+capture. Kicks and bans of a connected member also produce a capturable
+disconnect (see [Member removal disconnects voice](#member-removal-disconnects-voice));
+the following `GUILD_MEMBER_REMOVE` is not held by a voice capture.
+Voice dispatches follow the guild's registered bot, exact setup token,
 and app database; a capture never holds another session's delivery.
 
 Without a selector, a voice capture includes all users and voice/stage channels

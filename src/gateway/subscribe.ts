@@ -297,6 +297,22 @@ export function registerGatewaySubscriptions(
       GatewayIntentBits.GuildMembers
     )
   }
+  const onGuildBanAdd: Parameters<typeof gatewayBus.on<'guild.ban.add'>>[1] = (
+    payload
+  ) => {
+    if (payload.scope.db !== db) return
+    // Discord only sends GUILD_BAN_ADD to bots with BAN_MEMBERS or
+    // VIEW_AUDIT_LOG. Bans are only created through the owning bot's REST
+    // calls, which real Discord would reject without BAN_MEMBERS.
+    broadcastToBot(
+      manager,
+      payload.scope.botId,
+      'GUILD_BAN_ADD',
+      { guild_id: payload.guildId, user: payload.user },
+      GatewayIntentBits.GuildModeration,
+      payload.scope.token
+    )
+  }
   const onGuildDelete: Parameters<typeof gatewayBus.on<'guild.delete'>>[1] = (
     payload
   ) => {
@@ -373,6 +389,7 @@ export function registerGatewaySubscriptions(
   gatewayBus.on('guild.member.update', onGuildMemberUpdate)
   gatewayBus.on('guild.member.remove', onGuildMemberRemove)
   gatewayBus.on('guild.delete', onGuildDelete)
+  gatewayBus.on('guild.ban.add', onGuildBanAdd)
   gatewayBus.on('guild.role.create', onGuildRoleCreate)
   gatewayBus.on('guild.role.update', onGuildRoleUpdate)
   gatewayBus.on('guild.role.delete', onGuildRoleDelete)
@@ -396,6 +413,7 @@ export function registerGatewaySubscriptions(
     gatewayBus.off('guild.member.update', onGuildMemberUpdate)
     gatewayBus.off('guild.member.remove', onGuildMemberRemove)
     gatewayBus.off('guild.delete', onGuildDelete)
+    gatewayBus.off('guild.ban.add', onGuildBanAdd)
     gatewayBus.off('guild.role.create', onGuildRoleCreate)
     gatewayBus.off('guild.role.update', onGuildRoleUpdate)
     gatewayBus.off('guild.role.delete', onGuildRoleDelete)
