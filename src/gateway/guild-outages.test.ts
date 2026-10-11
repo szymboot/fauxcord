@@ -798,7 +798,13 @@ describe('Gateway guild outage control', () => {
     expect(removed.d).not.toHaveProperty('unavailable')
     expect(await status(`${ROOT}/${outage.id}`)).toBe(404)
 
-    // Leaving through REST behaves the same.
+    // Leaving through REST behaves the same; the bot's own
+    // GUILD_MEMBER_REMOVE is an event of the unavailable guild.
+    const members = await connect(
+      TOKEN,
+      GatewayIntentBits.Guilds | GatewayIntentBits.GuildMembers,
+      [GUILD_B]
+    )
     const second = await start({ guild_id: GUILD_B })
     const left = await fetch(`${base}/api/v10/users/@me/guilds/${GUILD_B}`, {
       method: 'DELETE',
@@ -813,6 +819,15 @@ describe('Gateway guild outage control', () => {
         entry.d.unavailable === undefined
     )
     expect(await status(`${ROOT}/${second.id}`)).toBe(404)
+    await frame(
+      members,
+      (entry) =>
+        entry.t === 'GUILD_DELETE' && entry.d?.unavailable === undefined
+    )
+    await fence(members)
+    expect(
+      members.frames.filter((entry) => entry.t === 'GUILD_MEMBER_REMOVE')
+    ).toEqual([])
     await fence(client)
     expect(
       client.frames.filter(
