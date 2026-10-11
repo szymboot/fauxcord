@@ -122,16 +122,47 @@ export function getGuildBans(
  * @param userId - Banned user ID
  * @param created - Whether the ban did not exist before
  * @param departing - Member snapshot when the user was a member, else null
+ * @param deleteMessageSeconds - Message deletion window of the ban, in seconds
  */
 export function publishBanEvents(
   db: Database,
   guildId: string,
   userId: string,
   created: boolean,
-  departing: DepartingMember | null
+  departing: DepartingMember | null,
+  deleteMessageSeconds: number
 ): void {
-  if (created) publishGuildBanAdd(db, guildId, resolveBanUser(db, userId))
+  if (created)
+    publishGuildBanAdd(
+      db,
+      guildId,
+      resolveBanUser(db, userId),
+      deleteMessageSeconds
+    )
   if (departing) publishMemberDeparture(db, departing)
+}
+
+/**
+ * Deletes a banned user's messages in the guild's channels that are newer
+ * than the given window. A window of 0 deletes nothing.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - Banned user ID
+ * @param deleteMessageSeconds - Age window (seconds) of messages to delete
+ */
+function deleteRecentGuildMessages(
+  db: Database,
+  guildId: string,
+  userId: string,
+  deleteMessageSeconds: number
+): void {
+  if (deleteMessageSeconds <= 0) return
+  db.prepare(
+    `DELETE FROM messages
+     WHERE author_id = ?
+       AND channel_id IN (SELECT id FROM channels WHERE guild_id = ?)
+       AND created_at >= datetime('now', ?)`
+  ).run(userId, guildId, `-${deleteMessageSeconds} seconds`)
 }
 
 /**
@@ -169,18 +200,18 @@ export function createGuildBan(
     ).run(guildId, userId, reason)
     const departing = snapshotDepartingMember(db, guildId, userId)
     deleteGuildMembership(db, guildId, userId)
-    if (deleteMessageSeconds > 0) {
-      db.prepare(
-        `DELETE FROM messages
-         WHERE author_id = ?
-           AND channel_id IN (SELECT id FROM channels WHERE guild_id = ?)
-           AND created_at >= datetime('now', ?)`
-      ).run(userId, guildId, `-${deleteMessageSeconds} seconds`)
-    }
+    deleteRecentGuildMessages(db, guildId, userId, deleteMessageSeconds)
     return { created, departing }
   })
   const { created, departing } = banUser()
-  publishBanEvents(db, guildId, userId, created, departing)
+  publishBanEvents(
+    db,
+    guildId,
+    userId,
+    created,
+    departing,
+    deleteMessageSeconds
+  )
 }
 
 /** Result of a bulk ban, matching the Bulk Guild Ban response body. */
@@ -192,12 +223,14 @@ export interface BulkBanResult {
 /**
  * Bans users in bulk. Unknown users and users that are already banned are
  * reported in `failed_users` without any change or event, as documented for
- * Bulk Guild Ban. Each newly banned user's events are published after commit,
- * grouped per user in request order. The caller returns error 500000 when
+ * Bulk Guild Ban. Each newly banned user's recent guild messages are deleted
+ * like a single ban's, and their events are published after commit, grouped
+ * per user in request order. The caller returns error 500000 when
  * `banned_users` is empty.
  * @param db - Database
  * @param guildId - Guild ID
  * @param userIds - Requested user IDs (non-strings are ignored)
+ * @param deleteMessageSeconds - Age window (seconds) of messages to delete
  * @param deferredUserId - The guild's own bot: reported as banned once, in its
  * request position, without any write here; the caller removes the guild
  * from that bot afterwards
@@ -207,6 +240,7 @@ export function bulkBanGuildMembers(
   db: Database,
   guildId: string,
   userIds: unknown[],
+  deleteMessageSeconds = 0,
   deferredUserId?: string
 ): BulkBanResult {
   const banned: string[] = []
@@ -235,12 +269,20 @@ export function bulkBanGuildMembers(
       ).run(guildId, value)
       departures.push(snapshotDepartingMember(db, guildId, value))
       deleteGuildMembership(db, guildId, value)
+      deleteRecentGuildMessages(db, guildId, value, deleteMessageSeconds)
       banned.push(value)
     }
   })
   const created = banned.filter((id) => id !== deferredUserId)
   for (const [index, userId] of created.entries()) {
-    publishBanEvents(db, guildId, userId, true, departures[index])
+    publishBanEvents(
+      db,
+      guildId,
+      userId,
+      true,
+      departures[index],
+      deleteMessageSeconds
+    )
   }
   return { banned_users: banned, failed_users: failed }
 }

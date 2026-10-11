@@ -315,8 +315,16 @@ disconnect real Discord sends, before the member removal event:
    `GUILD_BAN_ADD`. Re-banning an already banned user returns `204`, publishes
    nothing and keeps the original reason (the new reason is ignored).
 
-Bulk ban reports unknown users and users that are already banned in
-`failed_users`, without changes or events. When no user could be banned, it
+`GUILD_BAN_ADD` carries `guild_id`, `user` and `delete_message_secs`, the
+ban's effective message deletion window in seconds (from
+`delete_message_seconds` or the legacy `delete_message_days`; `0` when
+omitted). The field is absent from the official docs but sent by real Discord
+and documented by [Discord Userdoccers](https://docs.discord.food/gateway/gateway-events).
+
+Bulk ban accepts `delete_message_seconds` (integer `0`–`604800`, otherwise
+`400` with code `50035` and no bans) and deletes each newly banned user's
+recent guild messages like a single ban. It reports unknown users and users
+that are already banned in `failed_users`, without changes or events. When no user could be banned, it
 returns `400` with `{"message": "Failed to ban users", "code": 500000}`
 instead of a body, as documented for
 [Bulk Guild Ban](https://docs.discord.com/developers/resources/guild#bulk-guild-ban).

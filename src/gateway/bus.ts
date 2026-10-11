@@ -93,6 +93,8 @@ export interface GatewayBusEvents {
   'guild.ban.add': {
     guildId: string
     user: Record<string, unknown>
+    /** Message deletion window the ban was created with, in seconds. */
+    deleteMessageSeconds: number
     scope: { db: Database; botId: string; token: string }
   }
   'guild.delete': {

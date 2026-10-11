@@ -15,6 +15,7 @@ import {
 } from '../services/guilds'
 import type { GatewayEventControls } from '../gateway/event-controls'
 import { bulkBanGuildMembers } from '../services/guild-bans'
+import { validateBanCreate } from '../validators/guild'
 import {
   getGuildMember,
   getGuildMembers,
@@ -443,6 +444,12 @@ export function createGuildAdvancedRoutes(
     const payload = await parseJsonBody(c)
     if (!Array.isArray(payload.user_ids) || payload.user_ids.length === 0)
       return invalid(c, 'user_ids')
+    const seconds = payload.delete_message_seconds
+    const secondsErrors = validateBanCreate({
+      delete_message_seconds: seconds as number | null | undefined,
+    })
+    if (Object.keys(secondsErrors).length > 0)
+      return c.json(validationError(secondsErrors).body, 400)
     // The guild's own bot is reported as banned in its request position but
     // removed from the guild only after the other bans commit and publish.
     const botUserId = getGuildBotUserId(db, guildId)
@@ -450,6 +457,7 @@ export function createGuildAdvancedRoutes(
       db,
       guildId,
       payload.user_ids as unknown[],
+      typeof seconds === 'number' ? seconds : 0,
       botUserId
     )
     if (botUserId !== undefined && result.banned_users.includes(botUserId)) {

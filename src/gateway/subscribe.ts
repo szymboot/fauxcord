@@ -308,7 +308,13 @@ export function registerGatewaySubscriptions(
       manager,
       payload.scope.botId,
       'GUILD_BAN_ADD',
-      { guild_id: payload.guildId, user: payload.user },
+      {
+        guild_id: payload.guildId,
+        user: payload.user,
+        // Not in the official docs, but sent by real Discord (and documented
+        // by Discord Userdoccers) with the ban's message deletion window.
+        delete_message_secs: payload.deleteMessageSeconds,
+      },
       GatewayIntentBits.GuildModeration,
       payload.scope.token
     )

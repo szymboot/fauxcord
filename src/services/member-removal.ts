@@ -100,17 +100,20 @@ export function publishMemberDeparture(
  * @param db - Database
  * @param guildId - Guild ID
  * @param user - Banned user payload
+ * @param deleteMessageSeconds - Message deletion window of the ban, in seconds
  */
 export function publishGuildBanAdd(
   db: Database,
   guildId: string,
-  user: UserObject
+  user: UserObject,
+  deleteMessageSeconds: number
 ): void {
   const scope = getGuildDispatchScope(db, guildId)
   if (!scope) return
   gatewayBus.emit('guild.ban.add', {
     guildId,
     user: user as unknown as Record<string, unknown>,
+    deleteMessageSeconds,
     scope,
   })
 }

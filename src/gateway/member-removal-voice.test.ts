@@ -5,8 +5,10 @@ import { GatewayIntentBits } from 'discord-api-types/v10'
 import {
   createTestGatewayServer,
   seedBot,
+  seedChannel,
   seedGuild,
   seedMember,
+  seedMessage,
   seedRole,
   seedStageChannel,
   seedVoiceChannel,
@@ -185,6 +187,15 @@ describe('voice disconnects when members are removed', () => {
     return row.count
   }
 
+  /** GUILD_BAN_ADD payload, including Discord's undocumented deletion window. */
+  function banOf(userId: string, seconds = 0): Record<string, unknown> {
+    return {
+      guild_id: guild,
+      user: userOf(userId),
+      delete_message_secs: seconds,
+    }
+  }
+
   /** Asserts the frames carry strictly consecutive sequence numbers. */
   function expectConsecutive(frames: Frame[]): void {
     const sequences = frames.map((frame) => Number(frame.s))
@@ -271,7 +282,7 @@ describe('voice disconnects when members are removed', () => {
       'GUILD_MEMBER_REMOVE',
     ])
     expectConsecutive(frames)
-    expect(frames[0].d).toEqual({ guild_id: guild, user: userOf(BOB) })
+    expect(frames[0].d).toEqual(banOf(BOB))
     expect(frames[1].d).toEqual(disconnectOf(previous, member))
     expect(frames[1].d).toMatchObject({
       suppress: true,
@@ -334,9 +345,7 @@ describe('voice disconnects when members are removed', () => {
       .run(outsider)
     expect(await status(`/guilds/${guild}/bans/${outsider}`, 'PUT')).toBe(204)
     const frames = await drain(client)
-    expect(frames).toMatchObject([
-      { t: 'GUILD_BAN_ADD', d: { guild_id: guild, user: userOf(outsider) } },
-    ])
+    expect(frames).toMatchObject([{ t: 'GUILD_BAN_ADD', d: banOf(outsider) }])
   })
 
   it('kick of a member without voice, or with a kept disconnected state, emits only GUILD_MEMBER_REMOVE', async () => {
@@ -407,10 +416,10 @@ describe('voice disconnects when members are removed', () => {
       'GUILD_MEMBER_REMOVE',
     ])
     expectConsecutive(frames)
-    expect(frames[0].d).toEqual({ guild_id: guild, user: userOf(ALICE) })
+    expect(frames[0].d).toEqual(banOf(ALICE))
     expect(frames[1].d).toEqual(disconnectOf(alice, aliceMember))
     expect(frames[1].d).toMatchObject({ member: { roles: [role] } })
-    expect(frames[3].d).toEqual({ guild_id: guild, user: userOf(BOB) })
+    expect(frames[3].d).toEqual(banOf(BOB))
     expect(frames[4].d).toEqual({ guild_id: guild, user: userOf(BOB) })
     expect(roleRows(ALICE, BOB)).toBe(0)
     expect(roleRows(CAROL)).toBe(1)
@@ -446,6 +455,52 @@ describe('voice disconnects when members are removed', () => {
       ['GUILD_DELETE', undefined],
     ])
     expectConsecutive(frames)
+  })
+
+  it('GUILD_BAN_ADD carries the deletion window of single and bulk bans', async () => {
+    const text = seedChannel(server.db, guild)
+    const messages = [ALICE, BOB, CAROL, BOT_ID].map((author) =>
+      seedMessage(server.db, text, author, TOKEN)
+    )
+    const client = await connect()
+
+    expect(
+      await status(`/guilds/${guild}/bans/${ALICE}`, 'PUT', {
+        delete_message_seconds: 3600,
+      })
+    ).toBe(204)
+    expect(
+      await status(`/guilds/${guild}/bans/${BOB}?delete_message_days=1`, 'PUT')
+    ).toBe(204)
+    const bulk = await request(`/guilds/${guild}/bulk-ban`, 'POST', {
+      user_ids: [CAROL],
+      delete_message_seconds: 60,
+    })
+    expect(bulk.status).toBe(200)
+
+    const frames = await drain(client)
+    const bans = frames.filter((frame) => frame.t === 'GUILD_BAN_ADD')
+    expect(bans.map((frame) => frame.d)).toEqual([
+      banOf(ALICE, 3600),
+      banOf(BOB, 86_400),
+      banOf(CAROL, 60),
+    ])
+    const remaining = server.db
+      .prepare('SELECT id FROM messages WHERE channel_id = ? ORDER BY id')
+      .all(text)
+    expect(remaining).toEqual([{ id: messages[3] }])
+  })
+
+  it('bulk ban rejects an invalid deletion window without banning', async () => {
+    const client = await connect()
+    const response = await request(`/guilds/${guild}/bulk-ban`, 'POST', {
+      user_ids: [ALICE],
+      delete_message_seconds: 604_801,
+    })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ code: 50_035 })
+    expect(await drain(client)).toEqual([])
+    expect(await status(`/guilds/${guild}/bans/${ALICE}`)).toBe(404)
   })
 
   it('bulk ban reports already banned users as failed without events', async () => {
