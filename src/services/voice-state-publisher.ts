@@ -4,6 +4,31 @@ import { gatewayBus } from '../gateway/bus'
 import type { GuildMemberObject } from './guild-members'
 import type { VoiceStateFixtureMutation } from './voice-states'
 
+/** Database and bot setup that owns a guild's scoped native dispatches. */
+export interface GuildDispatchScope {
+  db: Database
+  botId: string
+  token: string
+}
+
+/**
+ * Resolves the bot setup owning a guild, used to scope native dispatches.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @returns Owning scope, or null when the guild has no registered bot
+ */
+export function getGuildDispatchScope(
+  db: Database,
+  guildId: string
+): GuildDispatchScope | null {
+  const owner = db
+    .prepare(
+      'SELECT b.user_id AS botId, b.token FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ?'
+    )
+    .get(guildId) as { botId: string; token: string } | undefined
+  return owner ? { db, ...owner } : null
+}
+
 /** Loads the current member snapshot embedded in a voice dispatch. */
 export type VoiceStateMemberLoader = (
   guildId: string,
@@ -33,13 +58,9 @@ export function publishVoiceStateSnapshot(
   // A disconnected fixture has no live voice session to update. Disconnect
   // itself still publishes the old session with channel_id: null.
   if (state.channel_id === null && previous?.channel_id == null) return
-  const owner = db
-    .prepare(
-      'SELECT b.user_id AS botId, b.token FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ?'
-    )
-    .get(state.guild_id) as { botId: string; token: string } | undefined
+  const scope = getGuildDispatchScope(db, state.guild_id)
   const member = loadMember(state.guild_id, state.user_id)
-  if (!owner || !member) return
+  if (!scope || !member) return
   const data: GatewayVoiceStateUpdateDispatchData = {
     ...state,
     member: {
@@ -47,8 +68,5 @@ export function publishVoiceStateSnapshot(
       user: { ...member.user, primary_guild: null },
     },
   }
-  gatewayBus.emit('voice.state.update', {
-    state: data,
-    scope: { db, ...owner },
-  })
+  gatewayBus.emit('voice.state.update', { state: data, scope })
 }

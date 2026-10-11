@@ -1,11 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { initializeDatabase, closeDatabase } from '../db'
 import type { Database } from '../db'
-import {
-  addMemberRole,
-  removeMemberRole,
-  removeGuildMember,
-} from './guild-members'
+import { addMemberRole, removeMemberRole } from './guild-members'
+import { removeGuildMember } from './member-removal'
 import { gatewayBus } from '../gateway/bus'
 import { seedBot, seedGuild, seedMember, seedRole } from '../test-helpers'
 
@@ -58,6 +55,7 @@ describe('Guilds Service', () => {
               global_name: null,
               primary_guild: null,
             },
+            scope: { db, botId: '111111111111111111', token },
           })
           expect(
             db

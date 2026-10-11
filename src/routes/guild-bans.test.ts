@@ -393,9 +393,11 @@ describe('Guild Bans API', () => {
       expect(body.code).toBe(10_004)
     })
 
-    it('updates the reason when banning an already-banned user', async () => {
+    // Observed on real Discord: re-banning returns 204 and ignores the new
+    // reason, keeping the original ban unchanged.
+    it('keeps the original reason when banning an already-banned user', async () => {
       const userId = seedBan(db, guildId, '444444444444444444', 'old reason')
-      await app.request(`/guilds/${guildId}/bans/${userId}`, {
+      const reban = await app.request(`/guilds/${guildId}/bans/${userId}`, {
         method: 'PUT',
         headers: {
           Authorization: token,
@@ -404,11 +406,12 @@ describe('Guild Bans API', () => {
         },
         body: JSON.stringify({}),
       })
+      expect(reban.status).toBe(204)
       const res = await app.request(`/guilds/${guildId}/bans/${userId}`, {
         headers: { Authorization: token },
       })
       const body = (await res.json()) as { reason: string | null }
-      expect(body.reason).toBe('new reason')
+      expect(body.reason).toBe('old reason')
     })
   })
 

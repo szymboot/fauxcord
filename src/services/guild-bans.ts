@@ -4,7 +4,14 @@
  * Provides listing, retrieval, creation, and removal of guild bans.
  */
 
-import type { Database } from '../db'
+import { runInTransaction, type Database } from '../db'
+import {
+  deleteGuildMembership,
+  publishGuildBanAdd,
+  publishMemberDeparture,
+  snapshotDepartingMember,
+  type DepartingMember,
+} from './member-removal'
 import { getUser, type UserObject } from './users'
 
 /** Guild ban object for API responses (GuildBanResponse) */
@@ -106,12 +113,71 @@ export function getGuildBans(
 }
 
 /**
- * Creates or updates a guild ban and removes the user's guild membership.
+ * Publishes the committed Gateway events for one ban in the order observed on
+ * real Discord: GUILD_BAN_ADD (new bans only), then the voice disconnect when
+ * the member was connected, then GUILD_MEMBER_REMOVE. Discord documents the
+ * event set but not this order.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - Banned user ID
+ * @param created - Whether the ban did not exist before
+ * @param departing - Member snapshot when the user was a member, else null
+ * @param deleteMessageSeconds - Message deletion window of the ban, in seconds
+ */
+export function publishBanEvents(
+  db: Database,
+  guildId: string,
+  userId: string,
+  created: boolean,
+  departing: DepartingMember | null,
+  deleteMessageSeconds: number
+): void {
+  if (created)
+    publishGuildBanAdd(
+      db,
+      guildId,
+      resolveBanUser(db, userId),
+      deleteMessageSeconds
+    )
+  if (departing) publishMemberDeparture(db, departing)
+}
+
+/**
+ * Deletes a banned user's messages in the guild's channels that are newer
+ * than the given window. A window of 0 deletes nothing.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - Banned user ID
+ * @param deleteMessageSeconds - Age window (seconds) of messages to delete
+ */
+function deleteRecentGuildMessages(
+  db: Database,
+  guildId: string,
+  userId: string,
+  deleteMessageSeconds: number
+): void {
+  if (deleteMessageSeconds <= 0) return
+  db.prepare(
+    `DELETE FROM messages
+     WHERE author_id = ?
+       AND channel_id IN (SELECT id FROM channels WHERE guild_id = ?)
+       AND created_at >= datetime('now', ?)`
+  ).run(userId, guildId, `-${deleteMessageSeconds} seconds`)
+}
+
+/**
+ * Creates a guild ban and removes the user's guild membership.
  * Banning a user implies kicking them, so their `guild_members` and
  * `member_roles` rows are deleted in the same transaction. When
  * `deleteMessageSeconds` is greater than 0, the banned user's messages in the
  * guild's channels newer than that window are also deleted (matching Discord's
  * `delete_message_seconds` behavior).
+ *
+ * After commit, GUILD_BAN_ADD is published when the ban is new, followed by a
+ * removed member's departure (voice disconnect when connected, then
+ * GUILD_MEMBER_REMOVE). Like real Discord, banning an already banned user
+ * keeps the original reason, removes no membership and publishes no event;
+ * only the requested message deletion still runs.
  * @param db - Database
  * @param guildId - Guild ID
  * @param userId - User ID to ban
@@ -126,26 +192,105 @@ export function createGuildBan(
   deleteMessageSeconds = 0
 ): void {
   const banUser = db.transaction(() => {
+    const created = !db
+      .prepare('SELECT 1 FROM guild_bans WHERE guild_id = ? AND user_id = ?')
+      .get(guildId, userId)
     db.prepare(
       `INSERT INTO guild_bans (guild_id, user_id, reason) VALUES (?, ?, ?)
-       ON CONFLICT(guild_id, user_id) DO UPDATE SET reason = excluded.reason`
+       ON CONFLICT(guild_id, user_id) DO NOTHING`
     ).run(guildId, userId, reason)
-    db.prepare(
-      'DELETE FROM member_roles WHERE guild_id = ? AND user_id = ?'
-    ).run(guildId, userId)
-    db.prepare(
-      'DELETE FROM guild_members WHERE guild_id = ? AND user_id = ?'
-    ).run(guildId, userId)
-    if (deleteMessageSeconds > 0) {
+    // Re-banning changes nothing on real Discord (204, no events, original
+    // reason). Fixtures can rejoin a banned user, so leave that membership
+    // and voice state alone too; only the requested message cleanup runs.
+    const departing = created
+      ? snapshotDepartingMember(db, guildId, userId)
+      : null
+    if (created) deleteGuildMembership(db, guildId, userId)
+    deleteRecentGuildMessages(db, guildId, userId, deleteMessageSeconds)
+    return { created, departing }
+  })
+  const { created, departing } = banUser()
+  publishBanEvents(
+    db,
+    guildId,
+    userId,
+    created,
+    departing,
+    deleteMessageSeconds
+  )
+}
+
+/** Result of a bulk ban, matching the Bulk Guild Ban response body. */
+export interface BulkBanResult {
+  banned_users: string[]
+  failed_users: string[]
+}
+
+/**
+ * Bans users in bulk. Unknown users and users that are already banned are
+ * reported in `failed_users` without any change or event, as documented for
+ * Bulk Guild Ban. Each newly banned user's recent guild messages are deleted
+ * like a single ban's, and their events are published after commit, grouped
+ * per user in request order. The caller returns error 500000 when
+ * `banned_users` is empty.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userIds - Requested user IDs (non-strings are ignored)
+ * @param deleteMessageSeconds - Age window (seconds) of messages to delete
+ * @param deferredUserId - The guild's own bot: reported as banned once, in its
+ * request position, without any write here; the caller removes the guild
+ * from that bot afterwards
+ * @returns Banned and failed user IDs
+ */
+export function bulkBanGuildMembers(
+  db: Database,
+  guildId: string,
+  userIds: unknown[],
+  deleteMessageSeconds = 0,
+  deferredUserId?: string
+): BulkBanResult {
+  const banned: string[] = []
+  const failed: string[] = []
+  const departures: (DepartingMember | null)[] = []
+  runInTransaction(db, () => {
+    for (const value of userIds) {
+      if (typeof value !== 'string') continue
+      if (value === deferredUserId) {
+        if (!banned.includes(value)) banned.push(value)
+        continue
+      }
+      if (
+        !db.prepare('SELECT 1 FROM users WHERE id = ?').get(value) ||
+        db
+          .prepare(
+            'SELECT 1 FROM guild_bans WHERE guild_id = ? AND user_id = ?'
+          )
+          .get(guildId, value)
+      ) {
+        failed.push(value)
+        continue
+      }
       db.prepare(
-        `DELETE FROM messages
-         WHERE author_id = ?
-           AND channel_id IN (SELECT id FROM channels WHERE guild_id = ?)
-           AND created_at >= datetime('now', ?)`
-      ).run(userId, guildId, `-${deleteMessageSeconds} seconds`)
+        'INSERT INTO guild_bans (guild_id, user_id) VALUES (?, ?)'
+      ).run(guildId, value)
+      departures.push(snapshotDepartingMember(db, guildId, value))
+      deleteGuildMembership(db, guildId, value)
+      deleteRecentGuildMessages(db, guildId, value, deleteMessageSeconds)
+      banned.push(value)
     }
   })
-  banUser()
+  const created = banned.filter((id) => id !== deferredUserId)
+  for (const [index, userId] of created.entries()) {
+    publishBanEvents(
+      db,
+      guildId,
+      userId,
+      true,
+      departures[index],
+      deleteMessageSeconds
+    )
+  }
+  return { banned_users: banned, failed_users: failed }
 }
 
 /**

@@ -5,7 +5,7 @@ import { validateAuditLogQuery } from '../validators/audit-log'
 import type { Context, MiddlewareHandler } from 'hono'
 import type { Database } from '../db'
 import { runInTransaction } from '../db'
-import { DiscordErrorCode, validationError } from '../errors'
+import { DiscordErrorCode, discordError, validationError } from '../errors'
 import type { AppEnv } from '../middleware/auth'
 import { parseJsonBody } from '../lib/route-helpers'
 import {
@@ -14,6 +14,8 @@ import {
   removeGuildFromBot,
 } from '../services/guilds'
 import type { GatewayEventControls } from '../gateway/event-controls'
+import { bulkBanGuildMembers } from '../services/guild-bans'
+import { validateBanCreate } from '../validators/guild'
 import {
   getGuildMember,
   getGuildMembers,
@@ -440,43 +442,39 @@ export function createGuildAdvancedRoutes(
     const access = requireGuildAccess(c, db, guildId)
     if (access instanceof Response) return access
     const payload = await parseJsonBody(c)
-    if (!Array.isArray(payload.user_ids) || payload.user_ids.length === 0) {
+    if (!Array.isArray(payload.user_ids) || payload.user_ids.length === 0)
       return invalid(c, 'user_ids')
-    }
-    const banned: string[] = []
-    const failed: string[] = []
-    const botUserId = getGuildBotUserId(db, guildId)
-    // Mutated inside the transaction callback.
-    const botBan = { requested: false }
-    runInTransaction(db, () => {
-      for (const value of payload.user_ids as unknown[]) {
-        // The guild's own bot is removed after the other bans commit.
-        if (botUserId !== undefined && value === botUserId) {
-          if (!botBan.requested) banned.push(botUserId)
-          botBan.requested = true
-          continue
-        }
-        if (
-          typeof value !== 'string' ||
-          !db.prepare('SELECT 1 FROM users WHERE id = ?').get(value)
-        ) {
-          if (typeof value === 'string') failed.push(value)
-          continue
-        }
-        db.prepare(
-          'INSERT OR REPLACE INTO guild_bans (guild_id, user_id) VALUES (?, ?)'
-        ).run(guildId, value)
-        db.prepare(
-          'DELETE FROM guild_members WHERE guild_id = ? AND user_id = ?'
-        ).run(guildId, value)
-        banned.push(value)
-      }
+    const seconds = payload.delete_message_seconds
+    const secondsErrors = validateBanCreate({
+      delete_message_seconds: seconds as number | null | undefined,
     })
-    if (botBan.requested) {
+    if (Object.keys(secondsErrors).length > 0)
+      return c.json(validationError(secondsErrors).body, 400)
+    // The guild's own bot is reported as banned in its request position but
+    // removed from the guild only after the other bans commit and publish.
+    const botUserId = getGuildBotUserId(db, guildId)
+    const result = bulkBanGuildMembers(
+      db,
+      guildId,
+      payload.user_ids as unknown[],
+      typeof seconds === 'number' ? seconds : 0,
+      botUserId
+    )
+    if (botUserId !== undefined && result.banned_users.includes(botUserId)) {
       removeGuildFromBot(db, guildId, 'ban')
       eventControls?.deleteGuild(guildId)
     }
-    return c.json({ banned_users: banned, failed_users: failed })
+    // Discord answers with 500000 instead of a body when nobody was banned.
+    return result.banned_users.length > 0
+      ? c.json(result)
+      : c.json(
+          discordError(
+            DiscordErrorCode.FAILED_TO_BAN_USERS,
+            'Failed to ban users',
+            400
+          ).body,
+          400
+        )
   })
 
   app.patch('/guilds/:guildId/channels', async (c) => {

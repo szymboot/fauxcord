@@ -90,6 +90,13 @@ export interface GatewayBusEvents {
     /** Exact delivery scope; omitted by legacy unscoped removals. */
     scope?: { db: Database; botId: string; token: string }
   }
+  'guild.ban.add': {
+    guildId: string
+    user: Record<string, unknown>
+    /** Message deletion window the ban was created with, in seconds. */
+    deleteMessageSeconds: number
+    scope: { db: Database; botId: string; token: string }
+  }
   'guild.delete': {
     guildId: string
     /** The bot (and exact setup token) that lost access to the guild. */
