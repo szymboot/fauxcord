@@ -19,10 +19,8 @@ import type { IdentifyData, ResumeData } from './protocol'
 import { sendDispatch, writeDispatch } from './dispatch'
 import { hasIntent } from './intents'
 
-/** Heartbeat interval (ms) announced in HELLO; matches real Discord's default. */
-const HEARTBEAT_INTERVAL_MS = 41_250
-/** Time (ms) to wait for a Heartbeat before closing the session */
-const HEARTBEAT_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 2
+/** Heartbeat timeout as a multiple of the announced heartbeat interval. */
+const HEARTBEAT_TIMEOUT_INTERVALS = 2
 
 /** Bot info resolved from an IDENTIFY token, used to build the READY user object */
 interface IdentifiedBot {
@@ -170,7 +168,7 @@ function armHeartbeatTimeout(
       // session is still reaped below.
     }
     sessionManager.remove(sessionId)
-  }, HEARTBEAT_TIMEOUT_MS)
+  }, sessionManager.heartbeatIntervalMs * HEARTBEAT_TIMEOUT_INTERVALS)
 }
 
 /**
@@ -532,15 +530,20 @@ function handleHeartbeat(
  * Builds the Gateway WebSocket handler.
  * @param db - Database (used for IDENTIFY token validation and MockBot
  * creation)
- * @param options - baseUrl and disableAuth
+ * @param options - baseUrl, disableAuth and the optional heartbeat interval
+ * (ms) announced in HELLO (defaults to Discord's 41250)
  * @returns The WSEvents to pass to Hono's upgradeWebSocket, plus the
  * SessionManager used for Dispatch delivery
  */
 export function createGatewayWebSocketHandler(
   db: Database,
-  options: { baseUrl: string; disableAuth: boolean }
+  options: {
+    baseUrl: string
+    disableAuth: boolean
+    heartbeatIntervalMs?: number
+  }
 ): { upgrade: WSEvents; sessionManager: SessionManager } {
-  const sessionManager = new SessionManager()
+  const sessionManager = new SessionManager(options.heartbeatIntervalMs)
   // Maps ws (WSContext) to sessionId; referenced from onClose/onMessage.
   const sessionIdByWs = new WeakMap<WSContext, string>()
 
@@ -549,7 +552,7 @@ export function createGatewayWebSocketHandler(
       ws.send(
         encodePayload({
           op: GatewayOp.Hello,
-          d: { heartbeat_interval: HEARTBEAT_INTERVAL_MS },
+          d: { heartbeat_interval: sessionManager.heartbeatIntervalMs },
         })
       )
     },
