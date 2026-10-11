@@ -35,6 +35,8 @@ export interface IdentifyFacts {
   readySequence: number
   /** Guild IDs listed in READY as unavailable stubs */
   guildIds: string[]
+  /** READY guilds in a simulated outage; they get GUILD_DELETE, not GUILD_CREATE */
+  unavailableGuildIds: string[]
   /** Whether GUILD_CREATE dispatches follow (Guilds intent) */
   guildsIntent: boolean
 }
@@ -67,6 +69,16 @@ export interface IdentifyObserver {
   ready: (status: DispatchTransport) => void
   /** Observes one GUILD_CREATE envelope, returning its write observer */
   guildCreate: (
+    payload: GatewayPayload<unknown>
+  ) => ((status: DispatchTransport) => void) | undefined
+}
+
+/** How an identifying session learns that a READY guild is in an outage. */
+export interface IdentifyGuildOutage {
+  /** Stub event sent instead of the full GUILD_CREATE (`{ id, unavailable: true }`) */
+  event: 'GUILD_DELETE' | 'GUILD_CREATE'
+  /** Observes the stub envelope, returning its write observer */
+  observe: (
     payload: GatewayPayload<unknown>
   ) => ((status: DispatchTransport) => void) | undefined
 }
@@ -164,6 +176,24 @@ export class SessionManager {
     session: Session,
     payload: GatewayPayload<unknown>
   ) => void
+  /**
+   * Drops a native dispatch before sequencing (simulated guild outage), so it
+   * consumes no sequence number and never enters the replay buffer.
+   */
+  suppressDispatch?: (
+    session: Session,
+    eventName: string,
+    data: unknown
+  ) => boolean
+  /**
+   * Returns the READY guilds currently in a simulated outage for an
+   * identifying session, each mapped to the unavailable stub to send.
+   */
+  identifyGuildOutages?: (
+    session: Session,
+    guildIds: string[],
+    readySequence: number
+  ) => Map<string, IdentifyGuildOutage>
 
   private readonly silencedSockets = new WeakSet<WebSocket>()
   private readonly removalListeners = new Set<(session: Session) => void>()

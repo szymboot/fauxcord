@@ -50,6 +50,8 @@ import { GatewaySessionInvalidations } from './gateway/session-invalidations'
 import { createGatewaySessionInvalidationRoutes } from './routes/gateway-session-invalidations'
 import { GatewayZombieConnections } from './gateway/zombie-connections'
 import { createGatewayZombieConnectionRoutes } from './routes/gateway-zombie-connections'
+import { GatewayGuildOutages } from './gateway/guild-outages'
+import { createGatewayGuildOutageRoutes } from './routes/gateway-guild-outages'
 import { createTestRoutes } from './routes/test'
 import { createMockRoutes } from './routes/mock'
 import { createGatewayWebSocketHandler } from './gateway/server'
@@ -126,23 +128,30 @@ export function buildApp(
     db,
     gatewayHandler.sessionManager
   )
+  const guildOutages = new GatewayGuildOutages(
+    db,
+    gatewayHandler.sessionManager
+  )
   /** Applies setup/guild lifecycle cleanup to every Gateway test control. */
   const gatewayControls = {
     reset: (token?: string): void => {
       eventControls.reset(token)
       sessionInvalidations.reset(token)
       zombieConnections.reset(token)
+      guildOutages.reset(token)
     },
     deleteGuild: (guildId: string): void => {
       eventControls.deleteGuild(guildId)
       sessionInvalidations.deleteGuild(guildId)
       zombieConnections.deleteGuild(guildId)
+      guildOutages.deleteGuild(guildId)
     },
   }
   // Test control APIs require no authentication
   app.route('/', createGatewayEventControlRoutes(eventControls))
   app.route('/', createGatewaySessionInvalidationRoutes(sessionInvalidations))
   app.route('/', createGatewayZombieConnectionRoutes(zombieConnections))
+  app.route('/', createGatewayGuildOutageRoutes(guildOutages))
   app.route(
     '/',
     createTestRoutes(db, config.baseUrl, config.uploadPath, gatewayControls)
@@ -174,7 +183,11 @@ export function buildApp(
   )
   /** Removes subscriptions and all pending test captures on shutdown. */
   const unsubscribeGateway = (): void => {
-    gatewayControls.reset()
+    eventControls.reset()
+    sessionInvalidations.reset()
+    zombieConnections.reset()
+    // Shutdown discards outages without writing recovery snapshots.
+    guildOutages.reset(undefined, false)
     unsubscribe()
   }
   app.get(

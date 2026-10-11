@@ -415,8 +415,9 @@ export function createTestRoutes(
     }
 
     cleanupAttachmentFiles(db, uploadPath, { token })
-    eventControls?.reset(token)
     resetTestData(db, token)
+    // After the data reset, so recovered guild outages snapshot reset state.
+    eventControls?.reset(token)
     return c.body(null, 204)
   })
 

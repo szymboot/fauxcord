@@ -209,6 +209,14 @@ until the client detects the missing ACK, closes and RESUMEs. Evidence covers
 the start, last ACK, client close, RESUME and replayed sequences; see
 [Zombie Gateway connections](./docs/test-api.md#zombie-gateway-connections).
 
+### Simulate a guild outage
+
+`POST /_test/gateway-guild-outages` makes one guild unavailable to one bot
+setup: its sessions receive `GUILD_DELETE` (`unavailable: true`), no further
+dispatch of that guild until it recovers, and then a fresh `GUILD_CREATE`
+snapshot. IDENTIFY, RESUME, TTL and evidence are described in the
+[test API documentation](./docs/test-api.md#simulated-guild-outage-guild_delete-unavailable--guild_create).
+
 ### Inspect channel messages (for testing)
 
 ```bash

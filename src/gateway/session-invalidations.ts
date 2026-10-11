@@ -103,6 +103,8 @@ interface IdentifyObservation {
     guild_ids: string[]
     transport: DispatchTransport
   }
+  /** READY guilds in a simulated outage; they get GUILD_DELETE instead. */
+  unavailable_guild_ids: string[]
   guild_creates: GuildCreateObservation[]
   guild_creates_skipped: number
 }
@@ -165,7 +167,7 @@ function sameOwner(
 
 /**
  * Classifies an attempt: complete once READY and a GUILD_CREATE for every
- * READY guild were written; failed when any of them could not be written
+ * available READY guild (not in a simulated outage) were written; failed when any of them could not be written
  * (including a socket that closed before the snapshot finished).
  */
 function attemptState(attempt: IdentifyAttempt): AttemptState {
@@ -173,8 +175,10 @@ function attemptState(attempt: IdentifyAttempt): AttemptState {
     return 'failed'
   if (attempt.ready.transport !== 'sent') return 'pending'
   return !attempt.guilds_intent ||
-    attempt.ready.guild_ids.every((guildId) =>
-      attempt.sentGuildIds.has(guildId)
+    attempt.ready.guild_ids.every(
+      (guildId) =>
+        attempt.unavailable_guild_ids.includes(guildId) ||
+        attempt.sentGuildIds.has(guildId)
     )
     ? 'complete'
     : 'pending'
@@ -205,6 +209,7 @@ function publicAttempt(attempt: IdentifyAttempt): object {
     identified_at: attempt.identified_at,
     guilds_intent: attempt.guilds_intent,
     ready: attempt.ready,
+    unavailable_guild_ids: attempt.unavailable_guild_ids,
     guild_creates: attempt.guild_creates,
     guild_creates_sent: attempt.sentGuildIds.size,
     guild_creates_skipped: attempt.guild_creates_skipped,
@@ -487,6 +492,7 @@ export class GatewaySessionInvalidations {
         guild_ids: [...facts.guildIds],
         transport: 'queued',
       },
+      unavailable_guild_ids: [...facts.unavailableGuildIds],
       guild_creates: [],
       guild_creates_skipped: 0,
       sentGuildIds: new Set(),
