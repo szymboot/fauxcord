@@ -5,8 +5,9 @@ import type { AppEnv } from './auth'
 
 /**
  * Resolves the guild a native REST path belongs to: `/guilds/:id…`,
- * `/channels/:id…` (through the channel's guild) or
- * `/applications/:id/guilds/:id…`.
+ * `/users/@me/guilds/:id/member`, `/applications/:id/guilds/:id…`, and the
+ * guild resources addressed by their own ID (`/channels/:id…`,
+ * `/webhooks/:id…` and `/invites/:code`).
  * @param db - Database
  * @param path - Request path without a version prefix
  * @returns The guild ID, or undefined for paths outside any guild
@@ -14,13 +15,34 @@ import type { AppEnv } from './auth'
 function pathGuildId(db: Database, path: string): string | undefined {
   const guild =
     /^\/guilds\/([^/]+)/.exec(path) ??
+    /^\/users\/@me\/guilds\/([^/]+)\/member(?:\/|$)/.exec(path) ??
     /^\/applications\/[^/]+\/guilds\/([^/]+)/.exec(path)
   if (guild) return guild[1]
   const channel = /^\/channels\/([^/]+)/.exec(path)
-  if (!channel) return undefined
+  if (channel) {
+    const row = db
+      .prepare('SELECT guild_id FROM channels WHERE id = ?')
+      .get(channel[1]) as { guild_id: string | null } | undefined
+    return row?.guild_id ?? undefined
+  }
+  const webhook = /^\/webhooks\/([^/]+)/.exec(path)
+  if (webhook) {
+    const row = db
+      .prepare(
+        `SELECT c.guild_id FROM webhooks w JOIN channels c ON c.id = w.channel_id
+         WHERE w.id = ?`
+      )
+      .get(webhook[1]) as { guild_id: string | null } | undefined
+    return row?.guild_id ?? undefined
+  }
+  const invite = /^\/invites\/([^/]+)/.exec(path)
+  if (!invite) return undefined
   const row = db
-    .prepare('SELECT guild_id FROM channels WHERE id = ?')
-    .get(channel[1]) as { guild_id: string | null } | undefined
+    .prepare(
+      `SELECT c.guild_id FROM invites i JOIN channels c ON c.id = i.channel_id
+       WHERE i.code = ?`
+    )
+    .get(invite[1]) as { guild_id: string | null } | undefined
   return row?.guild_id ?? undefined
 }
 

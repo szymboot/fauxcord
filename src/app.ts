@@ -203,9 +203,9 @@ export function buildApp(
   const latencyMiddleware = createLatencyMiddleware(config.latencyMs ?? 0)
 
   app.use('*', authMiddleware)
-  app.use('*', createRemovedSetupMiddleware(db))
   app.use('*', latencyMiddleware)
   app.use('*', rateLimitMiddleware)
+  app.use('*', createRemovedSetupMiddleware(db))
   app.use('*', createRestPageHoldMiddleware(db))
   app.use('*', createRestFaultMiddleware(db))
 

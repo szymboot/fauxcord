@@ -13,6 +13,8 @@ import {
   seedMessage,
   seedVoiceChannel,
   seedVoiceState,
+  seedInvite,
+  seedWebhook,
 } from '../test-helpers'
 import { createAuthCode } from '../services/oauth2'
 import { GatewayOp } from './opcodes'
@@ -549,6 +551,27 @@ describe('guild fixtures survive the bot leaving, being kicked or banned', () =>
       statusOf(`/channels/${CHANNEL}/messages`, 'POST', { content: 'old' })
     expect(await sendOld()).toBe(403)
     expect(await statusOf(`/api/v10/guilds/${GUILD}/members`)).toBe(403)
+    // The denial is wrapped by the shared rate-limit middleware.
+    const denied = await http(`/guilds/${GUILD}/members`)
+    expect(denied.status).toBe(403)
+    expect(denied.headers.get('X-RateLimit-Limit')).not.toBeNull()
+    // Resources addressed by their own ID resolve to the guild too.
+    const hook = seedWebhook(db, CHANNEL, GUILD)
+    expect(await statusOf(`/webhooks/${hook.webhookId}`)).toBe(403)
+    expect(
+      await statusOf(
+        `/webhooks/${hook.webhookId}`,
+        'GET',
+        undefined,
+        OTHER_TOKEN
+      )
+    ).toBe(200)
+    seedInvite(db, CHANNEL, GUILD, null, 'oldcode')
+    expect(await statusOf('/invites/oldcode')).toBe(403)
+    expect(
+      await statusOf('/invites/oldcode', 'GET', undefined, OTHER_TOKEN)
+    ).toBe(200)
+    expect(await statusOf(`/users/@me/guilds/${GUILD}/member`)).toBe(403)
     expect(
       await statusOf(
         `/channels/${CHANNEL}/messages`,
