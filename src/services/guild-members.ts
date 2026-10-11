@@ -5,12 +5,18 @@
  * members.
  */
 
-import type { Database } from '../db'
+import { runInTransaction, type Database } from '../db'
 // Used for compile-time type drift detection.
 import type { APIGuildMember, APIUser } from 'discord-api-types/v10'
 import { gatewayBus } from '../gateway/bus'
 import { toDiscordTimestamp, formatStoredTimestamp } from '../timestamp'
 import { getUser } from './users'
+import { publishVoiceStateSnapshot } from './voice-state-publisher'
+import {
+  applyGuildVoiceStatePatch,
+  getGuildVoiceState,
+  type VoiceStateFixtureMutation,
+} from './voice-states'
 
 /**
  * Compile-time guard: ensures the safe-field subset of GuildMemberObject is
@@ -314,16 +320,8 @@ export function publishGuildMemberUpdate(
   })
 }
 
-/**
- * Persists a guild member's nickname, roles, server mute/deaf and/or timeout
- * deadline without emitting any Gateway event.
- * @param db - Database
- * @param guildId - Guild ID
- * @param userId - User ID
- * @param payload - Update payload
- * @returns Updated guild member object, or null
- */
-export function persistGuildMemberUpdate(
+/** Writes the stored member columns and role assignments of one update. */
+function writeGuildMemberFields(
   db: Database,
   guildId: string,
   userId: string,
@@ -382,10 +380,68 @@ export function persistGuildMemberUpdate(
   return getGuildMember(db, guildId, userId)
 }
 
+/** Committed member snapshot plus any voice-state change it caused. */
+interface GuildMemberChanges {
+  member: GuildMemberObject
+  voice: VoiceStateFixtureMutation | null
+}
+
+/**
+ * Writes the member fields and, in the same transaction, mirrors non-null
+ * server mute/deaf onto the member's stored voice state (connected or
+ * retained after disconnect) so member and voice reads never diverge.
+ * Voice connection and permission rules are not checked here; the Modify
+ * Guild Member route applies them before calling this writer.
+ */
+function persistGuildMemberChanges(
+  db: Database,
+  guildId: string,
+  userId: string,
+  payload: GuildMemberUpdateParams
+): GuildMemberChanges | null {
+  return runInTransaction(db, () => {
+    const member = writeGuildMemberFields(db, guildId, userId, payload)
+    if (!member) return null
+    const flags = {
+      ...(payload.mute != null && { mute: payload.mute }),
+      ...(payload.deaf != null && { deaf: payload.deaf }),
+    }
+    if (
+      Object.keys(flags).length === 0 ||
+      !getGuildVoiceState(db, guildId, userId)
+    )
+      return { member, voice: null }
+    const voice = applyGuildVoiceStatePatch(db, guildId, userId, flags)
+    if (typeof voice === 'string')
+      throw new Error(`Voice state sync failed: ${voice}`)
+    return { member, voice }
+  })
+}
+
+/**
+ * Persists a guild member's nickname, roles, server mute/deaf and/or timeout
+ * deadline without emitting any Gateway event.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - User ID
+ * @param payload - Update payload
+ * @returns Updated guild member object, or null
+ */
+export function persistGuildMemberUpdate(
+  db: Database,
+  guildId: string,
+  userId: string,
+  payload: GuildMemberUpdateParams
+): GuildMemberObject | null {
+  return persistGuildMemberChanges(db, guildId, userId, payload)?.member ?? null
+}
+
 /**
  * Updates a guild member and emits GUILD_MEMBER_UPDATE for the result.
- * This low-level writer stores `mute`/`deaf` on the member only; the Modify
- * Guild Member route applies Discord's voice connection and permission rules.
+ * Non-null `mute`/`deaf` are mirrored onto a stored voice state in the same
+ * transaction; a changed connected state also emits VOICE_STATE_UPDATE.
+ * Discord's voice connection and permission rules are applied by the Modify
+ * Guild Member route, not by this service writer.
  * @param db - Database
  * @param guildId - Guild ID
  * @param userId - User ID
@@ -398,11 +454,17 @@ export function updateGuildMember(
   userId: string,
   payload: GuildMemberUpdateParams
 ): GuildMemberObject | null {
-  const updated = persistGuildMemberUpdate(db, guildId, userId, payload)
-  if (updated) {
-    publishGuildMemberUpdate(db, guildId, updated)
-  }
-  return updated
+  const changes = persistGuildMemberChanges(db, guildId, userId, payload)
+  if (!changes) return null
+  publishGuildMemberUpdate(db, guildId, changes.member)
+  if (changes.voice)
+    publishVoiceStateSnapshot(
+      db,
+      changes.voice,
+      (memberGuildId, memberUserId) =>
+        getGuildMember(db, memberGuildId, memberUserId)
+    )
+  return changes.member
 }
 
 /**

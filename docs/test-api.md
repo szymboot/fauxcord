@@ -282,6 +282,12 @@ setups and memberships remain intact.
   transaction for an already validated `TestVoiceStatePatch`. It is shared by
   the fixture, stage and Modify Guild Member voice moderation paths and mirrors
   server `mute`/`deaf` into `guild_members`.
+- `updateGuildMember(db, guildId, userId, params)` in
+  `src/services/guild-members.ts` mirrors the opposite direction: non-null
+  `mute`/`deaf` are written onto a stored voice state in the same transaction,
+  and a changed connected state publishes `VOICE_STATE_UPDATE` after
+  `GUILD_MEMBER_UPDATE`. Voice connection and permission rules are applied only
+  by the REST route.
 
 `src/services/voice-state-events.ts` exports
 `publishGuildVoiceStateMutation(db, mutation)`. The fixture and stage routes

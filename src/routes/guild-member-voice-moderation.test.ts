@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { gatewayBus } from '../gateway/bus'
 import {
   getGuildMember,
+  updateGuildMember,
   type GuildMemberObject,
 } from '../services/guild-members'
 import {
@@ -574,6 +575,43 @@ describe('Modify Guild Member voice moderation', () => {
       { headers: { Authorization: TOKEN } }
     )
     expect(await read.json()).toMatchObject({ mute: true, deaf: false })
+  })
+
+  it('mirrors direct service mute/deaf writes onto the stored voice state', () => {
+    const updated = updateGuildMember(context.db, guild, user, { deaf: true })
+    expect(updated).toMatchObject({ deaf: true, mute: false })
+    const state = getGuildVoiceState(context.db, guild, user)
+    expect(state).toMatchObject({ deaf: true, session_id: session })
+    expect(events.map((event) => event.name)).toEqual([
+      'guild.member.update',
+      'voice.state.update',
+    ])
+    expect(voiceEvents()).toEqual([
+      expect.objectContaining({
+        deaf: true,
+        member: expect.objectContaining({ deaf: true }),
+      }),
+    ])
+
+    // A retained disconnected state is synced silently.
+    context.db.prepare('UPDATE guild_voice_states SET channel_id = NULL').run()
+    events = []
+    updateGuildMember(context.db, guild, user, { mute: true, deaf: false })
+    expect(getGuildVoiceState(context.db, guild, user)).toMatchObject({
+      channel_id: null,
+      mute: true,
+      deaf: false,
+    })
+    expect(events.map((event) => event.name)).toEqual(['guild.member.update'])
+
+    // Without any voice state only the member row changes.
+    context.db.prepare('DELETE FROM guild_voice_states').run()
+    events = []
+    expect(
+      updateGuildMember(context.db, guild, user, { mute: false })
+    ).toMatchObject({ mute: false })
+    expect(getGuildVoiceState(context.db, guild, user)).toBeNull()
+    expect(events.map((event) => event.name)).toEqual(['guild.member.update'])
   })
 
   it('keeps REST fault injection ahead of voice moderation', async () => {
