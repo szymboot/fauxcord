@@ -653,4 +653,86 @@ describe('native VOICE_STATE_UPDATE delivery', () => {
       client.sessionId
     )
   })
+  it('delivers REST voice moderation (mute, deaf, move, disconnect) with ordinary sequencing and intents', async () => {
+    const server = await createTestGatewayServer()
+    servers.push(server)
+    const token = seedBot(server.db)
+    const guildId = seedGuild(server.db, token)
+    const userId = seedMember(server.db, guildId)
+    const channelId = seedVoiceChannel(server.db, guildId)
+    const movedId = seedVoiceChannel(server.db, guildId, '555555555555555556')
+    const voice = await connect(
+      server.url,
+      token,
+      GatewayIntentBits.GuildVoiceStates,
+      [],
+      sockets
+    )
+    const both = await connect(
+      server.url,
+      token,
+      GatewayIntentBits.GuildVoiceStates | GatewayIntentBits.GuildMembers,
+      [],
+      sockets
+    )
+    const membersOnly = await connect(
+      server.url,
+      token,
+      GatewayIntentBits.GuildMembers,
+      [],
+      sockets
+    )
+    await expectStatus(
+      patchVoice(server.url, guildId, userId, { channel_id: channelId }),
+      200
+    )
+    const join = await voice.next()
+    voice.sequence = Number(join.s)
+    const bothJoin = await both.next()
+    both.sequence = Number(bothJoin.s)
+    const session = (join.d as { session_id: string }).session_id
+    for (const [body, expected] of [
+      [{ mute: true }, { channel_id: channelId, mute: true }],
+      [{ deaf: true }, { channel_id: channelId, deaf: true }],
+      [{ channel_id: movedId }, { channel_id: movedId }],
+      [{ channel_id: null }, { channel_id: null }],
+    ] as const) {
+      const response = await fetch(
+        `${server.url.replace('ws://', 'http://')}/api/v10/guilds/${guildId}/members/${userId}`,
+        {
+          method: 'PATCH',
+          headers: { Authorization: token, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }
+      )
+      expect(response.status).toBe(200)
+      const member = getGuildMember(server.db, guildId, userId)
+      const state = {
+        ...getGuildVoiceState(server.db, guildId, userId),
+        member,
+      }
+      expect(state).toMatchObject({ ...expected, session_id: session })
+      const update = await voice.next()
+      expect(update).toEqual({
+        op: GatewayOp.Dispatch,
+        t: 'VOICE_STATE_UPDATE',
+        s: ++voice.sequence,
+        d: state,
+      })
+      expect(
+        server.sessionManager.get(voice.sessionId)?.replayBuffer.at(-1)?.event
+      ).toEqual(update)
+      expect(await both.next()).toMatchObject({
+        t: 'GUILD_MEMBER_UPDATE',
+        s: ++both.sequence,
+        d: { guild_id: guildId, user: { id: userId } },
+      })
+      expect(await both.next()).toEqual({ ...update, s: ++both.sequence })
+      expect(await membersOnly.next()).toMatchObject({
+        t: 'GUILD_MEMBER_UPDATE',
+      })
+    }
+    await expectSilent(voice)
+    await expectSilent(both)
+  })
 })

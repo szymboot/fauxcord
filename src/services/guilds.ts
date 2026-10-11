@@ -12,8 +12,9 @@ import { getGuildRoles, type RoleObject } from './guild-roles'
 import { getGuildChannels } from './channels'
 import { getGuildMember, getGuildMembers } from './guild-members'
 import { getGuildVoiceStates } from './voice-states'
-import { toDiscordTimestamp } from '../timestamp'
+import { getUser } from './users'
 import { gatewayBus } from '../gateway/bus'
+import { toDiscordTimestamp } from '../timestamp'
 // Used for compile-time type drift detection.
 import type {
   APIBaseVoiceState,
@@ -265,6 +266,70 @@ export function deleteGuild(db: Database, guildId: string): boolean {
   if (result.changes > 0) getRestPageHolds(db).reset(undefined, guildId)
   getRestFaultRuntime(db).prune()
   return result.changes > 0
+}
+
+/** Why a bot loses access to a guild, selecting the Gateway events sent. */
+export type GuildRemovalReason = 'leave' | 'kick' | 'ban' | 'delete'
+
+/**
+ * Removes a guild from its bot's view and notifies that bot's live sessions.
+ *
+ * A Fauxcord guild belongs to exactly one bot (`guilds.bot_token`), so once
+ * that bot leaves, is removed, or the guild is deleted, nothing can observe
+ * the guild any more and it is deleted with all cascaded data. Real Discord
+ * sends `GUILD_DELETE` with an unavailable guild object lacking
+ * `unavailable` in that case; leaving, kicks and bans additionally send the
+ * bot's own `GUILD_MEMBER_REMOVE` ("leave/kick/ban" per Discord).
+ * Fauxcord's only REST actor is the bot itself, so a kick or ban whose
+ * target is the guild's own bot stands in for an administrator removing it. Both are dispatched before the rows are deleted, so
+ * the events stay sequenced and replayable and no later cleanup can drop
+ * them, and nothing for the guild can follow `GUILD_DELETE`.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param reason - How the bot lost the guild
+ * @returns true when the guild existed and was removed
+ */
+export function removeGuildFromBot(
+  db: Database,
+  guildId: string,
+  reason: GuildRemovalReason
+): boolean {
+  const owner = db
+    .prepare(
+      'SELECT b.user_id AS botId, b.token FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ?'
+    )
+    .get(guildId) as { botId: string; token: string } | undefined
+  if (!owner) return false
+  const scope = { db, botId: owner.botId, token: owner.token }
+  const user = reason === 'delete' ? null : getUser(db, owner.botId)
+  if (user) {
+    gatewayBus.emit('guild.member.remove', {
+      guildId,
+      userId: owner.botId,
+      user: user as unknown as Record<string, unknown>,
+      scope,
+    })
+  }
+  gatewayBus.emit('guild.delete', { guildId, scope })
+  return deleteGuild(db, guildId)
+}
+
+/**
+ * Resolves the user ID of the bot a guild belongs to.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @returns The bot's user ID, or undefined for an unknown guild
+ */
+export function getGuildBotUserId(
+  db: Database,
+  guildId: string
+): string | undefined {
+  const row = db
+    .prepare(
+      'SELECT b.user_id FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ?'
+    )
+    .get(guildId) as { user_id: string } | undefined
+  return row?.user_id
 }
 
 /**

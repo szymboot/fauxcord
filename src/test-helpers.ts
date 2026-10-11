@@ -34,6 +34,7 @@ import { createApplicationRoutes } from './routes/applications'
 import { createInteractionRoutes } from './routes/interactions'
 import { createLobbyRoutes } from './routes/lobbies'
 import { createStageInstanceRoutes } from './routes/stage-instances'
+import { setTestGuildVoiceState } from './services/voice-states'
 import {
   createCatalogPublicRoutes,
   createCatalogRoutes,
@@ -748,9 +749,12 @@ async function runCleanupSteps(
 /**
  * Starts a test server that handles WebSocket upgrades over a real socket.
  * Uses an in-memory DB and lets the OS assign a port via port 0.
+ * @param options - Optional Gateway heartbeat interval (ms) for HELLO
  * @returns The db, the connection URL, and a close function for teardown
  */
-export async function createTestGatewayServer(): Promise<{
+export async function createTestGatewayServer(
+  options: { heartbeatIntervalMs?: number } = {}
+): Promise<{
   db: Database
   url: string
   sessionManager: SessionManager
@@ -760,6 +764,7 @@ export async function createTestGatewayServer(): Promise<{
   const { app, wss, sessionManager, unsubscribeGateway } = buildApp(db, {
     baseUrl: 'http://localhost:0',
     disableAuth: false,
+    gatewayHeartbeatIntervalMs: options.heartbeatIntervalMs,
   })
 
   const server = await new Promise<ReturnType<typeof serveWithGateway>>(
@@ -881,6 +886,30 @@ export function seedVoiceChannel(
     'INSERT INTO channels (id, guild_id, type, name) VALUES (?, ?, 2, ?)'
   ).run(channelId, guildId, 'voice-channel')
   return channelId
+}
+
+/**
+ * Silently connects an existing guild member to a voice/stage channel through
+ * the voice-state fixture service (no Gateway event).
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - Member user ID
+ * @param channelId - Voice or stage channel ID in the same guild
+ * @returns The connected voice session ID
+ */
+export function seedVoiceState(
+  db: Database,
+  guildId: string,
+  userId: string,
+  channelId: string
+): string {
+  const result = setTestGuildVoiceState(db, guildId, userId, {
+    channel_id: channelId,
+    emit: false,
+  })
+  if (typeof result === 'string')
+    throw new Error(`seedVoiceState failed: ${result}`)
+  return result.state.session_id
 }
 
 /**

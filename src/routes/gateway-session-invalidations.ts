@@ -3,6 +3,7 @@ import { bodyLimit } from 'hono/body-limit'
 import { isAuditOwnershipKey } from '../validators/audit-log-response'
 import type {
   GatewaySessionInvalidations,
+  InvalidationTrigger,
   SessionInvalidationOwnership,
   SessionInvalidationRequest,
 } from '../gateway/session-invalidations'
@@ -12,9 +13,11 @@ const ROOT = '/_test/gateway-session-invalidations'
 const SNOWFLAKE = /^[1-9]\d{0,19}$/
 /** Gateway session IDs are 32 lowercase hexadecimal characters. */
 const SESSION_ID = /^[\da-f]{32}$/
-/** Default and maximum observation lifetime in milliseconds. */
-const DEFAULT_TTL_MS = 60_000
-const MAX_TTL_MS = 120_000
+/** Default and maximum observation lifetime in milliseconds, per trigger. */
+const DEFAULT_TTL_MS = { immediate: 60_000, resume: 180_000 }
+const MAX_TTL_MS = { immediate: 120_000, resume: 300_000 }
+/** Supported invalidation triggers. */
+const TRIGGERS = new Set(['immediate', 'resume'])
 /** Maximum long-poll duration in milliseconds. */
 const MAX_WAIT_MS = 30_000
 
@@ -31,9 +34,15 @@ function validateRequest(
     'guild_id',
     'session_id',
     'ttl_ms',
+    'trigger',
   ])
   if (Object.keys(data).some((key) => !allowed.has(key))) return undefined
-  const ttlMs = data.ttl_ms === undefined ? DEFAULT_TTL_MS : data.ttl_ms
+  const trigger = data.trigger === undefined ? 'immediate' : data.trigger
+  if (typeof trigger !== 'string' || !TRIGGERS.has(trigger)) return undefined
+  // An armed rejection must outlive a client's zombie detection (DiscordGo:
+  // up to two heartbeat intervals, 41.25 s each by default) plus its reconnect.
+  const limits = trigger as InvalidationTrigger
+  const ttlMs = data.ttl_ms === undefined ? DEFAULT_TTL_MS[limits] : data.ttl_ms
   const {
     ownership_key: key,
     bot_id: botId,
@@ -45,7 +54,7 @@ function validateRequest(
     typeof sessionId === 'string' &&
     typeof ttlMs === 'number' &&
     ttlMs >= 1 &&
-    ttlMs <= MAX_TTL_MS &&
+    ttlMs <= MAX_TTL_MS[limits] &&
     Number.isSafeInteger(ttlMs) &&
     SNOWFLAKE.test(botId) &&
     SNOWFLAKE.test(guildId) &&
@@ -57,6 +66,7 @@ function validateRequest(
         guild_id: guildId,
         session_id: sessionId,
         ttl_ms: ttlMs,
+        trigger: limits,
       }
     : undefined
 }
@@ -67,7 +77,7 @@ function validateRequest(
  * @param allowWait - Whether `wait_ms` may be supplied
  * @returns The wait duration, or undefined when invalid
  */
-function validateWait(
+export function validateWait(
   search: URLSearchParams,
   allowWait: boolean
 ): number | undefined {
@@ -81,7 +91,7 @@ function validateWait(
 }
 
 /** Validates an exact key address; each scope field must appear exactly once. */
-function validateOwnership(
+export function validateOwnership(
   key: string,
   search: URLSearchParams,
   allowWait: boolean

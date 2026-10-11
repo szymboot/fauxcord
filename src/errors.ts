@@ -32,6 +32,7 @@ export const DiscordErrorCode = {
   // 40xxx — Other errors
   UNAUTHORIZED: 40_001,
   REQUEST_TOO_LARGE: 40_005,
+  TARGET_USER_NOT_CONNECTED_TO_VOICE: 40_032,
   ALREADY_PINNED: 40_041,
   INTERACTION_ALREADY_ACKNOWLEDGED: 40_060,
   // 50xxx — Operation not allowed

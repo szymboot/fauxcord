@@ -8,7 +8,12 @@ import { runInTransaction } from '../db'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import type { AppEnv } from '../middleware/auth'
 import { parseJsonBody } from '../lib/route-helpers'
-import { getGuild } from '../services/guilds'
+import {
+  getGuild,
+  getGuildBotUserId,
+  removeGuildFromBot,
+} from '../services/guilds'
+import type { GatewayEventControls } from '../gateway/event-controls'
 import {
   getGuildMember,
   getGuildMembers,
@@ -352,8 +357,16 @@ export function createGuildAdvancedPublicRoutes(db: Database): Hono<AppEnv> {
   return app
 }
 
-/** Creates authenticated advanced guild routes. */
-export function createGuildAdvancedRoutes(db: Database): Hono<AppEnv> {
+/**
+ * Creates authenticated advanced guild routes.
+ * @param db - Database
+ * @param eventControls - Gateway test controls cleared when the bot is banned
+ * @returns Hono router instance
+ */
+export function createGuildAdvancedRoutes(
+  db: Database,
+  eventControls?: Pick<GatewayEventControls, 'deleteGuild'>
+): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
   ensureAuxiliaryTables(db)
   registerGuildSnowflakeValidation(app)
@@ -448,8 +461,17 @@ export function createGuildAdvancedRoutes(db: Database): Hono<AppEnv> {
     }
     const banned: string[] = []
     const failed: string[] = []
+    const botUserId = getGuildBotUserId(db, guildId)
+    // Mutated inside the transaction callback.
+    const botBan = { requested: false }
     runInTransaction(db, () => {
       for (const value of payload.user_ids as unknown[]) {
+        // The guild's own bot is removed after the other bans commit.
+        if (botUserId !== undefined && value === botUserId) {
+          if (!botBan.requested) banned.push(botUserId)
+          botBan.requested = true
+          continue
+        }
         if (
           typeof value !== 'string' ||
           !db.prepare('SELECT 1 FROM users WHERE id = ?').get(value)
@@ -466,6 +488,10 @@ export function createGuildAdvancedRoutes(db: Database): Hono<AppEnv> {
         banned.push(value)
       }
     })
+    if (botBan.requested) {
+      removeGuildFromBot(db, guildId, 'ban')
+      eventControls?.deleteGuild(guildId)
+    }
     return c.json({ banned_users: banned, failed_users: failed })
   })
 

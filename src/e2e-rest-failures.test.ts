@@ -12,6 +12,8 @@ import {
   seedChannel,
   seedMember,
   seedRole,
+  seedVoiceChannel,
+  seedVoiceState,
   type RealServerContext,
 } from './test-helpers'
 
@@ -67,6 +69,8 @@ describe('deterministic REST failure controls', () => {
     guild = seedGuild(server.db, token)
     channel = seedChannel(server.db, guild)
     user = seedMember(server.db, guild)
+    // Server mute PATCHes require the target to be connected to voice.
+    seedVoiceState(server.db, guild, user, seedVoiceChannel(server.db, guild))
     role = seedRole(server.db, guild)
   })
 
@@ -487,14 +491,14 @@ describe('deterministic REST failure controls', () => {
     const otherUser = seedMember(server.db, guild)
     await expect(
       request(`/guilds/${guild}/members/${otherUser}`, 'PATCH', {
-        mute: true,
+        nick: 'other',
       })
     ).resolves.toMatchObject({ status: 200 })
     const otherGuild = seedGuild(server.db, token, '222222222222222223')
     seedMember(server.db, otherGuild, user)
     await expect(
       request(`/guilds/${otherGuild}/members/${user}`, 'PATCH', {
-        mute: true,
+        nick: 'other',
       })
     ).resolves.toMatchObject({ status: 200 })
     const duplicate = await request('/_test/rest-faults', 'POST', {

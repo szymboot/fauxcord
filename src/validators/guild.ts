@@ -265,12 +265,48 @@ function validateMemberTimeout(deadline: unknown): FieldError[] {
 export interface GuildMemberUpdatePayload {
   nick?: string | null
   roles?: string[]
+  /** Server mute; requires the target to be connected to voice */
   mute?: boolean | null
+  /** Server deafen; requires the target to be connected to voice */
+  deaf?: boolean | null
+  /** Voice/stage channel to move a connected target to; null disconnects */
+  channel_id?: string | null
   communication_disabled_until?: string | null
 }
 
 /**
- * Validates a guild member update payload: nickname and timeout deadline.
+ * Validates a nullable strict boolean member field.
+ * @param value - Field value
+ * @returns Field errors (empty when valid)
+ */
+function validateNullableBoolean(value: unknown): FieldError[] {
+  return value === undefined || value === null || typeof value === 'boolean'
+    ? []
+    : [{ code: 'BASE_TYPE_BOOLEAN', message: 'Must be either true or false.' }]
+}
+
+/**
+ * Validates a nullable snowflake string without losing precision.
+ * @param value - Field value
+ * @returns Field errors (empty when valid)
+ */
+function validateNullableSnowflake(value: unknown): FieldError[] {
+  if (value === undefined || value === null) return []
+  return typeof value === 'string' &&
+    /^[1-9]\d{0,19}$/.test(value) &&
+    BigInt(value) <= 18_446_744_073_709_551_615n
+    ? []
+    : [
+        {
+          code: 'NUMBER_TYPE_COERCE',
+          message: `Value "${typeof value === 'string' ? value : JSON.stringify(value)}" is not snowflake.`,
+        },
+      ]
+}
+
+/**
+ * Validates a guild member update payload: nickname, timeout deadline and the
+ * voice moderation fields (mute, deaf, channel_id).
  * @param payload - Payload to validate
  * @returns Validation error map (empty when valid)
  */
@@ -290,6 +326,14 @@ export function validateGuildMemberUpdate(
     } else if (payload.nick.length > NICK_MAX) {
       errors.nick = { _errors: [maxLengthError(NICK_MAX)] }
     }
+  }
+  const fieldErrors = {
+    mute: validateNullableBoolean(payload.mute),
+    deaf: validateNullableBoolean(payload.deaf),
+    channel_id: validateNullableSnowflake(payload.channel_id),
+  }
+  for (const [field, fieldErrorList] of Object.entries(fieldErrors)) {
+    if (fieldErrorList.length > 0) errors[field] = { _errors: fieldErrorList }
   }
 
   return errors

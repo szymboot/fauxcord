@@ -48,6 +48,10 @@ import { GatewayEventControls } from './gateway/event-controls'
 import { createGatewayEventControlRoutes } from './routes/gateway-event-controls'
 import { GatewaySessionInvalidations } from './gateway/session-invalidations'
 import { createGatewaySessionInvalidationRoutes } from './routes/gateway-session-invalidations'
+import { GatewayZombieConnections } from './gateway/zombie-connections'
+import { createGatewayZombieConnectionRoutes } from './routes/gateway-zombie-connections'
+import { GatewayGuildOutages } from './gateway/guild-outages'
+import { createGatewayGuildOutageRoutes } from './routes/gateway-guild-outages'
 import { createTestRoutes } from './routes/test'
 import { createMockRoutes } from './routes/mock'
 import { createGatewayWebSocketHandler } from './gateway/server'
@@ -64,6 +68,8 @@ export interface BuildAppConfig {
   disableAuth: boolean
   /** Artificial latency (ms) applied to all responses */
   latencyMs?: number
+  /** Gateway heartbeat interval (ms) announced in HELLO; default 41250 */
+  gatewayHeartbeatIntervalMs?: number
   /** Existing no-server WebSocket server when HTTP is bound before assembly. */
   wss?: WebSocketServer
 }
@@ -108,6 +114,7 @@ export function buildApp(
   const gatewayHandler = createGatewayWebSocketHandler(db, {
     baseUrl: config.baseUrl,
     disableAuth: config.disableAuth,
+    heartbeatIntervalMs: config.gatewayHeartbeatIntervalMs,
   })
   const eventControls = new GatewayEventControls(
     db,
@@ -117,20 +124,34 @@ export function buildApp(
     db,
     gatewayHandler.sessionManager
   )
+  const zombieConnections = new GatewayZombieConnections(
+    db,
+    gatewayHandler.sessionManager
+  )
+  const guildOutages = new GatewayGuildOutages(
+    db,
+    gatewayHandler.sessionManager
+  )
   /** Applies setup/guild lifecycle cleanup to every Gateway test control. */
   const gatewayControls = {
     reset: (token?: string): void => {
       eventControls.reset(token)
       sessionInvalidations.reset(token)
+      zombieConnections.reset(token)
+      guildOutages.reset(token)
     },
     deleteGuild: (guildId: string): void => {
       eventControls.deleteGuild(guildId)
       sessionInvalidations.deleteGuild(guildId)
+      zombieConnections.deleteGuild(guildId)
+      guildOutages.deleteGuild(guildId)
     },
   }
   // Test control APIs require no authentication
   app.route('/', createGatewayEventControlRoutes(eventControls))
   app.route('/', createGatewaySessionInvalidationRoutes(sessionInvalidations))
+  app.route('/', createGatewayZombieConnectionRoutes(zombieConnections))
+  app.route('/', createGatewayGuildOutageRoutes(guildOutages))
   app.route(
     '/',
     createTestRoutes(db, config.baseUrl, config.uploadPath, gatewayControls)
@@ -162,7 +183,11 @@ export function buildApp(
   )
   /** Removes subscriptions and all pending test captures on shutdown. */
   const unsubscribeGateway = (): void => {
-    gatewayControls.reset()
+    eventControls.reset()
+    sessionInvalidations.reset()
+    zombieConnections.reset()
+    // Shutdown discards outages without writing recovery snapshots.
+    guildOutages.reset(undefined, false)
     unsubscribe()
   }
   app.get(
@@ -189,13 +214,13 @@ export function buildApp(
   const routePrefix = ['/api/v10', '/api', '']
 
   for (const prefix of routePrefix) {
-    app.route(prefix, createGuildAdvancedRoutes(db))
+    app.route(prefix, createGuildAdvancedRoutes(db, gatewayControls))
     app.route(
       prefix,
       createChannelRoutes(db, config.baseUrl, config.uploadPath)
     )
     app.route(prefix, createGuildRoutes(db, gatewayControls))
-    app.route(prefix, createUserRoutes(db))
+    app.route(prefix, createUserRoutes(db, gatewayControls))
     app.route(prefix, createGatewayRoutes(db, config.baseUrl))
     app.route(prefix, createSoundboardRoutes(db))
     // Webhook routes are also enabled for all prefixes (to support /api/v10/webhooks/...)

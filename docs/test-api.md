@@ -215,6 +215,8 @@ current seed file format registers only bots.
 ## `DELETE /_test/setup/:token` — Completely delete an environment
 
 Deletes the Bot and all of its related data (Guilds, Channels, Messages, Webhooks).
+This is silent: unlike leaving or deleting a guild through REST, no `GUILD_DELETE`
+or other Gateway event is dispatched.
 Guild-scoped audit-log fixtures, audit response controls, REST fault controls, and their consumption history are also removed.
 
 ```bash
@@ -249,12 +251,12 @@ members' voice states.
 
 Allowed input fields:
 
-| Field                                                                             | Meaning                                                                                                                             |
-| --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `channel_id`                                                                      | Voice (type 2) or stage (type 13) channel in the same guild, or `null` to disconnect. Required on first creation.                   |
-| `deaf`, `mute`, `self_deaf`, `self_mute`, `self_stream`, `self_video`, `suppress` | Strict JSON booleans. Defaults are `false`; omitted fields retain their existing values.                                            |
-| `request_to_speak_timestamp`                                                      | Valid ISO8601 datetime with timezone, normalized to Discord timestamp format, or `null`. Defaults to `null`; omission preserves it. |
-| `emit`                                                                            | Strict boolean, defaults to `true`. `false` requests silent historical preparation even with active sessions.                       |
+| Field                                                                             | Meaning                                                                                                                              |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `channel_id`                                                                      | Voice (type 2) or stage (type 13) channel in the same guild, or `null` to disconnect. Required on first creation.                    |
+| `deaf`, `mute`, `self_deaf`, `self_mute`, `self_stream`, `self_video`, `suppress` | Strict JSON booleans. Defaults are `false`; omitted fields retain their existing values. Server `mute`/`deaf` default to the member. |
+| `request_to_speak_timestamp`                                                      | Valid ISO8601 datetime with timezone, normalized to Discord timestamp format, or `null`. Defaults to `null`; omission preserves it.  |
+| `emit`                                                                            | Strict boolean, defaults to `true`. `false` requests silent historical preparation even with active sessions.                        |
 
 To join, send `{"channel_id":"VOICE_CHANNEL_ID"}`. To stream or stop streaming
 while staying connected, send `{"self_stream":true}` or `{"self_stream":false}`.
@@ -265,6 +267,56 @@ flags. A disconnected state cannot enable streaming/video or set a nonnull
 request timestamp. The session ID stays stable through flag changes, moves and
 the disconnect response; rejoining after disconnect creates a fresh session.
 IDs and session identity are server-owned and cannot be overridden.
+
+Server `mute` and `deaf` belong to the guild member, as on Discord, where a
+server mute survives reconnects. When omitted, they default to the member's
+stored `guild_members.mute`/`deaf`, and every successful write copies the
+committed values back to the member. `GET /guilds/:guildId/members/:userId`,
+`GUILD_CREATE` members and the `member` embedded in `VOICE_STATE_UPDATE`
+therefore always agree with the voice state. This mirroring is silent: the
+fixture emits no `GUILD_MEMBER_UPDATE`. Use the production
+[Modify Guild Member voice moderation](#server-voice-moderation-through-modify-guild-member)
+to model the bot's own mute/deafen/move/disconnect actions.
+
+### One voice connection per human user
+
+A human user (`user.bot` is `false`) holds a single voice connection across all
+guilds, as in the Discord client: joining a voice channel in one server leaves
+the channel in another. Whenever a write leaves a human connected in guild B
+(a join from no connection, a join from guild A, or any connected update),
+every connected state of that user in another guild is disconnected first,
+through the same path as `{"channel_id":null}`: the row is kept with
+`channel_id: null`, the previous session ID is preserved, server `mute`/`deaf`
+come from that guild's member (even if a legacy or directly inserted row
+stored different values), and `self_stream`, `self_video` and
+`request_to_speak_timestamp` are cleared. The disconnect and the write commit
+in one transaction. The response still describes only the target guild's
+state. Legacy rows of a user who is no longer a member of that guild are left
+untouched: there is no member to resolve `mute`/`deaf` from, and such rows are
+never published or listed in `GUILD_CREATE`.
+
+With live delivery, guild A's bot receives `VOICE_STATE_UPDATE`
+`channel_id: null` before guild B's bot receives the join. When one bot owns
+both guilds, its sessions get the two events in that order with consecutive
+sequence numbers, and voice capture controls on either guild record their
+respective event. With `emit: false`, the same disconnect is applied silently,
+so later `GUILD_CREATE` snapshots list the user only in guild B. Moves within
+one guild and disconnects are unaffected.
+
+Bot users are exempt: a bot may stay connected to one channel in each of
+several guilds at once, because Discord voice connections are requested per
+guild (the Gateway
+[Update Voice State](https://docs.discord.com/developers/events/gateway-events#update-voice-state)
+payload is keyed by `guild_id`). The rule applies to every write path,
+including the authenticated `PATCH /guilds/:guildId/voice-states/:userId`
+route.
+
+User rows are global, so a human user ID seeded into guilds of different Bot
+setups is one account. The disconnect then crosses setups, as in Discord: the
+other setup's bot receives the leave even though it did not make the write.
+The `/_test/reset` and setup-deletion scoping above still applies only to
+cleanup. Use a distinct human user ID per setup when setups must not affect
+each other's voice state.
 
 Malformed JSON, nonobjects, unsupported fields and invalid values return `400`.
 Missing guild, user, membership or channel returns Discord-style `404`; channels
@@ -299,8 +351,35 @@ through this path. Their writable fields are `channel_id`, `suppress` and
 
 Voice fixtures are cleared by `/_test/reset`: a nonempty token scopes deletion
 to that Bot's guilds, and omission/empty token clears all voice states. Setup,
-guild, channel, user and membership deletion remove affected states. Other
+guild, user and membership deletion silently remove affected states. Other
 setups and memberships remain intact.
+
+### Channel deletion disconnects members
+
+Deleting a voice (type 2) or stage (type 13) channel with
+`DELETE /channels/:channelId` disconnects every member connected to it, as real
+Discord does. Each affected state is changed exactly like a
+`{"channel_id": null}` fixture patch: it is retained with `channel_id: null`,
+the same voice `session_id` and other flags, while `self_stream`, `self_video`
+and `request_to_speak_timestamp` are cleared. One native `VOICE_STATE_UPDATE`
+(with `member`) is published per member through the normal voice path, so the
+`GuildVoiceStates` intent, Bot/token scoping, sequencing, RESUME replay and
+`VOICE_STATE_UPDATE` capture controls all apply. Members connected to other
+channels, already disconnected states and other guilds are untouched. Text and
+other non-voice channels emit only `CHANNEL_DELETE`.
+
+Ordering is deterministic: the disconnects are sent first, in ascending numeric
+`user_id` order, followed by `CHANNEL_DELETE`. All-digit IDs compare by value
+(leading zeros ignored, ties broken by raw text); any non-decimal IDs that a
+fixture stored follow in raw text order. Discord's
+[gateway events documentation](https://docs.discord.com/developers/events/gateway-events)
+documents both events but neither this cascade nor an ordering guarantee;
+Fauxcord emits disconnects first so client libraries can still resolve the
+previous channel from their cache when handling them. Do not depend on this
+order when the same code must also run against real Discord.
+
+The deletion and disconnects are committed in one transaction before any event
+is published. `/_test/reset`, setup cleanup and guild deletion remain silent.
 
 ### Shared service contract for Gateway integrations
 
@@ -321,12 +400,30 @@ setups and memberships remain intact.
   commits, or `INVALID_INPUT`, `UNKNOWN_GUILD`, `UNKNOWN_USER`, `UNKNOWN_MEMBER`,
   `UNKNOWN_CHANNEL` before writes. The route returns only `state`. A native
   publisher can use `changed && emit` after success; this service emits nothing.
+- `applyGuildVoiceStatePatch(db, guildId, userId, patch)`, the same
+  transaction for an already validated `TestVoiceStatePatch`. It is shared by
+  the fixture, stage and Modify Guild Member voice moderation paths, channel
+  deletion and cross-guild displacement (each displaced guild is disconnected
+  with a nested `channel_id: null` patch, reported in `displaced`), and mirrors
+  server `mute`/`deaf` into `guild_members`.
+- `updateGuildMember(db, guildId, userId, params)` in
+  `src/services/guild-members.ts` mirrors the opposite direction: non-null
+  `mute`/`deaf` are written onto a stored voice state in the same transaction,
+  and a changed connected state publishes `VOICE_STATE_UPDATE` after
+  `GUILD_MEMBER_UPDATE`. Voice connection and permission rules are applied only
+  by the REST route.
+- `disconnectGuildVoiceChannelMembers(db, channelId)`, disconnecting every
+  valid member connected to a voice/stage channel with the same semantics as a
+  `channel_id: null` fixture patch and returning the mutations in numeric
+  `user_id` order (`compareUserIds(left, right)`, also exported).
+  `deleteChannel` calls it inside its deletion transaction and publishes the
+  results before `CHANNEL_DELETE`; it emits nothing itself.
 
 `src/services/voice-state-events.ts` exports
 `publishGuildVoiceStateMutation(db, mutation)`. The fixture and stage routes
-call it after the shared storage transaction returns successfully. It attaches
-the existing member/user, resolves the guild's Bot/token scope and emits the
-typed `voice.state.update` domain event. Gateway subscriptions filter it by
+and channel deletion call it after the shared storage transaction returns
+successfully. It attaches the existing member/user, resolves the guild's
+Bot/token scope and emits the typed `voice.state.update` domain event. Gateway subscriptions filter it by
 database, token and intent before normal dispatch sequencing.
 
 `src/validators/voice-state.ts` exports `TestVoiceStatePatch` and
@@ -1605,6 +1702,10 @@ curl -X POST http://localhost:3000/_test/interactions \
 **Response**: `201` with the created interaction object (matches the
 Discord `Interaction` shape). `404` (`{"message": "404: Not Found", "code": 0}`)
 when `command_name` does not match any registered command in scope.
+`404` `{"message": "Unknown Guild", "code": 10004}` when `guild_id` is not an
+existing guild of the application's bot (for example after the bot left it),
+and `404` `{"message": "Unknown Channel", "code": 10003}` when `channel_id` does
+not exist or belongs to a different guild than `guild_id`.
 
 The optional `locale` field accepts the invoking user's
 [Discord locale](https://docs.discord.com/developers/reference#locales), such
@@ -1892,16 +1993,40 @@ reaction-clear DELETE endpoints have native producers.
 For voice, arm the same control API with
 `"events": ["VOICE_STATE_UPDATE"]` and drive real transitions through
 `PATCH /_test/guilds/:guildId/voice-states/:userId` (or the existing stage PATCH
-routes). The selected session must have the Guild Voice States intent; filtering
+routes, or `DELETE /channels/:channelId` of an occupied voice/stage channel).
+The selected session must have the Guild Voice States intent; filtering
 happens before capture. Silent `emit: false` fixtures, no-op writes, rejected
 requests, and changes to an already disconnected state produce no event to
 capture. Voice dispatches follow the guild's registered bot, exact setup token,
 and app database; a capture never holds another session's delivery.
 
-A voice capture includes all users and voice/stage channels in the selected
-guild. Inspect `envelope.d.user_id` and `channel_id` to choose event UUIDs;
-disconnects have `channel_id: null`. The envelope retains the native voice
-session ID, flags (including `self_stream`), and member/user snapshot. For
+Without a selector, a voice capture includes all users and voice/stage channels
+in the selected guild. Inspect `envelope.d.user_id` and `channel_id` to choose
+event UUIDs; disconnects have `channel_id: null`.
+
+To capture or hold only one user's voice transitions, add `member_id` (see
+[member selectors](#member-selectors) below):
+
+```json
+{
+  "guild_id": "222222222222222222",
+  "bot_id": "111111111111111111",
+  "session_id": "SESSION_ID_FROM_READY",
+  "events": ["VOICE_STATE_UPDATE"],
+  "member_id": "888888888888888888",
+  "hold": true
+}
+```
+
+Only dispatches whose `d.user_id` equals `member_id` are captured. Other users'
+voice dispatches in the same guild are not captured, not held, and are delivered
+immediately with their ordinary native sequence, exactly as if no control
+existed. For example, hold user A's leave while user B's join is delivered, then
+release A's leave later. Arm one selected control per user to hold or observe
+several users independently in one guild/session.
+
+The envelope retains the native voice session ID, flags (including
+`self_stream`), and member/user snapshot. For
 example, hold stream start and stop, then disconnect the user through the typed
 route. Releasing the earlier start after disconnect still sends the captured
 `self_stream: true` and original channel; replay duplicates that same snapshot.
@@ -1953,7 +2078,8 @@ RESUME attempts; overflow increments `delivery_observations_skipped` and leaves
 normal protocol delivery running. Check both skipped counters when complete
 observation matters. There are at most
 32 controls per assembled Gateway. Global capacity returns `429`. Overlapping
-event selectors for the same guild/session return `409`. Invalid policy,
+event selectors for the same guild/session return `409` (see
+[member selectors](#member-selectors) for how `member_id` affects overlap). Invalid policy,
 malformed JSON and explicit null policy values return `400`.
 
 When count/byte capacity is reached, subsequent matching events **pass through
@@ -2229,14 +2355,43 @@ sequence. Use `new` when testing duplicate callbacks rather than client sequence
 handling. Malformed action JSON, duplicate IDs or invalid sequence mode returns
 `400`; each successful action returns updated observation.
 
+### Member selectors
+
+`member_id` narrows a control to one existing guild member. It uses the same
+positive 1–20 digit string format as the scope IDs; null/malformed selectors
+return `400`, and a user who is not currently a member of the guild returns
+`404`. The selector matches the subject user of each event:
+
+| Event                 | Matched field |
+| --------------------- | ------------- |
+| `GUILD_MEMBER_UPDATE` | `d.user.id`   |
+| `VOICE_STATE_UPDATE`  | `d.user_id`   |
+
+`events` may combine both (for example one control holding a user's nickname and
+voice changes). Every listed event must be one of these member-scoped events;
+any other event type (messages, reactions) together with `member_id` returns
+`400` with
+`{"message":"member_id requires every event to be one of GUILD_MEMBER_UPDATE, VOICE_STATE_UPDATE","code":0}`.
+Dispatches of other users never match a selected control and pass through
+untouched.
+
+**Overlap and precedence.** At most one control ever matches a dispatch, so no
+precedence rule is needed at delivery time: overlap is rejected when arming. For
+the same guild and session, a new control conflicts (`409`) with an existing one
+when they share at least one event type and either has no `member_id` or both
+select the same member. Hence controls for different members coexist, the same
+member may have controls for disjoint event types, and an all-member control
+cannot coexist with a member-selected control for the same event type (cancel
+one first). Every control, selected or not, counts toward the 32-control limit
+and has its own `limit`, byte budget, operation budget and TTL. `member_id` is
+part of the ownership-key policy: retrying a keyed creation with a different
+selector returns `409`. Release, replay, sequence modes, acknowledgements,
+disconnect/resume gating, inspection by ID or key and cleanup are unchanged.
+
 ### Native member updates and cache preparation
 
-Arm `events: ["GUILD_MEMBER_UPDATE"]` and optionally `member_id` to select one
-existing guild member. `member_id` uses the same positive 1–20 digit string
-format as the scope IDs; null/malformed selectors return `400`, a missing member
-returns `404`. A member selector requires exactly this one event type. Different
-member selectors can coexist for one guild/session; an all-member selector or
-the same member overlaps and returns `409`.
+Arm `events: ["GUILD_MEMBER_UPDATE"]` and optionally `member_id` (see
+[member selectors](#member-selectors)) to select one existing guild member.
 
 Use the production `PATCH /guilds/:guildId/members/:userId` with `{"nick":"New"}`
 or `{"nick":null}`. Unchanged nickname PATCHes also emit a native update, as does
@@ -2470,13 +2625,14 @@ instead of sleeping.
 }
 ```
 
-| Field           | Required | Meaning                                                                                                   |
-| --------------- | -------- | --------------------------------------------------------------------------------------------------------- |
-| `ownership_key` | ✅       | Fresh opaque key chosen **before** sending, `[A-Za-z0-9_-]{1,128}`. Never put credentials in it.          |
-| `bot_id`        | ✅       | Registered bot user ID (1–20 digit snowflake).                                                            |
-| `guild_id`      | ✅       | A guild of that bot's setup; proves the session's IDENTIFY token owns it. All of its guilds are affected. |
-| `session_id`    | ✅       | Exact Gateway session to invalidate (32 lowercase hex characters). Never inferred.                        |
-| `ttl_ms`        | —        | Observation lifetime, integer `1`–`120000`, default `60000`. The invalidation itself is permanent.        |
+| Field           | Required | Meaning                                                                                                                                                  |
+| --------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ownership_key` | ✅       | Fresh opaque key chosen **before** sending, `[A-Za-z0-9_-]{1,128}`. Never put credentials in it.                                                         |
+| `bot_id`        | ✅       | Registered bot user ID (1–20 digit snowflake).                                                                                                           |
+| `guild_id`      | ✅       | A guild of that bot's setup; proves the session's IDENTIFY token owns it. All of its guilds are affected.                                                |
+| `session_id`    | ✅       | Exact Gateway session to invalidate (32 lowercase hex characters). Never inferred.                                                                       |
+| `ttl_ms`        | —        | Observation lifetime, integer `1`–`120000`, default `60000` (`trigger: "resume"`: `1`–`300000`, default `180000`). The invalidation itself is permanent. |
+| `trigger`       | —        | `"immediate"` (default) invalidates now; `"resume"` rejects the session's next RESUME instead — see [Failed RESUME](#failed-resume-trigger-resume).      |
 
 Use the read-only preflight
 `GET /_test/gateway-event-controls/session?bot_id=:bot&guild_id=:guild` to
@@ -2498,13 +2654,15 @@ Responses:
   already invalidated, heartbeat-expired) or does not belong to that bot and
   guild setup (including another bot's session or another setup sharing the
   bot ID). Failed requests reserve no key.
-- `409` `INVALID_STATE` when the session is registered but its socket is not
-  open: a dropped connection retained for RESUME, or an explicit
-  `gateway-event-controls` disconnect awaiting RESUME. Nothing changes and the
+- `409` `INVALID_STATE` (immediate trigger only) when the session is
+  registered but its socket is not open or is a
+  [zombie connection](#zombie-gateway-connections): a dropped connection
+  retained for RESUME, or an explicit `gateway-event-controls` disconnect
+  awaiting RESUME. Nothing changes and the
   key stays unused; after the client resumes on a new socket the session is
   live again and can be invalidated.
-- `409` `CONFLICT` when the key is already reserved with a different owner or
-  `ttl_ms`, has been closed by DELETE, or its observation retired.
+- `409` `CONFLICT` when the key is already reserved with a different owner,
+  `ttl_ms` or `trigger`, has been closed by DELETE, or its observation retired.
 - `409` `BUSY` when another live observation for the same setup token is
   still open (has no `replacement` yet). A replacement IDENTIFY carries no
   link to the session it replaces, so only one open observation per setup
@@ -2528,13 +2686,18 @@ can never invalidate the replacement session.
   "bot_id": "111111111111111111",
   "guild_id": "222222222222222222",
   "session_id": "0123456789abcdef0123456789abcdef",
+  "trigger": "immediate",
   "sequence": 42,
   "op": 9,
   "resumable": false,
   "close_code": 4009,
   "transport": "sent",
   "status": "identified",
-  "replacement": { "session_id": "fedcba9876543210fedcba9876543210", "...": "same shape as identifies[n]" },
+  "resume_rejection": null,
+  "replacement": {
+    "session_id": "fedcba9876543210fedcba9876543210",
+    "...": "same shape as identifies[n]"
+  },
   "ttl_ms": 60000,
   "invalidated_at": 1791936000000,
   "expires_at": 1791936060000,
@@ -2583,7 +2746,8 @@ can never invalidate the replacement session.
   sequence (a server high-water mark, not a client receipt).
 - `transport`: socket write progress of the op 9 frame (`queued`, `sent`,
   `failed`).
-- `status`: `awaiting_identify` while no attempt is in progress (none yet, or
+- `status`: `armed` while a `trigger: "resume"` invalidation has not been
+  applied yet, `awaiting_identify` while no attempt is in progress (none yet, or
   all failed), `identifying` while an attempt's frames are still being
   written, and `identified` once `replacement` is set.
 - `identifies`: replacement attempts, in order. An attempt is a successful
@@ -2702,6 +2866,588 @@ try {
 Focused real HTTP/WS coverage is in
 `src/gateway/session-invalidations.test.ts`.
 
+### Failed RESUME (`trigger: "resume"`)
+
+With `"trigger": "resume"` the POST does not touch the live connection. It
+**arms** a rejection of the session's next authenticated RESUME, so a test can
+drop the connection, generate events during the gap, and prove that the client
+recovers through a fresh IDENTIFY and `GUILD_CREATE` snapshots instead of a
+replay. Discord documents this path in
+[Resuming](https://docs.discord.com/developers/events/gateway#preparing-to-resume):
+a RESUME that cannot be honored is answered with INVALID_SESSION (op 9) and
+`d: false`, after which the app disconnects, opens a new connection and sends
+IDENTIFY. Discord gives no protocol-level reason; in practice it happens when
+the session expired or its missed events can no longer be replayed.
+
+The TTL starts when the rejection is armed and must cover the whole gap until
+the client's RESUME. That includes a zombie's detection delay: DiscordGo needs
+up to two heartbeat intervals (2 × 41.25 s by default), plus its reconnect.
+The resume trigger therefore defaults to `180000` ms and allows up to
+`300000`.
+
+Arming requires a registered session of that bot and guild setup. The socket
+may be open, dropped, waiting behind an explicit `disconnect` or silenced as a
+[zombie](#zombie-gateway-connections). `INVALID_STATE` does not apply.
+`BUSY`, `LIMIT`, `CONFLICT`, ownership keys, `wait_ms`, DELETE and lifecycle
+behave exactly as for the immediate trigger. An armed observation counts as
+open for `BUSY`.
+
+When a RESUME arrives that names the session and carries its token, Fauxcord:
+
+1. answers it with INVALID_SESSION (op 9, `d: false`) on the RESUME socket,
+   which stays open (Fauxcord's usual RESUME rejection),
+2. removes the session and its replay buffer, so the events buffered during
+   the gap are **discarded** and never delivered one by one, and
+3. starts observing the replacement IDENTIFY. That IDENTIFY may arrive on
+   any socket, including the one that carried the RESUME.
+
+The rejection also applies when the cursor could no longer be replayed
+(overflow). Such a RESUME is rejected immediately, even while a `pause_resume`
+gate is closed, because only replayable cursors enter the gate. The removed
+session cancels the event control, so a later `/resume` returns `404`. A
+replayable RESUME waits behind a `pause_resume` gate and is rejected when the
+gate opens. The `/resume` response then shows the opened gate, and the event
+control is canceled together with the removed session. A RESUME with another
+token, or one for another session, is unaffected. If the armed observation
+retires (TTL, DELETE, reset), nothing is applied and later RESUMEs succeed
+normally.
+
+If the session disappears before any RESUME (heartbeat timeout, re-IDENTIFY on
+its socket), the observation applies at that moment with reason
+`session_removed`. The client's later RESUME is then rejected naturally and
+counted in `resumes_rejected`.
+
+Differences from the immediate trigger in the observation object:
+
+| Field              | `trigger: "resume"`                                                                                       |
+| ------------------ | --------------------------------------------------------------------------------------------------------- |
+| `status`           | `armed` until applied, then as above                                                                      |
+| `sequence`         | `null` until applied, then the server high-water mark at rejection (including gap events)                 |
+| `invalidated_at`   | `null` until applied                                                                                      |
+| `transport`        | `null` until applied; write progress of the op 9 answering the RESUME; stays `null` for `session_removed` |
+| `close_code`       | always `null` (Fauxcord does not close a socket)                                                          |
+| `resume_rejection` | `null` until applied, then `{reason, at, client_sequence, replay_available, discarded}`                   |
+| `resumes_rejected` | includes the forced rejection                                                                             |
+
+`resume_rejection.reason` is `forced` or `session_removed`. `client_sequence`
+is the RESUME's `seq`. `replay_available` reports whether the replay buffer
+could still have served it (`false` after overflow). `discarded` is
+`{count, first_sequence, last_sequence}` of buffered dispatches after the
+client's sequence. `client_sequence`, `replay_available` and `discarded` are
+`null` for `session_removed`.
+
+```typescript
+// 1. Arm before the gap; 2. drop the connection (event-control disconnect,
+// zombie, or a network drop); 3. change state; 4. wait for the replacement.
+await post('/_test/gateway-session-invalidations', {
+  ownership_key: key,
+  bot_id: botId,
+  guild_id: guildId,
+  session_id: sessionId,
+  trigger: 'resume',
+})
+await post(`/_test/gateway-event-controls/${controlId}/disconnect`, {})
+await patch(`/_test/guilds/${guildId}/voice-states/${userId}`, {
+  self_stream: false,
+})
+const observation = await get(`${address}&wait_ms=15000`)
+// observation.resume_rejection.discarded lists the events that were never
+// delivered individually; observation.replacement.guild_creates holds the
+// snapshot the client rebuilt its state from.
+```
+
+#### Alternative: natural replay-buffer overflow
+
+Each session keeps its most recent **100** dispatches for RESUME. If more
+than 100 dispatches are generated for the session while it is disconnected,
+the RESUME's cursor is older than the buffer and Fauxcord answers op 9
+`d: false` with no control involved. The client then IDENTIFYs. Two
+deviations from Discord apply: Fauxcord keeps the unresumable session
+registered until its heartbeat timeout (it rejects only that cursor), and
+nothing observes the replacement IDENTIFY. Arm `trigger: "resume"` as well to
+observe it: the overflow then shows up as `replay_available: false`.
+
+---
+
+## Zombie Gateway connections
+
+`/_test/gateway-zombie-connections` turns one exact live Gateway connection
+into a _zombie_. The socket stays open, but the server stops answering. It
+writes no HEARTBEAT_ACK (op 11) and no dispatches to that socket, and still
+reads everything the client sends. Native dispatches generated meanwhile are
+sequenced and stored in the session's replay buffer exactly as for a closed
+socket. Use it to test the window in which a client cannot see events
+because it has not yet noticed that its connection is dead.
+
+Discord describes the client side in
+[Heartbeat Interval](https://docs.discord.com/developers/events/gateway#heartbeat-interval):
+if a client does not receive a heartbeat ACK between its attempts at sending
+heartbeats, the connection may be "zombied". The client should then terminate
+the connection with any close code besides `1000` or `1001`, reconnect and
+RESUME. On a successful RESUME the Gateway sends the missed events in order
+and finishes with RESUMED
+([Preparing to Resume](https://docs.discord.com/developers/events/gateway#preparing-to-resume)).
+The DiscordGo fork used by szymboot (`github.com/0x00-sys/discordgo
+v0.0.0-20260923174158-eda8642daf18`, `wsapi.go` `heartbeat()`) checks on each
+tick whether the previous heartbeat was acknowledged. If it was not, DiscordGo
+closes with `1012` (service restart) and calls `reconnect()`, which RESUMEs.
+Detection therefore takes between one and two heartbeat intervals after the
+zombie starts: about 41–83 s with the default 41.25 s interval.
+
+**Faster detection in tests.** Set the environment variable
+`GATEWAY_HEARTBEAT_INTERVAL_MS` (integer `100`–`600000`, default `41250`) to
+change the `heartbeat_interval` Fauxcord announces in HELLO. Clients
+heartbeat at the announced interval, so with `1000` DiscordGo detects a
+zombie within 1–2 s. The server's heartbeat timeout scales with it (two
+intervals).
+
+### `POST /_test/gateway-zombie-connections` — Silence one connection
+
+```json
+{
+  "ownership_key": "zombie-0b8a7d6e",
+  "bot_id": "111111111111111111",
+  "guild_id": "222222222222222222",
+  "session_id": "0123456789abcdef0123456789abcdef",
+  "ttl_ms": 180000
+}
+```
+
+| Field           | Required | Meaning                                                                                                     |
+| --------------- | -------- | ----------------------------------------------------------------------------------------------------------- |
+| `ownership_key` | —        | Optional fresh opaque key `[A-Za-z0-9_-]{1,128}` for idempotent retry, recovery and tombstoning.            |
+| `bot_id`        | ✅       | Registered bot user ID.                                                                                     |
+| `guild_id`      | ✅       | A guild of that bot's setup, proving the session's IDENTIFY token owns it.                                  |
+| `session_id`    | ✅       | Exact Gateway session (32 lowercase hex characters), e.g. from `GET /_test/gateway-event-controls/session`. |
+| `ttl_ms`        | —        | Maximum zombie duration, integer `1`–`300000`, default `180000`.                                            |
+
+Responses: `201` with the record below. A keyed retry with the same owner and
+`ttl_ms` returns the same record. `400` is returned for malformed bodies,
+unknown fields, or invalid IDs, key or TTL, and `413` for bodies over 16 KiB.
+`404` `UNKNOWN_SCOPE` means the session is not registered or not in that
+bot/guild setup. `409` `INVALID_STATE` means its socket is not open (dropped,
+or awaiting RESUME after a disconnect) or is already a zombie. `409`
+`CONFLICT` means the key is reserved for another owner or TTL, or is closed.
+`429` `LIMIT` means 32 live records or 4096 key reservations exist.
+
+Only that connection is affected. Other sessions of the same bot, other bots
+and other setups keep receiving ACKs and dispatches. While a connection is a
+zombie, `POST /_test/gateway-session-invalidations` (immediate trigger) and
+`POST /_test/gateway-event-controls/:id/disconnect` for its session return `409`
+`INVALID_STATE`, because neither op 9 nor op 7 could reach the client. Captures
+keep working, and releases are buffered like any other dispatch.
+
+### How the zombie ends
+
+| End                                                        | `ended_by`        | Effect                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The client closes the socket                               | `client_close`    | Normal detection. `close.code` is the client's code, `initiated_by: "client"`.                                                                                                                                                                                                                                                |
+| `POST /_test/gateway-zombie-connections/:id/end` with `{}` | `end`             | The server drops the socket with close code `4000` (Unknown error, reconnect allowed). Returns `200` with the record; `409` when the zombie already ended, `404` when unknown, `400` for a nonempty body.                                                                                                                     |
+| `ttl_ms` elapses                                           | `ttl`             | As `end`.                                                                                                                                                                                                                                                                                                                     |
+| The client RESUMEs on a new socket first                   | `resume`          | The silenced socket is dropped with `4000`.                                                                                                                                                                                                                                                                                   |
+| The session is removed                                     | `session_removed` | The status becomes `session_lost`; nothing is replayed. Examples: a rejected RESUME on another socket, or the heartbeat timeout. A still-open zombie socket is closed with `4009`, so it is not left ACKing for a session that no longer exists. A re-IDENTIFY on the zombie socket itself keeps it open for its new session. |
+| DELETE, `/_test/reset`, setup or guild deletion            | (record retired)  | An active zombie socket is dropped with `4000` first, so the client can still RESUME.                                                                                                                                                                                                                                         |
+
+After the zombie ends the session is an ordinary disconnected session. The
+client's RESUME (on a new socket, with its last received sequence) replays
+every buffered dispatch with its **original** sequence number, followed by
+RESUMED. Combine with
+[`trigger: "resume"`](#failed-resume-trigger-resume) to reject that RESUME
+instead.
+
+**Heartbeat timeout interaction.** Fauxcord closes a session (`4009`) and
+discards it when no HEARTBEAT arrives for two heartbeat intervals (82.5 s by
+default). Heartbeats
+on a zombie connection are still received and still re-arm that timeout. Only
+the ACK is withheld, so the server never reaps the session while the client
+keeps heartbeating, however long detection takes. After the client closes the
+socket, the session remains resumable until two intervals after the last
+heartbeat the server received. This is at least one interval for a client that detects
+on its next tick. A client that stops heartbeating entirely is reaped by the
+timeout: the record becomes `session_lost` and the RESUME gets op 9 `d: false`.
+
+### Record
+
+```json
+{
+  "id": "1d7c…",
+  "ownership_key": "zombie-0b8a7d6e",
+  "bot_id": "111111111111111111",
+  "guild_id": "222222222222222222",
+  "session_id": "0123456789abcdef0123456789abcdef",
+  "status": "resumed",
+  "ttl_ms": 180000,
+  "sequence": 12,
+  "started_at": 1791936000000,
+  "zombie_expires_at": 1791936180000,
+  "expires_at": 1791936202500,
+  "last_ack_at": 1791935990000,
+  "heartbeats_unacknowledged": 1,
+  "last_heartbeat_at": 1791936031250,
+  "last_heartbeat_sequence": 12,
+  "dispatches_withheld": {
+    "count": 2,
+    "first_sequence": 13,
+    "last_sequence": 14
+  },
+  "ended_at": 1791936082500,
+  "ended_by": "client_close",
+  "close": { "at": 1791936082500, "code": 1012, "initiated_by": "client" },
+  "resume": {
+    "at": 1791936083100,
+    "client_sequence": 12,
+    "replayed": { "count": 2, "first_sequence": 13, "last_sequence": 14 },
+    "resumed_sequence": 15
+  },
+  "session_removed_at": null
+}
+```
+
+- `status`: `zombie` → `awaiting_resume` → `resumed`, or `session_lost` if
+  the session was removed (heartbeat timeout, a rejected RESUME, re-IDENTIFY)
+  before a successful RESUME.
+- `sequence`: server high-water mark when the zombie started.
+- `last_ack_at`: when the last HEARTBEAT_ACK was written to this session
+  before the zombie started (`null` if none). Nothing is ACKed afterwards.
+- `heartbeats_unacknowledged`, `last_heartbeat_at`,
+  `last_heartbeat_sequence`: heartbeats received during the zombie and the
+  client's reported sequence (`d`), which stays at its last received
+  dispatch.
+- `dispatches_withheld`: dispatches sequenced for the session but not
+  written while it was silenced. Dispatches generated after the socket
+  closed are buffered too, but are not counted here; `resume.replayed`
+  covers both.
+- `close.at - started_at` is the detection delay as seen by the server, and
+  `close.at - last_ack_at` is the time since the client's last ACK.
+- `resume`: the successful RESUME's cursor, the replayed sequence range and
+  RESUMED's sequence.
+- `expires_at`: retirement time. Evidence is retained for 120 s after the
+  zombie ended, or 120 s after `zombie_expires_at` while still active.
+
+### Inspect, wait, recover and cancel
+
+- `GET /_test/gateway-zombie-connections/:id[?wait_ms=0..30000]`: with
+  `wait_ms`, holds until `status` is `resumed` or `session_lost`, or the
+  record retires, then returns `200`, or `404` once retired. At most 64
+  concurrent waits (`429`). Responses use `Cache-Control: no-store`.
+- `GET /_test/gateway-zombie-connections/by-key/:key?bot_id=…&guild_id=…&session_id=…[&wait_ms=…]`:
+  the same, addressed by the exact owner (each field exactly once; `400`
+  otherwise).
+- `DELETE /_test/gateway-zombie-connections/:id`: ends an active zombie
+  (drops the socket with `4000`) and retires the record; `204`/`404`.
+- `DELETE /_test/gateway-zombie-connections/by-key/:key?bot_id=…&guild_id=…&session_id=…`:
+  retires the keyed record, or tombstones an unused key in a valid scope so a
+  delayed POST returns `409` and silences nothing.
+
+Records are in memory and cleared by `/_test/reset` (all, or the matching
+setup token), `DELETE /_test/setup/:token`, deleting the scoped guild and
+Gateway shutdown. A library's real detection delay applies, so allow for it
+in test timeouts (or shorten it with `GATEWAY_HEARTBEAT_INTERVAL_MS`) and use
+`wait_ms` rather than sleeps. Focused real HTTP/WS coverage is in
+`src/gateway/connection-faults.test.ts` and
+`src/gateway/heartbeat-interval.test.ts`.
+
+---
+
+## Simulated guild outage (`GUILD_DELETE` unavailable → `GUILD_CREATE`)
+
+`/_test/gateway-guild-outages` makes one guild temporarily unavailable to one
+bot setup, the way a Discord outage does, without removing the bot from the
+guild. Use it to test code that pauses work while a guild is unavailable and
+reconciles state from the fresh snapshot sent when the guild recovers. These
+Fauxcord-only, unauthenticated routes have no Discord OpenAPI manifest
+entries.
+
+### Discord behavior modeled
+
+From the official Gateway documentation
+([Gateway Events](https://discord.com/developers/docs/events/gateway-events),
+[Guild Availability](https://discord.com/developers/docs/events/gateway#guild-availability),
+[Unavailable Guild object](https://discord.com/developers/docs/resources/guild#unavailable-guild-object)):
+
+- **Guild Delete** is "sent when a guild becomes or was already unavailable
+  due to an outage, or when the user leaves or is removed from a guild … If
+  the `unavailable` field is not set, the user was removed from the guild."
+  The payload is an Unavailable Guild object, `{ "id": "…", "unavailable": true }`.
+- **Guild Create** is sent "when a Guild becomes available again to the
+  client", with the full guild object plus Gateway extra fields
+  (`members`, `channels`, `voice_states`, …).
+- On connect, **Ready** lists every guild as an Unavailable Guild object, and
+  "Guilds that are unavailable due to an outage will send a Guild Delete
+  event" instead of the lazy-load Guild Create. The same section also says
+  "During an outage, the guild object in scenarios 1 and 3 may be marked as
+  unavailable", i.e. the lazy-load Guild Create itself may carry the
+  unavailable guild object `{ "id": "…", "unavailable": true }`. Discord
+  confirmed that this Guild Create variant is intended
+  ([discord-api-docs#5054](https://github.com/discord/discord-api-docs/issues/5054)).
+  Both variants occur on the real Gateway, so `identify_dispatch` selects
+  which one Fauxcord sends.
+
+Discord does not document event delivery for an unavailable guild beyond the
+fact that its state arrives through the recovery Guild Create. Fauxcord models
+it as silence: the client cannot see the guild, so no dispatch of it is
+delivered, and changes made meanwhile are visible only in the recovery
+snapshot.
+
+| Phase | What connected sessions of the setup receive |
+| ----- | -------------------------------------------- |
+| Start | `GUILD_DELETE` `{ "id": guild_id, "unavailable": true }`, normally sequenced and stored in the RESUME replay buffer. |
+| Unavailable | Nothing for that guild except `GUILD_DELETE` and the IDENTIFY-time unavailable `GUILD_CREATE` stub. Every other dispatch whose `guild_id` (or `id` for `GUILD_CREATE`/`GUILD_UPDATE`/`GUILD_DELETE`) is the guild — voice states, members, messages, reactions, channels, roles, interactions, … — is dropped **before sequencing**: it consumes no sequence number, is never added to the replay buffer and is never delivered later. Fixtures and REST still change and persist state. |
+| IDENTIFY during the outage | `READY` lists the guild as `{ "id": guild_id, "unavailable": true }` (as every guild). Instead of the full `GUILD_CREATE`, the session receives the unavailable stub `{ "id": guild_id, "unavailable": true }` in `READY` guild order: as `GUILD_DELETE` by default, or as `GUILD_CREATE` with `identify_dispatch: "guild_create"`. Other guilds get their full `GUILD_CREATE`. |
+| RESUME during the outage | Replays the outage `GUILD_DELETE` if the client had not seen it, and other guilds' events; never a suppressed event. The guild stays unavailable. |
+| End | Suppression stops, then `GUILD_CREATE` with the full **current** snapshot (the same builder as the IDENTIFY snapshot: members, channels, `voice_states`, and the member objects of users in voice) is sent to every registered session of the setup. Later events flow normally. |
+
+Scope details:
+
+- An outage affects exactly one guild and the sessions of the bot setup that
+  owns it (sessions of that bot ID identified with that setup's token).
+  Other guilds of the same bot, other bots and other setups are unaffected.
+- `GUILD_DELETE`/`GUILD_CREATE` require the `Guilds` intent; sessions without
+  it receive neither, but dispatches of the guild are still suppressed for
+  them.
+- "Registered sessions" include sessions whose socket dropped and that await
+  RESUME: their frames are reported with `transport: "buffered"` and replayed
+  on RESUME.
+- **REST keeps working** for the guild during an outage. Discord documents no
+  REST behavior for unavailable guilds, and bots normally keep issuing REST
+  calls. To simulate failing REST calls as well, combine the outage with
+  [`POST /_test/rest-faults`](#post-_testrest-faults--fail-bounded-exact-rest-attempts).
+- Envelopes already captured (held) by `/_test/gateway-event-controls` before
+  the outage were sequenced before it; an explicit release or replay delivers
+  them as requested.
+- A session forced to re-IDENTIFY through
+  `/_test/gateway-session-invalidations` during an outage is `complete` once
+  READY and the `GUILD_CREATE` of every **available** guild were sent; the
+  attempt lists outage guilds in `unavailable_guild_ids`.
+
+### `POST /_test/gateway-guild-outages` — Start an outage
+
+```json
+{
+  "ownership_key": "outage-0b8a7d6e",
+  "bot_id": "111111111111111111",
+  "guild_id": "222222222222222222",
+  "ttl_ms": 60000,
+  "identify_dispatch": "guild_delete"
+}
+```
+
+| Field           | Required | Meaning                                                                                                     |
+| --------------- | -------- | ----------------------------------------------------------------------------------------------------------- |
+| `ownership_key` | —        | Optional opaque key chosen **before** sending, `[A-Za-z0-9_-]{1,128}`; enables idempotent retries and by-key routes. |
+| `bot_id`        | ✅       | Registered bot user ID (1–20 digit snowflake).                                                              |
+| `guild_id`      | ✅       | A guild owned by that bot's setup.                                                                          |
+| `ttl_ms`        | —        | Maximum outage duration, integer `1`–`600000`, default `60000`. On expiry the outage **ends with the recovery `GUILD_CREATE`** (`ended_by: "ttl"`). |
+| `identify_dispatch` | —    | `"guild_delete"` (default) or `"guild_create"`: which event carries the unavailable stub for sessions that IDENTIFY during the outage. Sessions live at the start always get `GUILD_DELETE`. |
+
+Responses:
+
+- `201` with the outage object below. A retry with the same key, owner,
+  `ttl_ms` and `identify_dispatch` returns the existing record (`201`) without dispatching again.
+- `400` for malformed JSON, a non-object, unknown fields, or invalid IDs, key,
+  TTL or `identify_dispatch`; `413` for bodies over 16 KiB.
+- `404` `UNKNOWN_SCOPE` when the guild does not exist or is not owned by that
+  bot's setup.
+- `409` `BUSY` when the guild already has an active outage for that setup.
+- `409` `CONFLICT` when the key is reserved with a different owner,
+  `ttl_ms` or `identify_dispatch`, was closed by DELETE, or its record retired.
+- `429` `LIMIT` when 32 outage records (active plus recovered-but-retained)
+  or 4096 key reservations exist in this Gateway instance.
+
+The `GUILD_DELETE` frames are written synchronously before the response, and
+suppression is active once it returns. Starting an outage with no connected
+session is allowed; it then only affects later IDENTIFYs.
+
+### Outage object
+
+```json
+{
+  "id": "4f0c3c87-5b1e-4f7e-a0e3-7f5bb8a8f0d1",
+  "ownership_key": "outage-0b8a7d6e",
+  "bot_id": "111111111111111111",
+  "guild_id": "222222222222222222",
+  "status": "recovered",
+  "ended_by": "request",
+  "ttl_ms": 60000,
+  "identify_dispatch": "guild_delete",
+  "started_at": 1791936000000,
+  "expires_at": 1791936060000,
+  "ended_at": 1791936012000,
+  "retained_until": 1791936132000,
+  "recovery_snapshot": true,
+  "guild_deletes": [
+    {
+      "session_id": "0123456789abcdef0123456789abcdef",
+      "trigger": "outage_start",
+      "sequence": 42,
+      "ready_sequence": null,
+      "transport": "sent",
+      "dispatched_at": 1791936000001
+    },
+    {
+      "session_id": "fedcba9876543210fedcba9876543210",
+      "trigger": "identify",
+      "sequence": 3,
+      "ready_sequence": 1,
+      "transport": "sent",
+      "dispatched_at": 1791936005000
+    }
+  ],
+  "guild_deletes_skipped": 0,
+  "guild_creates": [
+    {
+      "session_id": "0123456789abcdef0123456789abcdef",
+      "trigger": "recovery",
+      "unavailable": false,
+      "sequence": 43,
+      "ready_sequence": null,
+      "transport": "sent",
+      "dispatched_at": 1791936012001,
+      "member_count": 2,
+      "channel_count": 3,
+      "voice_states": [
+        {
+          "user_id": "888888888888888888",
+          "channel_id": "555555555555555555",
+          "session_id": "c0ffee...",
+          "self_stream": true,
+          "self_video": false
+        }
+      ],
+      "voice_states_total": 1
+    }
+  ],
+  "guild_creates_skipped": 0,
+  "suppressed_dispatches": 3,
+  "suppressed_by_event": { "VOICE_STATE_UPDATE": 2, "MESSAGE_CREATE": 1 }
+}
+```
+
+- `status`: `unavailable` while active, `recovered` after it ended;
+  `ended_by` is `request` (end route, DELETE or reset) or `ttl`.
+- `recovery_snapshot`: `null` while active; `true` when recovery dispatched a
+  `GUILD_CREATE` snapshot to at least one session; `false` when it dispatched
+  none, either because the guild no longer belongs to the setup at recovery
+  time (for example another `/_test/setup` reused the guild ID; nothing is sent
+  to the original setup's sessions) or because no registered session of the
+  setup holds the `Guilds` intent. A session that IDENTIFYs after recovery
+  receives the ordinary full `GUILD_CREATE`.
+- `started_at`/`ended_at`/`dispatched_at` are server epoch milliseconds;
+  `expires_at` is when the TTL would end the outage.
+- `guild_deletes`: one entry per written outage `GUILD_DELETE`, with the
+  session, its Gateway `sequence`, and the trigger: `outage_start` for
+  sessions registered at start, `identify` for sessions that IDENTIFYed during
+  the outage (with that session's READY sequence in `ready_sequence`).
+- `guild_creates`: one entry per written `GUILD_CREATE` of this outage, with
+  its sequence and trigger: `recovery` for the full snapshot (`unavailable:
+  false`, with a bounded summary: 100 voice states each, full count in
+  `voice_states_total`), or `identify` for the unavailable stub sent to a
+  session that IDENTIFYed during the outage with `identify_dispatch:
+  "guild_create"` (`unavailable: true`, its READY sequence in
+  `ready_sequence`, empty summary).
+- At most 50 entries are retained per list; further frames are still sent and
+  counted in `guild_deletes_skipped`/`guild_creates_skipped`.
+- `transport` is the server socket write (`queued`, `sent`, `failed`, or
+  `buffered` for a session awaiting RESUME), not client processing.
+- `suppressed_dispatches`/`suppressed_by_event`: per-session dispatches of the
+  guild dropped during the outage (one event fanned out to two sessions
+  counts twice).
+
+Correlate with the bot per `session_id`. The outage starts for a session at
+its outage signal: its `guild_deletes[]` entry (`outage_start`, or `identify`
+in the default mode), or, with `identify_dispatch: "guild_create"`, its
+`guild_creates[]` entry with `trigger: "identify"` (`unavailable: true`). It
+ends at its `guild_creates[]` entry with `trigger: "recovery"`. Never treat an
+`identify` stub as the recovery. Events of other guilds in between carry
+sequences between the two.
+
+### `POST /_test/gateway-guild-outages/:id/end` — End an outage
+
+Ends an active outage: suppression stops and the recovery `GUILD_CREATE` is
+written to every registered session of the setup with the `Guilds` intent.
+Returns `200` with the outage object. Ending an already recovered outage
+returns `200` with the unchanged record and sends nothing. `404` for an
+unknown or retired ID; the route takes no query parameters (`400`).
+Recovered records stay inspectable for 120 seconds (`retained_until`) and then
+retire.
+
+### `GET /_test/gateway-guild-outages/:id` — Inspect and wait
+
+Returns `200` with the outage object or `404`. Optional `wait_ms` (integer
+`0`–`30000`, no other query fields) holds the response until the outage has
+recovered and every recorded frame finished its write (no `queued`
+transport), or the record retires, then returns the current record (which may
+still be `unavailable` when the wait elapsed). At most 64 concurrent waits per
+Gateway instance (`429`). Responses use `Cache-Control: no-store`.
+
+### By-key routes
+
+```text
+GET    /_test/gateway-guild-outages/by-key/:key?bot_id=:bot&guild_id=:guild[&wait_ms=10000]
+POST   /_test/gateway-guild-outages/by-key/:key/end?bot_id=:bot&guild_id=:guild
+DELETE /_test/gateway-guild-outages/by-key/:key?bot_id=:bot&guild_id=:guild
+```
+
+Each scope field is required exactly once; unknown or duplicate fields return
+`400`. GET and end behave like their ID forms and return `404` for an unknown,
+retired, tombstoned or wrong-scope key. DELETE returns `204`: for an applied
+key it ends an active outage (with recovery) and discards the record; for an
+**unused** key it reserves a tombstone when the bot owns the guild (`404`
+otherwise), so a delayed POST with that key returns `409` and starts nothing.
+
+### `DELETE /_test/gateway-guild-outages/:id` — End and discard
+
+Ends the outage if it is still active — sending the recovery `GUILD_CREATE`,
+so a connected client is never left with a permanently unavailable guild —
+and discards the record (`204`; `404` if unknown). Use it in test cleanup.
+
+### Lifecycle
+
+| Event | Effect |
+| ----- | ------ |
+| TTL expiry | Ends the outage with the recovery `GUILD_CREATE`; record retained 120 s. |
+| End route | Same, `ended_by: "request"`. |
+| DELETE (by ID or key) | Ends an active outage with recovery, then discards the record. |
+| `POST /_test/reset` (all, or matching `token`) | Runs after the data reset: active outages recover with a snapshot of the reset state, then records are discarded. |
+| The bot loses the guild (`DELETE /guilds/:id`, leaving via `DELETE /users/@me/guilds/:id`, kicking or banning the bot) | The removal `GUILD_DELETE` (`{ "id": guild_id }` without `unavailable`) is still delivered — it is never suppressed — then the record is discarded without a recovery `GUILD_CREATE`. |
+| `DELETE /_test/setup/:token` | Records are discarded **without** dispatching (the guild no longer exists). |
+| Gateway shutdown | Records are discarded without dispatching. |
+
+Discarded records answer `404`; their keys stay closed. Records and
+reservations are in memory only.
+
+### Harness flow without sleeps
+
+```typescript
+const key = `outage-${crypto.randomUUID()}`
+const query = new URLSearchParams({ bot_id: botId, guild_id: guildId })
+const address = `${base}/_test/gateway-guild-outages/by-key/${key}?${query}`
+try {
+  await fetch(`${base}/_test/gateway-guild-outages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ownership_key: key, bot_id: botId, guild_id: guildId }),
+  }).catch(() => undefined) // a lost response is recovered by the GET below
+  const started = await fetch(address)
+  if (started.status !== 200) throw new Error('Outage was not started')
+  // Assert the bot paused work for the guild; change voice states through
+  // fixtures (they persist but are not dispatched).
+  const ended = await fetch(
+    `${base}/_test/gateway-guild-outages/by-key/${key}/end?${query}`,
+    { method: 'POST' }
+  )
+  const outage = await ended.json()
+  // Per session_id, the outage signal (guild_deletes, or a guild_creates
+  // entry with trigger "identify") and the guild_creates entry with
+  // trigger "recovery" bracket the outage; assert the bot reconciled it.
+} finally {
+  const cleanup = await fetch(address, { method: 'DELETE' })
+  if (cleanup.status !== 204) throw new Error(`Cleanup: ${cleanup.status}`)
+}
+```
+
+Focused real HTTP/WS coverage is in `src/gateway/guild-outages.test.ts`.
+
 ---
 
 ## Bulk-delete injected messages through Discord REST
@@ -2805,7 +3551,9 @@ curl -X PUT http://localhost:3000/api/v10/channels/333333333333333333/permission
 ```
 
 Missing guild membership or `VIEW_CHANNEL` (`1024`) returns HTTP `403`, code
-`50001` (`Missing Access`). Missing `SEND_MESSAGES` (`2048`) returns HTTP `403`,
+`50001` (`Missing Access`). (Removing the bot itself through REST — leave, kick or ban — removes the whole
+guild instead, so later sends return `404`; see
+[Remove a guild from the bot](#remove-a-guild-from-the-bot-through-discord-rest-guild_delete).) Missing `SEND_MESSAGES` (`2048`) returns HTTP `403`,
 code `50013` (`Missing Permissions`). A nonempty explicit `embeds` array also
 requires `EMBED_LINKS` (`16384`), including embed-only messages and messages
 with `SUPPRESS_EMBEDS`. Omitted, `null`, or empty embeds and plain URL content
@@ -2840,6 +3588,163 @@ message reads, edits, deletes, or other Discord endpoints, and does not yet
 enforce feature-specific send permissions such as TTS, attachments, replies,
 stickers or polls. It supplies Fauxcord prerequisites for bot integration tests;
 the bot harness and end-to-end handler coverage remain downstream work.
+
+## Server voice moderation through Modify Guild Member
+
+`PATCH /guilds/:guildId/members/:userId` (also `/api` and `/api/v10`) applies
+Discord's voice moderation fields, see
+[Modify Guild Member](https://docs.discord.com/developers/resources/guild#modify-guild-member):
+
+| Field        | Effect                                                                                     | Required permission                                                                                                             |
+| ------------ | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `mute`       | Server mute (`true`) or unmute (`false`).                                                  | `MUTE_MEMBERS` (`4194304`) in the target's current channel                                                                      |
+| `deaf`       | Server deafen (`true`) or undeafen (`false`).                                              | `DEAFEN_MEMBERS` (`8388608`) in the target's current channel                                                                    |
+| `channel_id` | Move to another voice (`2`) or stage (`13`) channel of the same guild; `null` disconnects. | `MOVE_MEMBERS` (`16777216`) in the current channel; a different destination also needs `CONNECT` (`1048576`) and `MOVE_MEMBERS` |
+
+Connect the member first with
+[`PATCH /_test/guilds/:guildId/voice-states/:userId`](#patch-_testguildsguildidvoice-statesuserid--prepare-a-voice-state).
+A successful request returns `200` with the updated member (or the existing
+empty `204` when `roles` and `mute` are combined without a timeout, the spec's
+documented alternative success response), persists
+`guild_members.mute`/`deaf` and the voice state together, and then publishes
+`GUILD_MEMBER_UPDATE` followed by one `VOICE_STATE_UPDATE` if the voice state
+changed. The voice event goes through the shared voice-state publisher, so
+`GuildVoiceStates` intent filtering, sequencing, the replay buffer and
+[capture/hold/release/replay](#scoped-gateway-capture-hold-release-and-replay)
+behave exactly like fixture-driven voice events. Combined fields (for example
+`{"mute":true,"nick":"Quiet"}`) produce a single voice event whose embedded
+member already contains every change. Re-sending an unchanged flag emits only
+`GUILD_MEMBER_UPDATE`.
+
+- **Move**: keeps the voice `session_id`, `self_mute`, `self_deaf` and
+  `self_video`; ends Go Live (`self_stream: false`); clears
+  `request_to_speak_timestamp`; and sets `suppress` to `true` for a stage
+  destination (audience) or `false` for a voice channel. Moving to the current
+  channel changes nothing.
+- **Disconnect** (`"channel_id": null`): same semantics as the fixture
+  disconnect. `channel_id` becomes `null` with the previous `session_id`;
+  streaming, video and request-to-speak are cleared; server mute/deaf remain on
+  the member and apply again on the next join.
+
+Errors (checked in this order; rejected requests write nothing and emit no
+event, even for other fields in the same payload):
+
+1. Unknown guild: `404`, code `10004`.
+2. Non-boolean `mute`/`deaf` or a non-snowflake-string `channel_id`: `400`,
+   code `50035` (`BASE_TYPE_BOOLEAN` / `NUMBER_TYPE_COERCE`).
+3. Unknown role or member: `404` (`10011`, `10007`).
+4. Target not connected to voice (no voice state, or a disconnected one) with
+   any non-null `mute`/`deaf` or any `channel_id`, including `null`: `400`, code
+   `40032` (`Target user is not connected to voice.`). `mute: null` and
+   `deaf: null` are no-ops and do not require a connection.
+5. Destination that does not exist or belongs to another guild: `404`, code
+   `10003`. A non-voice/stage destination: `400`, code `50024`.
+6. Missing permission: `403`, code `50013` (`Missing Permissions`). An OAuth2
+   Bearer token cannot moderate voice and always receives this error for
+   voice fields.
+
+Permissions are resolved like
+[message-send permissions](#exercise-actual-message-send-permissions): `@everyone`
+and assigned roles, then everyone, role and member overwrites of the relevant
+channel. Missing `VIEW_CHANNEL` or `CONNECT` in that channel implicitly denies
+every voice moderation permission there (Discord's
+[implicit permissions](https://docs.discord.com/developers/topics/permissions#implicit-permissions)).
+The guild owner and members with guild-level `ADMINISTRATOR` bypass all checks.
+**The default `POST /_test/setup` bot owns its guilds, so existing setups need no
+extra grants.** If `guilds[].owner_id` selects a human owner (or another setup
+takes over ownership), grant the bot a role with the bits above (or
+`ADMINISTRATOR`) through `POST /guilds/:guildId/roles` and
+`PUT /guilds/:guildId/members/:botId/roles/:roleId`; the default `@everyone`
+permissions (`1071698660929`) include `VIEW_CHANNEL` and `CONNECT` but none of
+the moderation bits. Only the voice fields are permission-checked; `nick`,
+`roles` and `communication_disabled_until` keep their unchecked behavior. With
+`DISABLE_AUTH=true` and an unregistered token, the dummy bot has no stored
+permissions and skips these checks.
+
+REST fault controls for `PATCH /guilds/:guildId/members/:userId` still run
+first: an injected failure writes nothing and emits no voice event, and a later
+retry applies normally. This endpoint records no audit-log entries and ignores
+`X-Audit-Log-Reason`, as before.
+
+`PATCH /guilds/:guildId/members/@me` (Modify Current Member) does not accept
+voice fields on Discord. Fauxcord ignores `mute`, `deaf` and `channel_id` there,
+like other unknown fields, and only applies `nick`. Target the bot's own user ID
+on the route above to moderate the bot itself.
+
+Discord does not document several details; Fauxcord's choices:
+
+- Error precedence (`40032` before channel and permission errors), the codes
+  for invalid destinations (`10003`/`50024`), and requiring `MOVE_MEMBERS` in
+  both source and destination.
+- Gateway order: `GUILD_MEMBER_UPDATE` is published before
+  `VOICE_STATE_UPDATE`.
+- Move side effects (Go Live ends, stage destinations start suppressed
+  regardless of the target's stage moderator status).
+- Role hierarchy, timeouts of the acting bot, channel user limits and
+  `PRIORITY_SPEAKER` are not modeled for voice moderation.
+
+---
+
+## Remove a guild from the bot through Discord REST (`GUILD_DELETE`)
+
+A bot loses a guild when it leaves, is kicked or banned, or the guild is
+deleted. Fauxcord models each of these as real Discord does and sends
+`GUILD_DELETE` to every live Gateway session of the guild's bot (same setup
+token) that has the `GUILDS` intent:
+
+```json
+{ "op": 0, "t": "GUILD_DELETE", "s": 42, "d": { "id": "222222222222222222" } }
+```
+
+`d` is an [unavailable guild object](https://discord.com/developers/docs/resources/guild#unavailable-guild-object)
+**without** `unavailable`, which is how Discord marks "the user left or was
+removed" (`unavailable: true` is reserved for outages; see
+[Simulated guild outage](#simulated-guild-outage-guild_delete-unavailable--guild_create)).
+If the guild is in a simulated outage, only the removal `GUILD_DELETE` is
+delivered; the bot's `GUILD_MEMBER_REMOVE` is an event of the unavailable guild
+and is suppressed.
+
+| Path                                                    | Dispatches, in order                                                |
+| ------------------------------------------------------- | ------------------------------------------------------------------- |
+| `DELETE /users/@me/guilds/:guildId` (leave)             | `GUILD_MEMBER_REMOVE` for the bot (`GUILD_MEMBERS`), `GUILD_DELETE` |
+| `DELETE /guilds/:guildId/members/:botId` (kick)         | `GUILD_MEMBER_REMOVE` for the bot (`GUILD_MEMBERS`), `GUILD_DELETE` |
+| `PUT /guilds/:guildId/bans/:botId` (ban)                | `GUILD_MEMBER_REMOVE` for the bot (`GUILD_MEMBERS`), `GUILD_DELETE` |
+| `POST /guilds/:guildId/bulk-ban` with the bot's user ID | `GUILD_MEMBER_REMOVE` for the bot (`GUILD_MEMBERS`), `GUILD_DELETE` |
+| `DELETE /guilds/:guildId`                               | `GUILD_DELETE`                                                      |
+
+Fauxcord's only REST actor is the bot itself, so a kick or ban whose target is
+the guild's own bot stands in for an administrator removing it. A bulk ban
+first bans the other listed users, lists the bot in `banned_users`, and then
+removes the guild. Kicking or banning anyone else is unchanged.
+
+Discord documents `GUILD_MEMBER_REMOVE` for "leave/kick/ban" and both events for
+Leave Guild, but not their relative order; Fauxcord sends `GUILD_MEMBER_REMOVE`
+first so that nothing for the guild follows `GUILD_DELETE`. Both are ordinary sequenced dispatches retained in the replay
+buffer, so a client that was disconnected receives them on `RESUME`.
+
+Each Fauxcord guild belongs to exactly one bot, so leaving it removes the guild
+and all of its cascaded data, like deleting it. Afterwards:
+
+- `GET /users/@me/guilds` no longer lists it and guild/channel REST calls return
+  `404` (`Unknown Guild`/`Unknown Channel`), as do test-control injections such
+  as `POST /_test/channels/:channelId/messages` and `POST /_test/interactions`,
+  so no further events for the guild can be produced.
+- A later IDENTIFY omits it from READY's `guilds` and sends no `GUILD_CREATE`.
+- Gateway event controls and session-invalidation observations scoped to the
+  guild are canceled **after** `GUILD_DELETE` is written; held events are
+  discarded, as with any other cancellation.
+- Other bots and other setups sharing the same bot user ID receive nothing.
+
+Leaving a guild that does not exist or belongs to another bot returns `404`
+with `{"message":"Unknown Guild","code":10004}` and dispatches nothing. Discord
+rejects a guild owner leaving its own guild; Fauxcord does not enforce
+ownership here (setups default the owner to the bot), so the bot can always
+leave.
+
+Test-control cleanup (`DELETE /_test/setup/:token`, `POST /_test/reset`) is
+always silent.
+
+---
 
 ## REST pagination page holds
 

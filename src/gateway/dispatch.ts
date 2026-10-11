@@ -33,6 +33,13 @@ export function writeDispatch(
     observe?.('buffered')
     return
   }
+  // A silenced (test zombie) connection stays open but receives nothing; the
+  // envelope is already in the replay buffer, exactly as for a closed socket.
+  if (manager.isSilenced(session.ws)) {
+    manager.observeSilencedDispatch?.(session, payload)
+    observe?.('buffered')
+    return
+  }
   observe?.('queued')
   try {
     if (observe) {
@@ -61,7 +68,8 @@ export function deliverDispatch(
 
 /**
  * Sends a Dispatch (op0) event to a single session, updating its seq and
- * replay buffer.
+ * replay buffer. A dispatch suppressed by a simulated guild outage is dropped
+ * before sequencing.
  * @param manager - Session manager
  * @param session - Destination session
  * @param eventName - Dispatch event name (e.g. "MESSAGE_CREATE")
@@ -77,6 +85,7 @@ export function sendDispatch(
     payload: GatewayPayload<unknown>
   ) => ((status: DispatchTransport) => void) | undefined
 ): void {
+  if (manager.suppressDispatch?.(session, eventName, data)) return
   const seq = manager.nextSeq(session)
   const payload = {
     op: GatewayOp.Dispatch as number,

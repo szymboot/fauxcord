@@ -140,7 +140,18 @@ describe('Test voice-state fixtures', () => {
     )
     const next = (await rejoined.json()) as GuildVoiceState
     expect(next.session_id).not.toBe(initial.session_id)
-    expect(snapshot().slice(1)).toEqual(identities)
+    // Server mute is owned by the member: the fixture mirrors it into
+    // guild_members, survives disconnect and is restored on rejoin.
+    expect(next.mute).toBe(true)
+    const [members, ...others] = identities
+    expect(snapshot().slice(1)).toEqual([
+      (members as Record<string, unknown>[]).map((row) =>
+        row.guild_id === guild && row.user_id === user
+          ? { ...row, mute: 1 }
+          : row
+      ),
+      ...others,
+    ])
     expect(emit).not.toHaveBeenCalled()
   })
 
@@ -241,16 +252,22 @@ describe('Test voice-state fixtures', () => {
   })
 
   it('isolates guilds and clears only the selected setup on reset/deletion', async () => {
+    // A distinct human per guild: one human cannot be connected in both.
+    const otherUser = seedMember(context.db, otherGuild)
     await patch(JSON.stringify({ channel_id: channel }))
-    await patch(JSON.stringify({ channel_id: foreignChannel }), otherGuild)
-    const other = getGuildVoiceState(context.db, otherGuild, user)
+    await patch(
+      JSON.stringify({ channel_id: foreignChannel }),
+      otherGuild,
+      otherUser
+    )
+    const other = getGuildVoiceState(context.db, otherGuild, otherUser)
     const reset = await context.app.request('/_test/reset', {
       method: 'POST',
       body: JSON.stringify({ token }),
     })
     expect(reset.status).toBe(204)
     expect(getGuildVoiceState(context.db, guild, user)).toBeNull()
-    expect(getGuildVoiceState(context.db, otherGuild, user)).toEqual(other)
+    expect(getGuildVoiceState(context.db, otherGuild, otherUser)).toEqual(other)
     await patch(JSON.stringify({ channel_id: channel }))
     const deleted = await context.app.request(
       `/_test/setup/${encodeURIComponent(token)}`,
@@ -258,9 +275,9 @@ describe('Test voice-state fixtures', () => {
     )
     expect(deleted.status).toBe(204)
     expect(getGuildVoiceState(context.db, guild, user)).toBeNull()
-    expect(getGuildVoiceState(context.db, otherGuild, user)).toEqual(other)
+    expect(getGuildVoiceState(context.db, otherGuild, otherUser)).toEqual(other)
     await context.app.request('/_test/reset', { method: 'POST', body: '{}' })
-    expect(getGuildVoiceState(context.db, otherGuild, user)).toBeNull()
+    expect(getGuildVoiceState(context.db, otherGuild, otherUser)).toBeNull()
   })
 
   it('cleans up removed members and channels and filters legacy invalid states', async () => {
@@ -291,5 +308,136 @@ describe('Test voice-state fixtures', () => {
       headers: { Authorization: otherToken },
     })
     expect(forbidden.status).toBe(403)
+  })
+
+  describe('single voice connection per human user', () => {
+    /** Returns the voice states published on the bus, in emission order. */
+    function published(spy: {
+      mock: { calls: unknown[][] }
+    }): GuildVoiceState[] {
+      return spy.mock.calls
+        .filter((call) => call[0] === 'voice.state.update')
+        .map((call) => (call[1] as { state: GuildVoiceState }).state)
+    }
+
+    it('disconnects the other guild before publishing the join', async () => {
+      await patch(
+        JSON.stringify({ channel_id: channel, self_stream: true, emit: false })
+      )
+      const before = getGuildVoiceState(context.db, guild, user)
+      const emit = vi.spyOn(gatewayBus, 'emit')
+      const response = await patch(
+        JSON.stringify({ channel_id: foreignChannel, self_video: true }),
+        otherGuild
+      )
+      expect(response.status).toBe(200)
+      const joined = (await response.json()) as GuildVoiceState
+      expect(published(emit)).toMatchObject([
+        {
+          guild_id: guild,
+          channel_id: null,
+          session_id: before?.session_id,
+          self_stream: false,
+          self_video: false,
+        },
+        {
+          guild_id: otherGuild,
+          channel_id: foreignChannel,
+          session_id: joined.session_id,
+          self_video: true,
+        },
+      ])
+      expect(getGuildVoiceStates(context.db, guild)).toEqual([])
+      expect(getGuildVoiceStates(context.db, otherGuild)).toEqual([joined])
+    })
+
+    it('rolls back the displacement and publishes nothing when the join fails', async () => {
+      await patch(
+        JSON.stringify({ channel_id: channel, self_stream: true, emit: false })
+      )
+      const before = snapshot()
+      context.db.exec(`CREATE TRIGGER reject_join
+        BEFORE INSERT ON guild_voice_states WHEN NEW.guild_id = '${otherGuild}'
+        BEGIN SELECT RAISE(ABORT, 'Join failed'); END`)
+      const emit = vi.spyOn(gatewayBus, 'emit')
+      const response = await patch(
+        JSON.stringify({ channel_id: foreignChannel }),
+        otherGuild
+      )
+      expect(response.status).toBe(500)
+      expect(context.db.inTransaction).toBe(false)
+      expect(snapshot()).toEqual(before)
+      expect(getGuildVoiceState(context.db, guild, user)).toMatchObject({
+        channel_id: channel,
+        self_stream: true,
+      })
+      expect(published(emit)).toEqual([])
+    })
+
+    it('applies the rule silently with emit: false', async () => {
+      await patch(JSON.stringify({ channel_id: channel, emit: false }))
+      const emit = vi.spyOn(gatewayBus, 'emit')
+      const response = await patch(
+        JSON.stringify({ channel_id: foreignChannel, emit: false }),
+        otherGuild
+      )
+      expect(response.status).toBe(200)
+      expect(published(emit)).toEqual([])
+      expect(getGuildVoiceState(context.db, guild, user)).toMatchObject({
+        channel_id: null,
+      })
+    })
+
+    it('applies the rule to REST voice-state writes for a human member', async () => {
+      await patch(JSON.stringify({ channel_id: channel, emit: false }))
+      const emit = vi.spyOn(gatewayBus, 'emit')
+      const response = await context.app.request(
+        `/api/v10/guilds/${otherGuild}/voice-states/${user}`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: otherToken,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ channel_id: foreignChannel }),
+        }
+      )
+      expect(response.status).toBe(204)
+      expect(
+        published(emit).map((state) => [state.guild_id, state.channel_id])
+      ).toEqual([
+        [guild, null],
+        [otherGuild, foreignChannel],
+      ])
+    })
+
+    it('exempts bot users, which may hold one connection per guild', async () => {
+      const botId = '111111111111111111'
+      seedMember(context.db, guild, botId)
+      seedMember(context.db, otherGuild, botId)
+      await patch(JSON.stringify({ channel_id: channel }), guild, botId)
+      const emit = vi.spyOn(gatewayBus, 'emit')
+      const response = await context.app.request(
+        `/api/v10/guilds/${otherGuild}/voice-states/@me`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: otherToken,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ channel_id: foreignChannel }),
+        }
+      )
+      expect(response.status).toBe(204)
+      expect(published(emit).map((state) => state.guild_id)).toEqual([
+        otherGuild,
+      ])
+      expect(getGuildVoiceState(context.db, guild, botId)?.channel_id).toBe(
+        channel
+      )
+      expect(
+        getGuildVoiceState(context.db, otherGuild, botId)?.channel_id
+      ).toBe(foreignChannel)
+    })
   })
 })

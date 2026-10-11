@@ -6,6 +6,8 @@ import {
   seedBot,
   seedGuild,
   seedMember,
+  seedVoiceChannel,
+  seedVoiceState,
 } from './test-helpers'
 
 describe('createFullTestApp', () => {
@@ -15,6 +17,7 @@ describe('createFullTestApp', () => {
       const token = seedBot(db, 'Bot helper-fault')
       const guild = seedGuild(db, token)
       const user = seedMember(db, guild)
+      seedVoiceState(db, guild, user, seedVoiceChannel(db, guild))
       const path = `/guilds/${guild}/members/${user}`
       const armed = await app.request('/_test/rest-faults', {
         method: 'POST',

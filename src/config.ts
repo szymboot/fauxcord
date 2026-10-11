@@ -4,6 +4,11 @@
  * Loads the settings required for server operation from environment variables.
  */
 
+import {
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  isValidHeartbeatInterval,
+} from './gateway/session'
+
 /** Server configuration interface */
 export interface Config {
   /** Listen port */
@@ -22,6 +27,8 @@ export interface Config {
   disableAuth: boolean
   /** Artificial latency added to all responses (ms) */
   latencyMs: number
+  /** Gateway heartbeat interval announced in HELLO (ms) */
+  gatewayHeartbeatIntervalMs: number
   /** Path to a JSON file loaded automatically at startup */
   seedFile: string | undefined
 }
@@ -33,6 +40,19 @@ export interface Config {
  */
 function isValidLogLevel(level: string): level is Config['logLevel'] {
   return ['debug', 'info', 'warn', 'error'].includes(level)
+}
+
+/**
+ * Parses GATEWAY_HEARTBEAT_INTERVAL_MS, falling back to Discord's default for
+ * a missing, non-integer or out-of-range value.
+ * @param raw - Raw environment variable value
+ * @returns Heartbeat interval in milliseconds
+ */
+function parseHeartbeatInterval(raw: string | undefined): number {
+  if (raw === undefined || !/^\d+$/.test(raw.trim()))
+    return DEFAULT_HEARTBEAT_INTERVAL_MS
+  const value = Number.parseInt(raw, 10)
+  return isValidHeartbeatInterval(value) ? value : DEFAULT_HEARTBEAT_INTERVAL_MS
 }
 
 /**
@@ -53,6 +73,9 @@ export function loadConfig(): Config {
     logLevel: isValidLogLevel(logLevel) ? logLevel : 'info',
     disableAuth: process.env.DISABLE_AUTH === 'true',
     latencyMs: Number.isNaN(latencyMs) ? 0 : latencyMs,
+    gatewayHeartbeatIntervalMs: parseHeartbeatInterval(
+      process.env.GATEWAY_HEARTBEAT_INTERVAL_MS
+    ),
     seedFile: process.env.SEED_FILE,
   }
 }

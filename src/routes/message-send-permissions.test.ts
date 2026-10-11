@@ -310,7 +310,11 @@ describe('guild message-send permissions', () => {
     await request(`/guilds/${GUILD}/roles/${assigned}`, undefined, 'DELETE')
     expect(await responseStatus(send())).toBe(403)
     await everyone(ALL)
-    await request(`/guilds/${GUILD}/members/${BOT}`, undefined, 'DELETE')
+    // Kicking the bot itself now removes the guild (GUILD_DELETE), so the
+    // membership-only revocation is a direct fixture change.
+    fixture.db
+      .prepare('DELETE FROM guild_members WHERE guild_id = ? AND user_id = ?')
+      .run(GUILD, BOT)
     expect(await responseStatus(send())).toBe(403)
     fixture.db
       .prepare('INSERT INTO guild_members (guild_id, user_id) VALUES (?, ?)')

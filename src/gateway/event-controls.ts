@@ -20,6 +20,29 @@ export const CONTROL_EVENTS = [
   'VOICE_STATE_UPDATE',
 ] as const
 
+/**
+ * Dispatches that describe one guild member and can be narrowed by
+ * `member_id`, mapped to the payload field carrying that member's user ID.
+ */
+export const MEMBER_SCOPED_EVENTS = [
+  'GUILD_MEMBER_UPDATE',
+  'VOICE_STATE_UPDATE',
+] as const
+
+/** Reads the subject user ID of a member-scoped dispatch, if it has one. */
+export function memberScopedUserId(
+  event: string | null | undefined,
+  data: unknown
+): unknown {
+  if (!data || typeof data !== 'object') return undefined
+  const payload = data as { user?: { id?: unknown }; user_id?: unknown }
+  return event === 'GUILD_MEMBER_UPDATE'
+    ? payload.user?.id
+    : event === 'VOICE_STATE_UPDATE'
+      ? payload.user_id
+      : undefined
+}
+
 /** Exact scope and bounded capture policy supplied by a test. */
 export interface EventControlRequest {
   ownership_key?: string
@@ -27,7 +50,10 @@ export interface EventControlRequest {
   bot_id: string
   /** Optional exact session; omission requires one unambiguous live owner. */
   session_id?: string
-  /** Optional exact member selector, only for member update captures. */
+  /**
+   * Optional exact member selector; every listed event must be one of
+   * {@link MEMBER_SCOPED_EVENTS}. Other members' dispatches pass through.
+   */
   member_id?: string
   /** Requires explicit consuming-client acknowledgements for delivery barriers. */
   application_ack?: boolean
@@ -405,19 +431,17 @@ export class GatewayEventControls {
     envelope: GatewayPayload<unknown>
   ): boolean {
     this.prune()
-    const data = envelope.d as {
-      guild_id?: unknown
-      user?: { id?: unknown }
-    } | null
+    const data = envelope.d as { guild_id?: unknown } | null
+    // Creation rejects overlapping selectors, so at most one control matches.
     const control = this.controls
       .values()
       .find(
         (candidate) =>
           candidate.session === session &&
           candidate.guild_id === data?.guild_id &&
+          candidate.events.includes(envelope.t ?? '') &&
           (candidate.member_id === undefined ||
-            candidate.member_id === data.user?.id) &&
-          candidate.events.includes(envelope.t ?? '')
+            candidate.member_id === memberScopedUserId(envelope.t, data))
       )
     if (!control) return false
     const serialized = encodePayload(envelope)
@@ -570,7 +594,12 @@ export class GatewayEventControls {
     this.prune()
     const control = this.controls.get(id)
     if (!control) return 'UNKNOWN_SCOPE'
-    if (control.awaiting_resume || control.socket.readyState !== WebSocket.OPEN)
+    // A silenced (zombie) connection cannot receive RECONNECT either.
+    if (
+      control.awaiting_resume ||
+      control.socket.readyState !== WebSocket.OPEN ||
+      this.manager.isSilenced(control.socket)
+    )
       return 'INVALID_STATE'
     if (control.operations >= 100) return 'LIMIT'
     control.operations += 1
@@ -596,6 +625,9 @@ export class GatewayEventControls {
     control.pause_resume = false
     const pending = control.pending_resume
     control.pending_resume = undefined
+    // A retried RESUME rejected by an armed session invalidation removes the
+    // session and this control with it; report the opened gate regardless.
+    const opened = this.inspect(id)
     if (pending) {
       pending.socket.off('close', pending.onClose)
       if (
@@ -604,7 +636,7 @@ export class GatewayEventControls {
       )
         pending.retry()
     }
-    return this.inspect(id) ?? 'UNKNOWN_SCOPE'
+    return this.inspect(id) ?? opened ?? 'UNKNOWN_SCOPE'
   }
 
   /** Installs one bounded listener per controlled socket. */

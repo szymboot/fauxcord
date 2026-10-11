@@ -1,6 +1,7 @@
 import type { Database } from '../db'
 import { GatewayIntentBits } from 'discord-api-types/v10'
 import type {
+  GatewayGuildDeleteDispatchData,
   GatewayMessageReactionRemoveAllDispatchData,
   GatewayMessageReactionRemoveEmojiDispatchData,
 } from 'discord-api-types/v10'
@@ -289,11 +290,40 @@ export function registerGatewaySubscriptions(
   const onGuildMemberRemove: Parameters<
     typeof gatewayBus.on<'guild.member.remove'>
   >[1] = (payload) => {
+    const data = { guild_id: payload.guildId, user: payload.user }
+    if (payload.scope) {
+      if (payload.scope.db !== db) return
+      broadcastToBot(
+        manager,
+        payload.scope.botId,
+        'GUILD_MEMBER_REMOVE',
+        data,
+        GatewayIntentBits.GuildMembers,
+        payload.scope.token
+      )
+      return
+    }
     broadcastToAll(
       manager,
       'GUILD_MEMBER_REMOVE',
-      { guild_id: payload.guildId, user: payload.user },
+      data,
       GatewayIntentBits.GuildMembers
+    )
+  }
+  const onGuildDelete: Parameters<typeof gatewayBus.on<'guild.delete'>>[1] = (
+    payload
+  ) => {
+    if (payload.scope.db !== db) return
+    // Discord sends an unavailable guild object without `unavailable` when
+    // the user left or was removed (only outages set `unavailable: true`).
+    const data: GatewayGuildDeleteDispatchData = { id: payload.guildId }
+    broadcastToBot(
+      manager,
+      payload.scope.botId,
+      'GUILD_DELETE',
+      data,
+      GatewayIntentBits.Guilds,
+      payload.scope.token
     )
   }
   const onGuildRoleCreate: Parameters<
@@ -356,6 +386,7 @@ export function registerGatewaySubscriptions(
   gatewayBus.on('guild.member.add', onGuildMemberAdd)
   gatewayBus.on('guild.member.update', onGuildMemberUpdate)
   gatewayBus.on('guild.member.remove', onGuildMemberRemove)
+  gatewayBus.on('guild.delete', onGuildDelete)
   gatewayBus.on('guild.role.create', onGuildRoleCreate)
   gatewayBus.on('guild.role.update', onGuildRoleUpdate)
   gatewayBus.on('guild.role.delete', onGuildRoleDelete)
@@ -379,6 +410,7 @@ export function registerGatewaySubscriptions(
     gatewayBus.off('guild.member.add', onGuildMemberAdd)
     gatewayBus.off('guild.member.update', onGuildMemberUpdate)
     gatewayBus.off('guild.member.remove', onGuildMemberRemove)
+    gatewayBus.off('guild.delete', onGuildDelete)
     gatewayBus.off('guild.role.create', onGuildRoleCreate)
     gatewayBus.off('guild.role.update', onGuildRoleUpdate)
     gatewayBus.off('guild.role.delete', onGuildRoleDelete)

@@ -12,17 +12,19 @@ import type { WSContext, WSEvents } from 'hono/ws'
 import type { Database } from '../db'
 import { getUser } from '../services/users'
 import { buildGuildCreatePayload } from '../services/guilds'
-import { SessionManager, type Session } from './session'
+import {
+  SessionManager,
+  type IdentifyGuildOutage,
+  type Session,
+} from './session'
 import { GatewayOp, GatewayCloseCode } from './opcodes'
 import { encodePayload, decodePayload } from './protocol'
 import type { IdentifyData, ResumeData } from './protocol'
 import { sendDispatch, writeDispatch } from './dispatch'
 import { hasIntent } from './intents'
 
-/** Heartbeat interval (ms) announced in HELLO; matches real Discord's default. */
-const HEARTBEAT_INTERVAL_MS = 41_250
-/** Time (ms) to wait for a Heartbeat before closing the session */
-const HEARTBEAT_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 2
+/** Heartbeat timeout as a multiple of the announced heartbeat interval. */
+const HEARTBEAT_TIMEOUT_INTERVALS = 2
 
 /** Bot info resolved from an IDENTIFY token, used to build the READY user object */
 interface IdentifiedBot {
@@ -170,7 +172,7 @@ function armHeartbeatTimeout(
       // session is still reaped below.
     }
     sessionManager.remove(sessionId)
-  }, HEARTBEAT_TIMEOUT_MS)
+  }, sessionManager.heartbeatIntervalMs * HEARTBEAT_TIMEOUT_INTERVALS)
 }
 
 /**
@@ -333,10 +335,19 @@ function handleIdentify(
 
   const readySequence = sessionManager.nextSeq(session)
   const guildsIntent = hasIntent(data.intents, GatewayIntentBits.Guilds)
+  const guildIds = existingGuildIds.map(({ id }) => id)
+  // Guilds in a simulated outage stay unavailable: instead of the lazy-load
+  // GUILD_CREATE, Discord sends an unavailable stub `{ id, unavailable: true }`
+  // as GUILD_DELETE (documented) or GUILD_CREATE (also documented as possible
+  // during outages); the outage control chooses which.
+  const outages =
+    sessionManager.identifyGuildOutages?.(session, guildIds, readySequence) ??
+    new Map<string, IdentifyGuildOutage>()
   // Test controls may watch this IDENTIFY to prove READY/GUILD_CREATE writes.
   const observer = sessionManager.observeIdentify?.(session, {
     readySequence,
-    guildIds: existingGuildIds.map(({ id }) => id),
+    guildIds,
+    unavailableGuildIds: guildIds.filter((id) => outages.has(id)),
     guildsIntent,
   })
   const ready = encodePayload({
@@ -377,19 +388,70 @@ function handleIdentify(
   // transaction overhead, then perform the WebSocket sends outside it so no
   // I/O happens while the transaction is open.
   const payloads = db.transaction(() =>
-    existingGuildIds
-      .map(({ id: guildId }) => buildGuildCreatePayload(db, guildId))
-      .filter((guild) => guild !== null)
-  )()
-  for (const guild of payloads) {
-    sendDispatch(
-      sessionManager,
-      session,
-      'GUILD_CREATE',
-      guild,
-      observer?.guildCreate
+    guildIds.map((guildId) =>
+      outages.has(guildId)
+        ? { guildId }
+        : { guildId, guild: buildGuildCreatePayload(db, guildId) }
     )
+  )()
+  // READY order is kept; outage guilds get their unavailable stub in place.
+  for (const { guildId, guild } of payloads) {
+    const outage = outages.get(guildId)
+    if (outage) {
+      sendDispatch(
+        sessionManager,
+        session,
+        outage.event,
+        { id: guildId, unavailable: true },
+        outage.observe
+      )
+    } else if (guild) {
+      sendDispatch(
+        sessionManager,
+        session,
+        'GUILD_CREATE',
+        guild,
+        observer?.guildCreate
+      )
+    }
   }
+}
+
+/**
+ * Lets an armed test control reject an authenticated RESUME with
+ * INVALID_SESSION (`d: false`); the control discards the session itself.
+ * @param sessionManager - Session manager
+ * @param session - Session named by the RESUME
+ * @param ws - Connection the RESUME arrived on
+ * @param data - The RESUME payload
+ * @param replay - Events the RESUME would replay, or undefined when unavailable
+ * @returns true when the RESUME was rejected and op 9 was written
+ */
+function forceResumeRejection(
+  sessionManager: SessionManager,
+  session: Session,
+  ws: WSContext,
+  data: ResumeData,
+  replay: ReturnType<SessionManager['replayFrom']>
+): boolean {
+  const observe = sessionManager.rejectResume?.(session, {
+    socket: ws.raw as never,
+    clientSequence: data.seq,
+    replay,
+  })
+  if (!observe) return false
+  observe('queued')
+  try {
+    ;(ws.raw as Session['ws']).send(
+      encodePayload({ op: GatewayOp.InvalidSession, d: false }),
+      (error) => {
+        observe(error ? 'failed' : 'sent')
+      }
+    )
+  } catch {
+    observe('failed')
+  }
+  return true
 }
 
 /**
@@ -413,7 +475,8 @@ function handleResume(
   }
   const replay = sessionManager.replayFrom(session, data.seq)
   if (!replay) {
-    ws.send(encodePayload({ op: GatewayOp.InvalidSession, d: false }))
+    if (!forceResumeRejection(sessionManager, session, ws, data, replay))
+      ws.send(encodePayload({ op: GatewayOp.InvalidSession, d: false }))
     return
   }
   if (
@@ -422,6 +485,8 @@ function handleResume(
     })
   )
     return
+  if (forceResumeRejection(sessionManager, session, ws, data, replay)) return
+  const previousSocket = session.ws
   sessionManager.establishConnection(ws.raw as never)
   const previousSessionId = sessionIdByWs.get(ws)
   if (
@@ -445,6 +510,12 @@ function handleResume(
   // RESUMED is itself a Dispatch, so it consumes a distinct sequence number
   // after every replayed dispatch and is retained for any subsequent resume.
   sendDispatch(sessionManager, session, 'RESUMED', {})
+  sessionManager.observeResume?.(session, {
+    previousSocket,
+    clientSequence: data.seq,
+    replayedSequences: replay.map((entry) => entry.seq),
+    resumedSequence: session.seq,
+  })
 }
 
 /**
@@ -453,20 +524,32 @@ function handleResume(
  * @param sessionManager - Session manager
  * @param sessionIdByWs - Map of WSContext to sessionId
  * @param ws - The connected WebSocket context
+ * @param sequence - The heartbeat's `d` (client's last received sequence)
  */
 function handleHeartbeat(
   sessionManager: SessionManager,
   sessionIdByWs: WeakMap<WSContext, string>,
-  ws: WSContext
+  ws: WSContext,
+  sequence: unknown
 ): void {
   const sessionId = sessionIdByWs.get(ws)
   const session = sessionId ? sessionManager.get(sessionId) : undefined
-  ws.send(encodePayload({ op: GatewayOp.HeartbeatAck, d: null }))
+  // A silenced (test zombie) connection never gets HEARTBEAT_ACK, but its
+  // heartbeats still arrive and keep the session alive below, so the server's
+  // own timeout cannot reap the session before the client detects the zombie.
+  if (session && sessionManager.isSilenced(ws.raw as never)) {
+    sessionManager.observeSilencedHeartbeat?.(session, sequence)
+  } else {
+    ws.send(encodePayload({ op: GatewayOp.HeartbeatAck, d: null }))
+  }
   if (!session) {
     return
   }
 
-  session.lastHeartbeatAt = Date.now()
+  const now = Date.now()
+  session.lastHeartbeatAt = now
+  if (!sessionManager.isSilenced(ws.raw as never))
+    session.lastHeartbeatAckAt = now
   armHeartbeatTimeout(sessionManager, ws, session.sessionId)
 }
 
@@ -474,15 +557,20 @@ function handleHeartbeat(
  * Builds the Gateway WebSocket handler.
  * @param db - Database (used for IDENTIFY token validation and MockBot
  * creation)
- * @param options - baseUrl and disableAuth
+ * @param options - baseUrl, disableAuth and the optional heartbeat interval
+ * (ms) announced in HELLO (defaults to Discord's 41250)
  * @returns The WSEvents to pass to Hono's upgradeWebSocket, plus the
  * SessionManager used for Dispatch delivery
  */
 export function createGatewayWebSocketHandler(
   db: Database,
-  options: { baseUrl: string; disableAuth: boolean }
+  options: {
+    baseUrl: string
+    disableAuth: boolean
+    heartbeatIntervalMs?: number
+  }
 ): { upgrade: WSEvents; sessionManager: SessionManager } {
-  const sessionManager = new SessionManager()
+  const sessionManager = new SessionManager(options.heartbeatIntervalMs)
   // Maps ws (WSContext) to sessionId; referenced from onClose/onMessage.
   const sessionIdByWs = new WeakMap<WSContext, string>()
 
@@ -491,7 +579,7 @@ export function createGatewayWebSocketHandler(
       ws.send(
         encodePayload({
           op: GatewayOp.Hello,
-          d: { heartbeat_interval: HEARTBEAT_INTERVAL_MS },
+          d: { heartbeat_interval: sessionManager.heartbeatIntervalMs },
         })
       )
     },
@@ -531,7 +619,7 @@ export function createGatewayWebSocketHandler(
           break
         }
         case GatewayOp.Heartbeat: {
-          handleHeartbeat(sessionManager, sessionIdByWs, ws)
+          handleHeartbeat(sessionManager, sessionIdByWs, ws, payload.d)
           break
         }
         default: {

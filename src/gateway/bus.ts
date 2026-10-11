@@ -92,6 +92,13 @@ export interface GatewayBusEvents {
     guildId: string
     userId: string
     user: Record<string, unknown>
+    /** Exact delivery scope; omitted by legacy unscoped removals. */
+    scope?: { db: Database; botId: string; token: string }
+  }
+  'guild.delete': {
+    guildId: string
+    /** The bot (and exact setup token) that lost access to the guild. */
+    scope: { db: Database; botId: string; token: string }
   }
   'guild.role.create': { guildId: string; role: Record<string, unknown> }
   'guild.role.update': { guildId: string; role: Record<string, unknown> }

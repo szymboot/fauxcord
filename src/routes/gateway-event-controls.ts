@@ -3,11 +3,28 @@ import { bodyLimit } from 'hono/body-limit'
 import { isAuditOwnershipKey } from '../validators/audit-log-response'
 import {
   CONTROL_EVENTS,
+  MEMBER_SCOPED_EVENTS,
   type EventControlRequest,
   type EventControlOwnership,
   type EventControlSessionScope,
   type GatewayEventControls,
 } from '../gateway/event-controls'
+
+/** Message returned when `member_id` is combined with an unscoped event. */
+const MEMBER_SELECTOR_MESSAGE = `member_id requires every event to be one of ${MEMBER_SCOPED_EVENTS.join(', ')}`
+
+/** Explains why a member selector cannot narrow the requested event list. */
+function memberSelectorError(events: unknown): string | undefined {
+  return Array.isArray(events) &&
+    events.some(
+      (event: unknown) =>
+        !MEMBER_SCOPED_EVENTS.includes(
+          event as (typeof MEMBER_SCOPED_EVENTS)[number]
+        )
+    )
+    ? MEMBER_SELECTOR_MESSAGE
+    : undefined
+}
 
 /** Validates exact numeric scope IDs and the bounded capture policy. */
 function validateControl(value: unknown): EventControlRequest | undefined {
@@ -43,8 +60,7 @@ function validateControl(value: unknown): EventControlRequest | undefined {
         )
     ) ||
     new Set(events).size !== events.length ||
-    (memberId !== undefined &&
-      (events.length !== 1 || events[0] !== 'GUILD_MEMBER_UPDATE'))
+    (memberId !== undefined && memberSelectorError(events) !== undefined)
   )
     return undefined
   const applicationAck =
@@ -83,6 +99,24 @@ function validateControl(value: unknown): EventControlRequest | undefined {
         limit,
         ttl_ms: ttlMs,
       }
+}
+
+/** Names a member selector mismatch; any other invalid policy stays generic. */
+function invalidControlMessage(body: unknown): string {
+  if (!body || typeof body !== 'object' || Array.isArray(body))
+    return '400: Bad Request'
+  const { member_id: memberId, events } = body as Record<string, unknown>
+  const selectorError =
+    typeof memberId === 'string' &&
+    /^[1-9]\d{0,19}$/.test(memberId) &&
+    Array.isArray(events) &&
+    events.length > 0 &&
+    events.every((event: unknown) =>
+      CONTROL_EVENTS.includes(event as (typeof CONTROL_EVENTS)[number])
+    )
+      ? memberSelectorError(events)
+      : undefined
+  return selectorError ?? '400: Bad Request'
 }
 
 /** Validates discovery scope without collapsing duplicate query values. */
@@ -139,8 +173,10 @@ export function createGatewayEventControlRoutes(
     })
   )
   app.post('/_test/gateway-event-controls', async (c) => {
-    const request = validateControl(await c.req.json().catch(() => undefined))
-    if (!request) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    const body: unknown = await c.req.json().catch(() => undefined)
+    const request = validateControl(body)
+    if (!request)
+      return c.json({ message: invalidControlMessage(body), code: 0 }, 400)
     const result = controls.create(request)
     return typeof result === 'string'
       ? c.json(

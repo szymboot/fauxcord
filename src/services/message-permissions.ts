@@ -6,11 +6,9 @@ import {
   type DiscordErrorResponse,
 } from '../errors'
 import { getChannel } from './channels'
-import { computeChannelPermissions } from './channel-permissions'
+import { PermissionBit, resolveChannelPermissions } from './guild-permissions'
 
-const VIEW_CHANNEL = 1n << 10n
-const SEND_MESSAGES = 1n << 11n
-const EMBED_LINKS = 1n << 14n
+const { VIEW_CHANNEL, SEND_MESSAGES, EMBED_LINKS } = PermissionBit
 
 /** A send denial with the HTTP statuses produced by this permission check. */
 export interface MessageSendError extends DiscordErrorResponse {
@@ -27,9 +25,9 @@ function sendError(
 }
 
 /**
- * Resolves current persisted guild permissions (see
- * `computeChannelPermissions`). Owner/admin bypass is based on guild
- * permissions, never channel overwrites.
+ * Resolves current persisted guild permissions with BigInt. Role allows are
+ * combined before applying overwrites; member overwrites take precedence.
+ * Owner/admin bypass is based on guild permissions, never channel overwrites.
  * DM and webhook sends deliberately have separate behavior. Threads are
  * explicitly unsupported here until their membership/archive lifecycle is
  * modeled; they must not accidentally inherit ordinary SEND_MESSAGES behavior.
@@ -55,15 +53,15 @@ export function getMessageSendError(
       400
     )
 
-  const resolved = computeChannelPermissions(
+  const resolved = resolveChannelPermissions(
     db,
-    { ...channel, guild_id: channel.guild_id },
+    channel.guild_id,
+    channel.permission_overwrites,
     userId
   )
-  if (resolved === null)
+  if (!resolved)
     return sendError(DiscordErrorCode.MISSING_ACCESS, 'Missing Access', 403)
-  // Owners and administrators bypass channel overwrites and timeouts.
-  if (resolved.administrator) return null
+  if (resolved.privileged) return null
   const { permissions } = resolved
 
   if (!(permissions & VIEW_CHANNEL))
@@ -73,12 +71,10 @@ export function getMessageSendError(
     .prepare(
       'SELECT communication_disabled_until FROM guild_members WHERE guild_id = ? AND user_id = ?'
     )
-    .get(channel.guild_id, userId) as {
-    communication_disabled_until: string | null
-  }
-
+    .get(channel.guild_id, userId) as
+    { communication_disabled_until: string | null } | undefined
   const timedOut =
-    member.communication_disabled_until !== null &&
+    member?.communication_disabled_until != null &&
     Date.parse(member.communication_disabled_until) > Date.now()
   return timedOut ||
     !(permissions & SEND_MESSAGES) ||

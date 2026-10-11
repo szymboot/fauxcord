@@ -5,6 +5,27 @@ import type { GatewayPayload } from './protocol'
 /** Maximum number of events retained in the replay buffer */
 const REPLAY_BUFFER_SIZE = 100
 
+/** Default heartbeat interval (ms) announced in HELLO; matches real Discord. */
+export const DEFAULT_HEARTBEAT_INTERVAL_MS = 41_250
+/** Smallest accepted heartbeat interval (ms). */
+export const MIN_HEARTBEAT_INTERVAL_MS = 100
+/** Largest accepted heartbeat interval (ms). */
+export const MAX_HEARTBEAT_INTERVAL_MS = 600_000
+
+/**
+ * Whether a value is an accepted heartbeat interval: an integer number of
+ * milliseconds between MIN_HEARTBEAT_INTERVAL_MS and MAX_HEARTBEAT_INTERVAL_MS.
+ * @param value - Candidate interval
+ * @returns true when the value can be announced in HELLO
+ */
+export function isValidHeartbeatInterval(value: number): boolean {
+  return (
+    Number.isSafeInteger(value) &&
+    value >= MIN_HEARTBEAT_INTERVAL_MS &&
+    value <= MAX_HEARTBEAT_INTERVAL_MS
+  )
+}
+
 /** Socket write progress of one Gateway frame, never application completion. */
 export type DispatchTransport = 'buffered' | 'queued' | 'sent' | 'failed'
 
@@ -14,8 +35,32 @@ export interface IdentifyFacts {
   readySequence: number
   /** Guild IDs listed in READY as unavailable stubs */
   guildIds: string[]
+  /** READY guilds in a simulated outage; they get GUILD_DELETE, not GUILD_CREATE */
+  unavailableGuildIds: string[]
   /** Whether GUILD_CREATE dispatches follow (Guilds intent) */
   guildsIntent: boolean
+}
+
+/** Facts about a successful RESUME, captured after RESUMED was queued. */
+export interface ResumeFacts {
+  /** Socket the session was bound to before this RESUME */
+  previousSocket: WebSocket
+  /** Last sequence the client reported in RESUME */
+  clientSequence: number
+  /** Sequences replayed to the client, in order */
+  replayedSequences: number[]
+  /** Sequence assigned to the RESUMED dispatch */
+  resumedSequence: number
+}
+
+/** Facts about an authenticated RESUME a test control may reject. */
+export interface ResumeAttempt {
+  /** Socket the RESUME arrived on */
+  socket: WebSocket
+  /** Last sequence the client reported in RESUME */
+  clientSequence: number
+  /** Buffered events the RESUME would replay, or undefined when unavailable */
+  replay: { seq: number; event: GatewayPayload<unknown> }[] | undefined
 }
 
 /** Per-IDENTIFY transport observer installed by a test control. */
@@ -24,6 +69,16 @@ export interface IdentifyObserver {
   ready: (status: DispatchTransport) => void
   /** Observes one GUILD_CREATE envelope, returning its write observer */
   guildCreate: (
+    payload: GatewayPayload<unknown>
+  ) => ((status: DispatchTransport) => void) | undefined
+}
+
+/** How an identifying session learns that a READY guild is in an outage. */
+export interface IdentifyGuildOutage {
+  /** Stub event sent instead of the full GUILD_CREATE (`{ id, unavailable: true }`) */
+  event: 'GUILD_DELETE' | 'GUILD_CREATE'
+  /** Observes the stub envelope, returning its write observer */
+  observe: (
     payload: GatewayPayload<unknown>
   ) => ((status: DispatchTransport) => void) | undefined
 }
@@ -48,6 +103,8 @@ export interface Session {
   heartbeatTimer: NodeJS.Timeout | undefined
   /** Timestamp of the last received Heartbeat (ms epoch) */
   lastHeartbeatAt: number
+  /** Timestamp of the last HEARTBEAT_ACK written for this session (ms epoch) */
+  lastHeartbeatAckAt: number | undefined
 }
 
 /**
@@ -55,6 +112,20 @@ export interface Session {
  * sessions.
  */
 export class SessionManager {
+  /**
+   * @param heartbeatIntervalMs - Heartbeat interval (ms) announced in HELLO;
+   * sessions without a heartbeat for twice this long are closed and removed
+   * @throws RangeError when the interval is not an integer in the accepted range
+   */
+  constructor(
+    readonly heartbeatIntervalMs: number = DEFAULT_HEARTBEAT_INTERVAL_MS
+  ) {
+    if (!isValidHeartbeatInterval(heartbeatIntervalMs))
+      throw new RangeError(
+        `Gateway heartbeat interval must be an integer from ${String(MIN_HEARTBEAT_INTERVAL_MS)} to ${String(MAX_HEARTBEAT_INTERVAL_MS)} ms, got ${String(heartbeatIntervalMs)}`
+      )
+  }
+
   /** Test-only interception after native sequencing; true holds the envelope. */
   captureDispatch?: (
     session: Session,
@@ -87,6 +158,84 @@ export class SessionManager {
   ) => IdentifyObserver | undefined
   /** Observes a RESUME rejected because its session no longer exists. */
   observeRejectedResume?: (sessionId: string) => void
+  /**
+   * Lets a test control answer an authenticated RESUME with INVALID_SESSION
+   * (`d: false`) instead of replaying; returns the op 9 write observer when
+   * the RESUME is rejected, or undefined to continue normally.
+   */
+  rejectResume?: (
+    session: Session,
+    attempt: ResumeAttempt
+  ) => ((status: DispatchTransport) => void) | undefined
+  /** Observes a successful RESUME after its replay and RESUMED were queued. */
+  observeResume?: (session: Session, facts: ResumeFacts) => void
+  /** Observes a HEARTBEAT that a silenced connection left unacknowledged. */
+  observeSilencedHeartbeat?: (session: Session, sequence: unknown) => void
+  /** Observes a dispatch withheld from a silenced connection. */
+  observeSilencedDispatch?: (
+    session: Session,
+    payload: GatewayPayload<unknown>
+  ) => void
+  /**
+   * Drops a native dispatch before sequencing (simulated guild outage), so it
+   * consumes no sequence number and never enters the replay buffer.
+   */
+  suppressDispatch?: (
+    session: Session,
+    eventName: string,
+    data: unknown
+  ) => boolean
+  /**
+   * Returns the READY guilds currently in a simulated outage for an
+   * identifying session, each mapped to the unavailable stub to send.
+   */
+  identifyGuildOutages?: (
+    session: Session,
+    guildIds: string[],
+    readySequence: number
+  ) => Map<string, IdentifyGuildOutage>
+
+  private readonly silencedSockets = new WeakSet<WebSocket>()
+  private readonly removalListeners = new Set<(session: Session) => void>()
+
+  /**
+   * Silences an open connection (test-only zombie): the server keeps it open
+   * but writes neither HEARTBEAT_ACK nor dispatches to it; dispatches are
+   * buffered for RESUME as for a closed socket.
+   * @param socket - Connection to silence
+   */
+  silence(socket: WebSocket): void {
+    this.silencedSockets.add(socket)
+  }
+
+  /**
+   * Lets a silenced connection receive writes again.
+   * @param socket - Connection to restore
+   */
+  unsilence(socket: WebSocket): void {
+    this.silencedSockets.delete(socket)
+  }
+
+  /**
+   * Whether writes to the connection are currently withheld.
+   * @param socket - Connection to check
+   * @returns true while the connection is silenced
+   */
+  isSilenced(socket: WebSocket): boolean {
+    return this.silencedSockets.has(socket)
+  }
+
+  /**
+   * Registers a listener called synchronously whenever a session is removed.
+   * @param listener - Callback receiving the removed session
+   * @returns Function that unregisters the listener
+   */
+  onRemove(listener: (session: Session) => void): () => void {
+    this.removalListeners.add(listener)
+    return () => {
+      this.removalListeners.delete(listener)
+    }
+  }
 
   private readonly connectionGenerations = new WeakMap<WebSocket, number>()
 
@@ -128,6 +277,7 @@ export class SessionManager {
       replayBuffer: [],
       heartbeatTimer: undefined,
       lastHeartbeatAt: Date.now(),
+      lastHeartbeatAckAt: undefined,
     }
     this.sessionsById.set(session.sessionId, session)
     const set = this.sessionIdsByBotId.get(session.botId) ?? new Set<string>()
@@ -178,6 +328,7 @@ export class SessionManager {
     if (session.heartbeatTimer) clearTimeout(session.heartbeatTimer)
     this.sessionsById.delete(sessionId)
     this.sessionIdsByBotId.get(session.botId)?.delete(sessionId)
+    for (const listener of this.removalListeners) listener(session)
   }
 
   /**

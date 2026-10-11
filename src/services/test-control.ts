@@ -1103,7 +1103,10 @@ export interface TestInteractionRequest {
 /** Result of a test-interaction creation attempt */
 export type CreateTestInteractionResult =
   | { ok: true; interaction: InteractionObject }
-  | { ok: false; reason: 'unknown_command' }
+  | {
+      ok: false
+      reason: 'unknown_command' | 'unknown_guild' | 'unknown_channel'
+    }
 
 /** Minimal row shape needed to resolve a command by name */
 interface CommandIdRow {
@@ -1115,14 +1118,37 @@ interface CommandIdRow {
  * Discord client. Prefers a guild-scoped command match (when `guild_id` is
  * given) and falls back to a global command of the same name; a request
  * with no `guild_id` only ever matches a global command.
+ *
+ * A `guild_id` must name an existing guild of the application's bot and a
+ * `channel_id` an existing channel (of that guild, when given), so that no
+ * interaction can be dispatched for a guild the bot has left or lost.
  * @param db - Database
  * @param request - Test interaction request body
- * @returns The created interaction, or unknown_command if no match exists
+ * @returns The created interaction, or why no interaction was created
  */
 export function createTestInteraction(
   db: Database,
   request: TestInteractionRequest
 ): CreateTestInteractionResult {
+  if (
+    request.guild_id !== undefined &&
+    !db
+      .prepare(
+        'SELECT 1 FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ? AND b.user_id = ?'
+      )
+      .get(request.guild_id, request.application_id)
+  )
+    return { ok: false, reason: 'unknown_guild' }
+  if (request.channel_id !== undefined) {
+    const channel = db
+      .prepare('SELECT guild_id FROM channels WHERE id = ?')
+      .get(request.channel_id) as { guild_id: string | null } | undefined
+    if (
+      !channel ||
+      (request.guild_id !== undefined && channel.guild_id !== request.guild_id)
+    )
+      return { ok: false, reason: 'unknown_channel' }
+  }
   const guildCommand = request.guild_id
     ? (db
         .prepare(

@@ -114,3 +114,17 @@ describe('SessionManager', () => {
     expect(manager.replayFrom(session, -1)).toBeUndefined() // seq older than what's in the buffer
   })
 })
+
+describe('SessionManager heartbeat interval', () => {
+  it("defaults to Discord's 41250 ms and accepts the 100–600000 ms range", () => {
+    expect(new SessionManager().heartbeatIntervalMs).toBe(41_250)
+    expect(new SessionManager(100).heartbeatIntervalMs).toBe(100)
+    expect(new SessionManager(600_000).heartbeatIntervalMs).toBe(600_000)
+  })
+
+  it('rejects intervals that would produce a broken HELLO or timeout', () => {
+    for (const value of [NaN, Infinity, 0, -1, 99, 1.5, 600_001]) {
+      expect(() => new SessionManager(value)).toThrow(RangeError)
+    }
+  })
+})

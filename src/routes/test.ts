@@ -463,8 +463,9 @@ export function createTestRoutes(
     }
 
     cleanupAttachmentFiles(db, uploadPath, { token })
-    eventControls?.reset(token)
     resetTestData(db, token)
+    // After the data reset, so recovered guild outages snapshot reset state.
+    eventControls?.reset(token)
     return c.body(null, 204)
   })
 
@@ -724,9 +725,26 @@ export function createTestRoutes(
       return c.json(validationError(errors).body, 400)
     }
     const result = createTestInteraction(db, body)
-    return result.ok
-      ? c.json(result.interaction, 201)
-      : c.json({ message: '404: Not Found', code: 0 }, 404)
+    if (result.ok) return c.json(result.interaction, 201)
+    switch (result.reason) {
+      case 'unknown_guild': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild', 404)
+            .body,
+          404
+        )
+      }
+      case 'unknown_channel': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_CHANNEL, 'Unknown Channel', 404)
+            .body,
+          404
+        )
+      }
+      default: {
+        return c.json({ message: '404: Not Found', code: 0 }, 404)
+      }
+    }
   })
 
   // POST /_test/polls/:messageId/votes — Inject a poll vote for testing

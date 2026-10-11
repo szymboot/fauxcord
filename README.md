@@ -196,6 +196,26 @@ client logs in again with IDENTIFY and receives fresh `READY`/`GUILD_CREATE`
 snapshots. Keyed recovery, cleanup and a long-poll observation of the
 replacement IDENTIFY are described in the
 [test API documentation](./docs/test-api.md#forced-re-identify-of-a-live-gateway-session).
+With `"trigger": "resume"` it instead rejects the session's next RESUME
+(op 9 `d: false`, buffered events discarded), so a client that dropped its
+connection must re-IDENTIFY; see
+[Failed RESUME](./docs/test-api.md#failed-resume-trigger-resume).
+
+### Simulate a zombie Gateway connection
+
+`POST /_test/gateway-zombie-connections` keeps one session's socket open but
+stops HEARTBEAT_ACKs and dispatches to it (events are buffered for RESUME),
+until the client detects the missing ACK, closes and RESUMEs. Evidence covers
+the start, last ACK, client close, RESUME and replayed sequences; see
+[Zombie Gateway connections](./docs/test-api.md#zombie-gateway-connections).
+
+### Simulate a guild outage
+
+`POST /_test/gateway-guild-outages` makes one guild unavailable to one bot
+setup: its sessions receive `GUILD_DELETE` (`unavailable: true`), no further
+dispatch of that guild until it recovers, and then a fresh `GUILD_CREATE`
+snapshot. IDENTIFY, RESUME, TTL and evidence are described in the
+[test API documentation](./docs/test-api.md#simulated-guild-outage-guild_delete-unavailable--guild_create).
 
 ### Inspect channel messages (for testing)
 
@@ -215,6 +235,7 @@ curl http://localhost:3000/_test/messages/1234567890123456789
 | `LOG_LEVEL`    | `info`                  | Log level (`debug` / `info` / `warn` / `error`)         |
 | `DISABLE_AUTH` | `false`                 | Set to `true` to accept any token                       |
 | `LATENCY_MS`   | `0`                     | Artificial latency added to all responses (ms)          |
+| `GATEWAY_HEARTBEAT_INTERVAL_MS` | `41250` | Gateway heartbeat interval announced in HELLO (ms); `100`–`600000` |
 | `SEED_FILE`    | _(none)_                | Path to a JSON file loaded automatically at startup     |
 
 ### Using SEED_FILE

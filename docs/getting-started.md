@@ -225,6 +225,12 @@ ws.on('message', (raw) => {
 })
 ```
 
+When the bot leaves a guild (`DELETE /users/@me/guilds/:guildId`) or the guild
+is deleted (`DELETE /guilds/:guildId`), its sessions with the `GUILDS` intent
+receive `GUILD_DELETE` (`{ "id": "<guild id>" }`) and the guild disappears from
+later READY payloads. See
+[Test API](test-api.md#remove-a-guild-from-the-bot-through-discord-rest-guild_delete).
+
 ---
 
 ## 9. Slash commands and interactions
@@ -324,6 +330,7 @@ Fauxcord's simplified token issuance or Bot permission edits work on Discord.
 | `BASE_URL`     | `http://localhost:3000` | Used to generate attachment URLs                    |
 | `DISABLE_AUTH` | `false`                 | Set `true` to bypass authentication                 |
 | `LATENCY_MS`   | `0`                     | Artificial latency added to all responses (ms)      |
+| `GATEWAY_HEARTBEAT_INTERVAL_MS` | `41250` | Gateway heartbeat interval announced in HELLO (ms); `100`–`600000` |
 | `SEED_FILE`    | _(none)_                | Path to a JSON file loaded automatically at startup |
 
 ---

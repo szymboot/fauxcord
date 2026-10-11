@@ -3,8 +3,8 @@ import type { APIVoiceState } from 'discord-api-types/v10'
 import { runInTransaction, type Database } from '../db'
 import { validateTestVoiceState } from '../validators/voice-state'
 import type { TestVoiceStatePatch } from '../validators/voice-state'
-import { getChannel } from './channels'
-import { computeChannelPermissions, MOVE_MEMBERS } from './channel-permissions'
+import { getChannel, type ChannelObject } from './channels'
+import { PermissionBit, resolveChannelPermissions } from './guild-permissions'
 
 /** Native guild voice state with explicit streaming and guild identity. */
 export interface GuildVoiceState extends APIVoiceState {
@@ -94,62 +94,104 @@ export interface VoiceStateFixtureMutation {
   changed: boolean
   /** Defaults to true; false requests silent historical preparation. */
   emit: boolean
+  /**
+   * Connected states of the same human user in other guilds that this write
+   * disconnected first, ordered by guild ID. Publish these before the state.
+   */
+  displaced: VoiceStateFixtureMutation[]
 }
 
-/** REST voice-state failures: fixture failures plus a full channel. */
-export type VoiceStateWriteError = VoiceStateFixtureError | 'CHANNEL_FULL'
+/** Persists one native voice state, inserting or replacing the guild row. */
+function writeGuildVoiceState(db: Database, state: GuildVoiceState): void {
+  db.prepare(
+    `INSERT INTO guild_voice_states
+    (guild_id, user_id, channel_id, session_id, deaf, mute, self_deaf,
+     self_mute, self_stream, self_video, suppress, request_to_speak_timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(guild_id, user_id) DO UPDATE SET
+    channel_id = excluded.channel_id, session_id = excluded.session_id,
+    deaf = excluded.deaf, mute = excluded.mute, self_deaf = excluded.self_deaf,
+    self_mute = excluded.self_mute, self_stream = excluded.self_stream,
+    self_video = excluded.self_video, suppress = excluded.suppress,
+    request_to_speak_timestamp = excluded.request_to_speak_timestamp`
+  ).run(
+    state.guild_id,
+    state.user_id,
+    state.channel_id,
+    state.session_id,
+    Number(state.deaf),
+    Number(state.mute),
+    Number(state.self_deaf),
+    Number(state.self_mute),
+    Number(state.self_stream),
+    Number(state.self_video),
+    Number(state.suppress),
+    state.request_to_speak_timestamp
+  )
+}
 
 /**
- * Checks Discord's user limit for a join or move into a voice/stage channel:
- * with `user_limit` > 0, a channel already holding that many connected users
- * admits only users with MOVE_MEMBERS. A move performed by someone else (the
- * REST caller) is admitted when that caller has MOVE_MEMBERS.
+ * Lists the guilds whose voice connection a human must leave before
+ * connecting in `guildId`, enforcing Discord's single voice connection for
+ * human accounts: every other guild where the user is still a member and
+ * connected, ordered by guild ID. Bot users may hold one connection per guild
+ * and are exempt. Legacy rows without a membership are left untouched: there
+ * is no member to resolve mute/deaf from, and they are never published.
  * @param db - Database
- * @param channelId - Target channel
- * @param userId - Joining user (excluded from the occupancy count)
- * @param actorId - REST caller performing the join or move
- * @returns true when the channel is full for this join
+ * @param guildId - Guild the user is connecting in
+ * @param userId - Connecting user ID
+ * @returns Guild IDs to disconnect, possibly empty
  */
-function isChannelFullFor(
+function listDisplacedGuilds(
   db: Database,
-  channelId: string,
-  userId: string,
-  actorId: string
-): boolean {
-  const channel = getChannel(db, channelId)
-  if (!channel?.guild_id || !channel.user_limit) return false
-  const connected = getGuildVoiceStates(db, channel.guild_id).filter(
-    (state) => state.channel_id === channelId && state.user_id !== userId
-  ).length
-  if (connected < channel.user_limit) return false
-  const scoped = { ...channel, guild_id: channel.guild_id }
-  return ![userId, actorId].some((id) => {
-    const resolved = computeChannelPermissions(db, scoped, id)
-    return resolved !== null && (resolved.permissions & MOVE_MEMBERS) !== 0n
-  })
+  guildId: string,
+  userId: string
+): string[] {
+  const user = db.prepare('SELECT bot FROM users WHERE id = ?').get(userId) as
+    { bot: number } | undefined
+  if (!user || user.bot === 1) return []
+  const rows = db
+    .prepare(
+      `SELECT vs.guild_id FROM guild_voice_states vs
+      JOIN guild_members m ON m.guild_id = vs.guild_id AND m.user_id = vs.user_id
+      WHERE vs.user_id = ? AND vs.guild_id != ? AND vs.channel_id IS NOT NULL
+      ORDER BY vs.guild_id`
+    )
+    .all(userId, guildId) as { guild_id: string }[]
+  return rows.map((row) => row.guild_id)
 }
 
-/** Applies a validated patch after checking every referenced entity. */
-function applyTestGuildVoiceState(
+/**
+ * Applies a validated patch after checking every referenced entity.
+ * Server `mute`/`deaf` are owned by the guild member: omitted values default to
+ * the member's persisted flags (server mute survives reconnects, as on
+ * Discord), and the committed values are written back to `guild_members` so
+ * REST member reads and embedded VOICE_STATE_UPDATE members never diverge.
+ * Shared by the fixture, stage and Modify Guild Member voice moderation paths,
+ * channel deletion and cross-guild displacement.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - Member user ID
+ * @param payload - Already validated patch
+ * @returns Committed mutation, or an error before any write
+ */
+export function applyGuildVoiceStatePatch(
   db: Database,
   guildId: string,
   userId: string,
-  payload: TestVoiceStatePatch,
-  actorId?: string
-): VoiceStateFixtureMutation | VoiceStateWriteError {
+  payload: TestVoiceStatePatch
+): VoiceStateFixtureMutation | VoiceStateFixtureError {
   return runInTransaction(db, () => {
     if (!db.prepare('SELECT 1 FROM guilds WHERE id = ?').get(guildId))
       return 'UNKNOWN_GUILD'
     if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(userId))
       return 'UNKNOWN_USER'
-    if (
-      !db
-        .prepare(
-          'SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ?'
-        )
-        .get(guildId, userId)
-    )
-      return 'UNKNOWN_MEMBER'
+    const member = db
+      .prepare(
+        'SELECT mute, deaf FROM guild_members WHERE guild_id = ? AND user_id = ?'
+      )
+      .get(guildId, userId) as { mute: number; deaf: number } | undefined
+    if (!member) return 'UNKNOWN_MEMBER'
     const existing = getGuildVoiceState(db, guildId, userId)
     if (!existing && payload.channel_id === undefined) return 'INVALID_INPUT'
     const channelId =
@@ -162,12 +204,6 @@ function applyTestGuildVoiceState(
         .get(channelId) as { guild_id: string | null; type: number } | undefined
       if (channel?.guild_id !== guildId) return 'UNKNOWN_CHANNEL'
       if (channel.type !== 2 && channel.type !== 13) return 'INVALID_INPUT'
-      if (
-        actorId !== undefined &&
-        channelId !== existing?.channel_id &&
-        isChannelFullFor(db, channelId, userId, actorId)
-      )
-        return 'CHANNEL_FULL'
     } else if (
       payload.self_stream === true ||
       payload.self_video === true ||
@@ -183,8 +219,8 @@ function applyTestGuildVoiceState(
         existing && (channelId === null || existing.channel_id !== null)
           ? existing.session_id
           : randomUUID(),
-      deaf: payload.deaf ?? existing?.deaf ?? false,
-      mute: payload.mute ?? existing?.mute ?? false,
+      deaf: payload.deaf ?? member.deaf === 1,
+      mute: payload.mute ?? member.mute === 1,
       self_deaf: payload.self_deaf ?? existing?.self_deaf ?? false,
       self_mute: payload.self_mute ?? existing?.self_mute ?? false,
       self_stream:
@@ -203,37 +239,99 @@ function applyTestGuildVoiceState(
             ? (existing?.request_to_speak_timestamp ?? null)
             : payload.request_to_speak_timestamp,
     }
+    const emit = payload.emit ?? true
+    // Displaced guilds go through the ordinary disconnect patch, so their
+    // mute/deaf resolve from the member too. A null channel never displaces,
+    // so the nested call cannot recurse further.
+    const displaced =
+      channelId === null
+        ? []
+        : listDisplacedGuilds(db, guildId, userId).map((otherGuildId) => {
+            const result = applyGuildVoiceStatePatch(db, otherGuildId, userId, {
+              channel_id: null,
+              emit,
+            })
+            // Guild, user and membership were just read in this transaction.
+            if (typeof result === 'string')
+              throw new Error(`Voice displacement failed: ${result}`)
+            return result
+          })
+    writeGuildVoiceState(db, state)
     db.prepare(
-      `INSERT INTO guild_voice_states
-      (guild_id, user_id, channel_id, session_id, deaf, mute, self_deaf,
-       self_mute, self_stream, self_video, suppress, request_to_speak_timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(guild_id, user_id) DO UPDATE SET
-      channel_id = excluded.channel_id, session_id = excluded.session_id,
-      deaf = excluded.deaf, mute = excluded.mute, self_deaf = excluded.self_deaf,
-      self_mute = excluded.self_mute, self_stream = excluded.self_stream,
-      self_video = excluded.self_video, suppress = excluded.suppress,
-      request_to_speak_timestamp = excluded.request_to_speak_timestamp`
-    ).run(
-      state.guild_id,
-      state.user_id,
-      state.channel_id,
-      state.session_id,
-      Number(state.deaf),
-      Number(state.mute),
-      Number(state.self_deaf),
-      Number(state.self_mute),
-      Number(state.self_stream),
-      Number(state.self_video),
-      Number(state.suppress),
-      state.request_to_speak_timestamp
-    )
+      'UPDATE guild_members SET mute = ?, deaf = ? WHERE guild_id = ? AND user_id = ?'
+    ).run(Number(state.mute), Number(state.deaf), guildId, userId)
     return {
       state,
       previous: existing,
       changed: JSON.stringify(existing) !== JSON.stringify(state),
-      emit: payload.emit ?? true,
+      emit,
+      displaced,
     }
+  })
+}
+
+/** Matches any all-digit ID, canonical snowflake or not (e.g. `002`). */
+const DECIMAL_ID = /^\d+$/
+
+/**
+ * Total, deterministic order for stored user IDs: all-digit IDs by numeric
+ * value (leading zeros ignored, ties broken by raw text), followed by any
+ * non-decimal IDs in raw text order.
+ * @param left - First user ID
+ * @param right - Second user ID
+ * @returns Negative, zero or positive like any `Array#sort` comparator
+ */
+export function compareUserIds(left: string, right: string): number {
+  const leftDecimal = DECIMAL_ID.test(left)
+  const rightDecimal = DECIMAL_ID.test(right)
+  if (leftDecimal !== rightDecimal) return leftDecimal ? -1 : 1
+  if (leftDecimal) {
+    const difference = BigInt(left) - BigInt(right)
+    if (difference !== 0n) return difference < 0n ? -1 : 1
+  }
+  if (left === right) return 0
+  return left < right ? -1 : 1
+}
+
+/**
+ * Disconnects every valid member connected to a guild voice or stage channel,
+ * as Discord does when that channel is deleted. Each state is disconnected
+ * exactly like a `channel_id: null` fixture patch (session and other flags
+ * retained; streaming, video and request-to-speak cleared). Results are in
+ * numeric `user_id` order (see {@link compareUserIds}). Other channel types,
+ * legacy orphan rows and members connected elsewhere are untouched. Emits
+ * nothing: the caller publishes the returned mutations after its transaction
+ * commits.
+ * @param db - Database
+ * @param channelId - Channel about to be deleted
+ * @returns Committed disconnect mutations, one per affected member
+ */
+export function disconnectGuildVoiceChannelMembers(
+  db: Database,
+  channelId: string
+): VoiceStateFixtureMutation[] {
+  return runInTransaction(db, () => {
+    const rows = db
+      .prepare(
+        `SELECT vs.guild_id, vs.user_id FROM guild_voice_states vs
+      JOIN guild_members m ON m.guild_id = vs.guild_id AND m.user_id = vs.user_id
+      JOIN channels c ON c.id = vs.channel_id AND c.guild_id = vs.guild_id
+      WHERE vs.channel_id = ? AND c.type IN (2, 13)`
+      )
+      .all(channelId) as { guild_id: string; user_id: string }[]
+    // Sort in JS: stored IDs are not guaranteed canonical (path parameters
+    // such as PUT /guilds/:id/members/:userId accept arbitrary text).
+    const ordered = rows.toSorted((left, right) =>
+      compareUserIds(left.user_id, right.user_id)
+    )
+    const mutations: VoiceStateFixtureMutation[] = []
+    for (const row of ordered) {
+      const result = applyGuildVoiceStatePatch(db, row.guild_id, row.user_id, {
+        channel_id: null,
+      })
+      if (typeof result !== 'string') mutations.push(result)
+    }
+    return mutations
   })
 }
 
@@ -242,8 +340,10 @@ function applyTestGuildVoiceState(
  * First creation requires channel_id (null is permitted). Moves and flag
  * updates retain the session; reconnecting after null creates a new session.
  * Disconnect clears streaming, video and request-to-speak. Other omitted
- * flags remain unchanged. emit is reserved for the dispatch integration;
- * this foundation emits no Gateway event, including with active sessions.
+ * flags remain unchanged. Connecting a human user first disconnects any
+ * connected state they hold in another guild (reported in displaced); bots
+ * are exempt. emit is reserved for the dispatch integration; this
+ * foundation emits no Gateway event, including with active sessions.
  */
 export function setTestGuildVoiceState(
   db: Database,
@@ -252,16 +352,95 @@ export function setTestGuildVoiceState(
   input: unknown
 ): VoiceStateFixtureMutation | VoiceStateFixtureError {
   const payload = validateTestVoiceState(input)
-  if (!payload) return 'INVALID_INPUT'
-  // Fixture writes are a privileged override: no actor, so no user limit.
-  const result = applyTestGuildVoiceState(db, guildId, userId, payload)
-  return result === 'CHANNEL_FULL' ? 'INVALID_INPUT' : result
+  return payload
+    ? applyGuildVoiceStatePatch(db, guildId, userId, payload)
+    : 'INVALID_INPUT'
+}
+
+/** REST voice-state failures: fixture failures plus a full channel. */
+export type VoiceStateWriteError = VoiceStateFixtureError | 'CHANNEL_FULL'
+
+/** Permissions a timed-out member keeps: VIEW_CHANNEL and READ_MESSAGE_HISTORY. */
+const TIMED_OUT_PERMISSIONS = PermissionBit.VIEW_CHANNEL | (1n << 16n)
+
+/**
+ * Whether a user holds MOVE_MEMBERS in a channel. Owners and guild-level
+ * administrators always do; any other member with an active timeout keeps
+ * only VIEW_CHANNEL and READ_MESSAGE_HISTORY
+ * (https://docs.discord.com/developers/topics/permissions#permissions-for-timed-out-members).
+ * @param db - Database
+ * @param channel - Guild channel
+ * @param channel.guild_id - Guild owning the channel
+ * @param channel.permission_overwrites - The channel's overwrites
+ * @param userId - User to check
+ * @returns true when the user may bypass the channel's user limit
+ */
+function canMoveMembers(
+  db: Database,
+  channel: {
+    guild_id: string
+    permission_overwrites: ChannelObject['permission_overwrites']
+  },
+  userId: string
+): boolean {
+  const resolved = resolveChannelPermissions(
+    db,
+    channel.guild_id,
+    channel.permission_overwrites,
+    userId
+  )
+  if (!resolved) return false
+  if (resolved.privileged) return true
+  const member = db
+    .prepare(
+      'SELECT communication_disabled_until FROM guild_members WHERE guild_id = ? AND user_id = ?'
+    )
+    .get(channel.guild_id, userId) as
+    { communication_disabled_until: string | null } | undefined
+  const timedOut =
+    member?.communication_disabled_until != null &&
+    Date.parse(member.communication_disabled_until) > Date.now()
+  const permissions = timedOut
+    ? resolved.permissions & TIMED_OUT_PERMISSIONS
+    : resolved.permissions
+  return (permissions & PermissionBit.MOVE_MEMBERS) !== 0n
+}
+
+/**
+ * Checks Discord's user limit for a join or move into a voice/stage channel
+ * of `guildId`: with `user_limit` > 0, a channel already holding that many
+ * connected users admits only users with MOVE_MEMBERS (Discord staff,
+ * discord-api-docs#58). A move performed by someone else (the REST caller) is
+ * admitted when that caller has MOVE_MEMBERS.
+ * @param db - Database
+ * @param guildId - Guild the write targets
+ * @param channelId - Target channel
+ * @param userId - Joining user (excluded from the occupancy count)
+ * @param actorId - REST caller performing the join or move
+ * @returns true when the channel is full for this join
+ */
+function isChannelFullFor(
+  db: Database,
+  guildId: string,
+  channelId: string,
+  userId: string,
+  actorId: string
+): boolean {
+  const channel = getChannel(db, channelId)
+  if (channel?.guild_id !== guildId || !channel.user_limit) return false
+  const connected = getGuildVoiceStates(db, guildId).filter(
+    (state) => state.channel_id === channelId && state.user_id !== userId
+  ).length
+  if (connected < channel.user_limit) return false
+  const scoped = { ...channel, guild_id: guildId }
+  return [userId, actorId].every((id) => !canMoveMembers(db, scoped, id))
 }
 
 /**
  * Validates and applies a REST voice-state write performed by `actorId`.
- * Unlike the fixture API, joins and moves honour the target channel's
- * `user_limit` (see `isChannelFullFor`).
+ * Unlike the fixture API (a privileged override), joins and moves honour the
+ * target channel's `user_limit` (see `isChannelFullFor`); everything else is
+ * the shared `applyGuildVoiceStatePatch`, in the same transaction.
  * @param db - Database
  * @param guildId - Guild ID
  * @param userId - User whose voice state changes
@@ -278,6 +457,13 @@ export function setRestGuildVoiceState(
 ): VoiceStateFixtureMutation | VoiceStateWriteError {
   const payload = validateTestVoiceState(input)
   return payload
-    ? applyTestGuildVoiceState(db, guildId, userId, payload, actorId)
+    ? runInTransaction(db, () => {
+        const target = payload.channel_id
+        return typeof target === 'string' &&
+          target !== getGuildVoiceState(db, guildId, userId)?.channel_id &&
+          isChannelFullFor(db, guildId, target, userId, actorId)
+          ? 'CHANNEL_FULL'
+          : applyGuildVoiceStatePatch(db, guildId, userId, payload)
+      })
     : 'INVALID_INPUT'
 }
