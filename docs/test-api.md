@@ -3865,8 +3865,10 @@ explicitly (`DELETE /guilds/:guildId`) or its setup is deleted
 (`DELETE /_test/setup/:token`); both are destructive and silent for detached
 guilds. `POST /_test/reset` is a selective, silent cleanup instead: it keeps
 guilds, channels, members, bans and bot registrations (and therefore a
-detached guild and its detached state) and only clears posted data and control
-records. It neither deletes nor reattaches a guild the bot left. The bot's
+detached guild and its detached state) and only clears posted data, voice
+states and control records, for attached and detached guilds alike (as before
+this change, it clears voice states of every guild). It neither deletes nor
+reattaches a guild the bot left. The bot's
 **membership** is separate: leaving, a kick or a ban only deletes the bot's own
 membership (and connected voice state), records a ban when applicable, and
 detaches the bot from the guild. A real bot leaving does not destroy the
@@ -3892,7 +3894,11 @@ After the bot is detached:
   written (held events are discarded, as with any other cancellation) and new
   ones for the guild are rejected as an unknown scope.
 - Other bots, other guilds and other setups sharing the same bot user ID
-  receive nothing.
+  receive nothing from the removal itself. Unchanged Fauxcord limitation: many
+  guild events (messages, channels, roles, members) are broadcast to every
+  connected session, not just the owning setup, for attached guilds too; a
+  session is only excluded from a guild its own setup was removed from, or
+  from a detached guild.
 - Leaving a guild the bot already left, or that does not exist or belongs to
   another bot, returns `404` `{"message":"Unknown Guild","code":10004}` and
   dispatches nothing. Kicking the detached bot again returns `404`
@@ -3915,7 +3921,9 @@ edits, `DELETE /guilds/:id`, …); real Discord would answer `403 Missing Access
 The routes that do model the bot's access answer `403`/`50001` for the
 detached bot: sending messages and other permission-resolved calls (the bot has
 no membership and loses the owner shortcut), the guild-ownership routes (bulk
-ban, incident actions, stage instances, soundboard sound sends), and
+ban, incident actions, stage instances, soundboard sound sends, and the
+guild-scoped application command and command permission routes, whose stored
+registrations survive and are served again after a rejoin), and
 `GET /users/@me/guilds` simply omits the guild. Dispatches caused by a
 detached bot's REST calls are never delivered. Audit-log response controls,
 REST fault controls and page holds scoped to the guild stay registered with

@@ -410,6 +410,39 @@ describe('guild fixtures survive the bot leaving, being kicked or banned', () =>
     )
   })
 
+  it('denies guild-scoped application commands to a detached guild but keeps them', async () => {
+    const db = await start()
+    seedApplicationCommand(db, BOT, GUILD, 'guild-cmd')
+    const base = `/applications/${BOT}/guilds/${GUILD}/commands`
+    expect(await statusOf(base)).toBe(200)
+    await http(`/users/@me/guilds/${GUILD}`, 'DELETE')
+
+    const cmd = db
+      .prepare('SELECT id FROM application_commands WHERE guild_id = ?')
+      .get(GUILD) as { id: string }
+    const attempts: [string, string, unknown?][] = [
+      [base, 'GET'],
+      [base, 'PUT', []],
+      [base, 'POST', { name: 'late', description: 'x' }],
+      [`${base}/${cmd.id}`, 'GET'],
+      [`${base}/${cmd.id}`, 'PATCH', { description: 'y' }],
+      [`${base}/${cmd.id}`, 'DELETE'],
+      [`${base}/permissions`, 'GET'],
+      [`${base}/${cmd.id}/permissions`, 'GET'],
+      [`${base}/${cmd.id}/permissions`, 'PUT', { permissions: [] }],
+    ]
+    for (const [path, method, body] of attempts)
+      expect(await statusOf(path, method, body)).toBe(403)
+    // The stored registration survives for a later rejoin.
+    expect(
+      db
+        .prepare('SELECT name FROM application_commands WHERE guild_id = ?')
+        .get(GUILD)
+    ).toEqual({ name: 'guild-cmd' })
+    // Global commands are unaffected.
+    expect(await statusOf(`/applications/${BOT}/commands`)).toBe(200)
+  })
+
   it('rejoins through setup: re-lists the guild, clears the ban and sends GUILD_CREATE', async () => {
     const db = await start()
     seedVoiceState(db, GUILD, ALICE, VOICE)

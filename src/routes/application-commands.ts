@@ -6,7 +6,7 @@
  */
 
 import { Hono } from 'hono'
-import type { Context } from 'hono'
+import type { Context, Next } from 'hono'
 import type { Database } from '../db'
 import type { AppEnv } from '../middleware/auth'
 import { parseJsonBody, requireEntity } from '../lib/route-helpers'
@@ -117,6 +117,32 @@ function hasDuplicateNameInPayload(
  */
 export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
+
+  // A guild whose bot left or was removed keeps its stored commands and
+  // permissions, but no application can manage them until the bot rejoins.
+  const denyDetachedGuild = async (
+    c: Context<AppEnv>,
+    next: Next
+  ): Promise<Response | undefined> => {
+    const detached = db
+      .prepare('SELECT 1 FROM guilds WHERE id = ? AND bot_present = 0')
+      .get(c.req.param('guildId'))
+    if (detached)
+      return c.json(
+        discordError(DiscordErrorCode.MISSING_ACCESS, 'Missing Access', 403)
+          .body,
+        403
+      )
+    await next()
+  }
+  app.use(
+    '/applications/:applicationId/guilds/:guildId/commands',
+    denyDetachedGuild
+  )
+  app.use(
+    '/applications/:applicationId/guilds/:guildId/commands/*',
+    denyDetachedGuild
+  )
 
   // GET /applications/:applicationId/commands — list global commands
   app.get('/applications/:applicationId/commands', (c) => {
