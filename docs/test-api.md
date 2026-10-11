@@ -252,6 +252,13 @@ It has no embedded `member`. Existing authenticated
 `/api` and `/api/v10`). Fixture writes preserve users, memberships and other
 members' voice states.
 
+The read returns a stored state whether connected or disconnected
+(`channel_id: null`). Without one, a guild member who has never joined voice
+gets `404` / `10065` (`Unknown Voice State`), and a user who is not a member of
+the guild gets `404` / `10007` (`Unknown Member`). The bot's own
+`GET /guilds/:guildId/voice-states/@me` (or `%40me`) follows the same rule.
+Authentication, unknown-guild (`10004`) and access (`50001`) errors come first.
+
 Allowed input fields:
 
 | Field                                                                             | Meaning                                                                                                                              |

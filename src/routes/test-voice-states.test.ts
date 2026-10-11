@@ -310,6 +310,142 @@ describe('Test voice-state fixtures', () => {
     expect(forbidden.status).toBe(403)
   })
 
+  describe('REST reads without a stored voice state', () => {
+    const botId = '111111111111111111'
+    const unknownVoiceState = { message: 'Unknown Voice State', code: 10_065 }
+    const unknownMember = { message: 'Unknown Member', code: 10_007 }
+
+    /** Reads one native voice state as `token` (or another Authorization). */
+    async function read(path: string, authorization: string | null = token) {
+      const response = await context.app.request(
+        path,
+        authorization === null
+          ? {}
+          : { headers: { Authorization: authorization } }
+      )
+      return { status: response.status, body: await response.json() }
+    }
+
+    it('returns Unknown Voice State for a member who never joined voice, under every prefix', async () => {
+      const before = snapshot()
+      const member = await read(`/api/v10/guilds/${guild}/members/${user}`)
+      expect(member.status).toBe(200)
+      for (const prefix of ['', '/api', '/api/v10']) {
+        expect(
+          await read(`${prefix}/guilds/${guild}/voice-states/${user}`),
+          prefix
+        ).toEqual({ status: 404, body: unknownVoiceState })
+      }
+      expect(snapshot()).toEqual(before)
+    })
+
+    it('returns Unknown Voice State for the bot member through @me and %40me, under every prefix', async () => {
+      seedMember(context.db, guild, botId)
+      const before = snapshot()
+      for (const prefix of ['', '/api', '/api/v10']) {
+        for (const alias of ['@me', '%40me']) {
+          expect(
+            await read(`${prefix}/guilds/${guild}/voice-states/${alias}`),
+            `${prefix} ${alias}`
+          ).toEqual({ status: 404, body: unknownVoiceState })
+        }
+        expect(
+          await read(`${prefix}/guilds/${guild}/voice-states/${botId}`),
+          prefix
+        ).toEqual({ status: 404, body: unknownVoiceState })
+      }
+      expect(snapshot()).toEqual(before)
+    })
+
+    it('keeps Unknown Member for users who are not members of the guild', async () => {
+      const outsider = seedMember(context.db, otherGuild, '444444444444444445')
+      for (const userId of [outsider, '999999999999999999']) {
+        expect(
+          await read(`/api/v10/guilds/${guild}/voice-states/${userId}`),
+          userId
+        ).toEqual({ status: 404, body: unknownMember })
+      }
+      // A bot whose membership row is absent is not a member either.
+      for (const alias of ['@me', '%40me']) {
+        expect(
+          await read(`/api/v10/guilds/${guild}/voice-states/${alias}`),
+          alias
+        ).toEqual({ status: 404, body: unknownMember })
+      }
+    })
+
+    it('returns Unknown Member once a member with a stored state leaves', async () => {
+      await patch(JSON.stringify({ channel_id: channel, emit: false }))
+      const path = `/api/v10/guilds/${guild}/voice-states/${user}`
+      const connected = await read(path)
+      expect(connected.status).toBe(200)
+      context.db
+        .prepare('DELETE FROM guild_members WHERE guild_id = ? AND user_id = ?')
+        .run(guild, user)
+      expect(await read(path)).toEqual({ status: 404, body: unknownMember })
+    })
+
+    it('keeps returning connected and stored disconnected states', async () => {
+      seedMember(context.db, guild, botId)
+      for (const [userId, aliases] of [
+        [user, [user]],
+        [botId, ['@me', '%40me', botId]],
+      ] as const) {
+        /** Reads every alias under every prefix, expecting the stored state. */
+        async function expectStored() {
+          const stored = getGuildVoiceState(context.db, guild, userId)
+          for (const prefix of ['', '/api', '/api/v10']) {
+            for (const alias of aliases) {
+              expect(
+                await read(`${prefix}/guilds/${guild}/voice-states/${alias}`),
+                `${prefix} ${alias}`
+              ).toEqual({ status: 200, body: stored })
+            }
+          }
+          return stored
+        }
+        await patch(JSON.stringify({ channel_id: channel }), guild, userId)
+        const connected = await expectStored()
+        expect(connected).toMatchObject({
+          user_id: userId,
+          channel_id: channel,
+        })
+        await patch('{"channel_id":null}', guild, userId)
+        expect(await expectStored()).toMatchObject({
+          user_id: userId,
+          channel_id: null,
+          session_id: connected?.session_id,
+        })
+      }
+    })
+
+    it('checks authentication, the guild and access before the member', async () => {
+      seedMember(context.db, guild, botId)
+      for (const alias of [user, '@me', '%40me']) {
+        const path = `/api/v10/guilds/${guild}/voice-states/${alias}`
+        const unauthenticated = await read(path, null)
+        expect(unauthenticated.status, alias).toBe(401)
+        expect(await read(path, otherToken), alias).toEqual({
+          status: 403,
+          body: { message: 'Missing Access', code: 50_001 },
+        })
+        expect(
+          await read(
+            `/api/v10/guilds/999999999999999998/voice-states/${alias}`
+          ),
+          alias
+        ).toEqual({
+          status: 404,
+          body: { message: 'Unknown Guild', code: 10_004 },
+        })
+      }
+      const invalid = await read(
+        `/api/v10/guilds/${guild}/voice-states/not-a-snowflake`
+      )
+      expect(invalid).toMatchObject({ status: 400, body: { code: 50_035 } })
+    })
+  })
+
   describe('single voice connection per human user', () => {
     /** Returns the voice states published on the bus, in emission order. */
     function published(spy: {
