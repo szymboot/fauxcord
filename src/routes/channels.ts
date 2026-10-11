@@ -12,12 +12,17 @@ import {
   getChannel,
   updateChannel,
   deleteChannel,
-  type ChannelUpdatePayload,
+  isVoiceCapableChannelType,
+  type ChannelUpdatePayload as ValidatedChannelUpdate,
 } from '../services/channels'
+import { listVoiceRegions } from '../services/catalog'
 import { getThread } from '../services/threads'
 import {
+  pickVoiceChannelSettings,
   validateChannelTypeChange,
   validateChannelUpdate,
+  validateVoiceChannelSettings,
+  type ChannelUpdatePayload,
 } from '../validators/channel'
 import type { AppEnv } from '../middleware/auth'
 import { requireEntity, parseJsonBody } from '../lib/route-helpers'
@@ -70,9 +75,23 @@ export function createChannelRoutes(
     const payload = (await parseJsonBody(c)) as ChannelUpdatePayload
 
     const current = getChannel(db, channelId)
+    // Discord applies voice settings to voice and stage channels only.
+    const voice = current !== null && isVoiceCapableChannelType(current.type)
+    const guild = current?.guild_id
+      ? (db
+          .prepare('SELECT premium_tier FROM guilds WHERE id = ?')
+          .get(current.guild_id) as { premium_tier: number } | undefined)
+      : undefined
     const errors = {
       ...validateChannelUpdate(payload),
       ...(current && validateChannelTypeChange(current.type, payload.type)),
+      ...(voice &&
+        validateVoiceChannelSettings(
+          payload,
+          current.type,
+          guild?.premium_tier ?? 0,
+          listVoiceRegions().map((region) => region.id)
+        )),
     }
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
@@ -80,7 +99,10 @@ export function createChannelRoutes(
 
     const updated = requireEntity(
       c,
-      updateChannel(db, channelId, payload),
+      updateChannel(db, channelId, {
+        ...(payload as ValidatedChannelUpdate),
+        ...pickVoiceChannelSettings(payload),
+      }),
       DiscordErrorCode.UNKNOWN_CHANNEL,
       'Unknown Channel'
     )

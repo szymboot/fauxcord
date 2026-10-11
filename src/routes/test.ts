@@ -36,6 +36,7 @@ import {
   editTestMessage,
   injectTestReaction,
   createTestInteraction,
+  SetupValidationError,
 } from '../services/test-control'
 import type {
   SetupRequest,
@@ -221,6 +222,19 @@ export function createTestRoutes(
         return c.json(
           discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404).body,
           404
+        )
+      }
+      if (err instanceof SetupValidationError) {
+        return c.json(
+          {
+            message:
+              err.message === 'INVALID_GUILD_AFK'
+                ? 'Invalid guild AFK settings'
+                : 'Invalid voice channel settings',
+            code: 0,
+            errors: err.errors,
+          },
+          400
         )
       }
       if (

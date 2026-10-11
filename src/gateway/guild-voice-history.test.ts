@@ -474,4 +474,67 @@ describe('GUILD_CREATE historical voice states', () => {
       )
     }
   )
+
+  it('sends voice channel settings and AFK fields in GUILD_CREATE and GUILD_UPDATE only to the owning bot', async () => {
+    const server = await createTestGatewayServer()
+    close = server.close
+    const token = seedBot(server.db)
+    const guildId = seedGuild(server.db, token)
+    const voice = seedVoiceChannel(server.db, guildId)
+    server.db
+      .prepare(
+        'UPDATE channels SET bitrate = 32000, user_limit = 4 WHERE id = ?'
+      )
+      .run(voice)
+    const otherToken = seedBot(
+      server.db,
+      'Bot other-voice-history',
+      '111111111111111112'
+    )
+    seedGuild(server.db, otherToken, '222222222222222229')
+    const { guilds, next } = await identify(
+      server.url,
+      token,
+      1,
+      GatewayIntentBits.Guilds
+    )
+    const other = await identify(
+      server.url,
+      otherToken,
+      1,
+      GatewayIntentBits.Guilds
+    )
+    const created = guilds[0] as unknown as {
+      afk_channel_id: string | null
+      afk_timeout: number
+      channels: Record<string, unknown>[]
+    }
+    expect(created).toMatchObject({ afk_channel_id: null, afk_timeout: 300 })
+    expect(created.channels).toContainEqual(
+      expect.objectContaining({
+        id: voice,
+        bitrate: 32_000,
+        user_limit: 4,
+        rtc_region: null,
+      })
+    )
+    const patch = await fetch(
+      `${server.url.replace('ws://', 'http://')}/api/v10/guilds/${guildId}`,
+      {
+        method: 'PATCH',
+        headers: { Authorization: token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ afk_channel_id: voice, afk_timeout: 1800 }),
+        signal: AbortSignal.timeout(2000),
+      }
+    )
+    expect(patch.status).toBe(200)
+    const update = await next()
+    expect(update).toMatchObject({
+      op: GatewayOp.Dispatch,
+      t: 'GUILD_UPDATE',
+      d: { id: guildId, afk_channel_id: voice, afk_timeout: 1800 },
+    })
+    expect(update.d).not.toHaveProperty('voice_states')
+    await expect(other.next()).rejects.toThrow('Gateway frame timed out')
+  })
 })

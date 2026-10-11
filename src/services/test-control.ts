@@ -11,7 +11,15 @@ import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
 import { toDiscordTimestamp } from '../timestamp'
 import { gatewayBus } from '../gateway/bus'
-import { buildGuildCreatePayload } from './guilds'
+import { buildGuildCreatePayload, isValidAfkChannel } from './guilds'
+import { listVoiceRegions } from './catalog'
+import {
+  pickVoiceChannelSettings,
+  validateVoiceChannelSettings,
+  type VoiceChannelSettings,
+} from '../validators/channel'
+import { validateGuildAfk } from '../validators/guild'
+import type { ValidationErrors } from '../validators/common'
 import { getGuildMember, type GuildMemberObject } from './guild-members'
 import { getChannel, isVoiceCapableChannelType } from './channels'
 import { getUser, type UserObject } from './users'
@@ -56,6 +64,10 @@ export interface SetupGuildRequest {
   owner_id?: string
   /** Boost tier from 0 to 3; omission preserves an existing tier. */
   premium_tier?: 0 | 1 | 2 | 3
+  /** Voice channel (type 2) of this guild; omission preserves, null clears. */
+  afk_channel_id?: string | null
+  /** 60, 300, 900, 1800 or 3600 seconds; omission preserves (default 300). */
+  afk_timeout?: number
   channels?: SetupChannelRequest[]
 }
 
@@ -64,6 +76,114 @@ export interface SetupChannelRequest {
   id?: string
   name: string
   type?: number
+  /** Voice/stage only; omission preserves, null restores 64000. */
+  bitrate?: unknown
+  /** Voice/stage only; omission preserves, null restores 0 (unlimited). */
+  user_limit?: unknown
+  /** Voice/stage only; omission preserves, null means automatic. */
+  rtc_region?: unknown
+  /** Voice/stage only; omission preserves, null unsets (auto). */
+  video_quality_mode?: unknown
+}
+
+/** Setup failure carrying Discord-style field errors. */
+export class SetupValidationError extends Error {
+  /**
+   * @param code - Setup error code (e.g. INVALID_CHANNEL_SETTINGS)
+   * @param errors - Field-keyed validation errors
+   */
+  constructor(
+    code: string,
+    readonly errors: ValidationErrors
+  ) {
+    super(code)
+  }
+}
+
+/**
+ * Validates a setup channel's voice settings against its (preserved or
+ * requested) type and the guild's stored boost tier.
+ * @param db - Database
+ * @param guildId - Guild the channel belongs to
+ * @param channelReq - Setup channel definition
+ * @param channelType - Effective channel type
+ * @returns The provided settings, typed
+ * @throws SetupValidationError with INVALID_CHANNEL_SETTINGS
+ */
+function validateSetupVoiceSettings(
+  db: Database,
+  guildId: string,
+  channelReq: SetupChannelRequest,
+  channelType: number
+): VoiceChannelSettings {
+  const settings = pickVoiceChannelSettings(channelReq)
+  if (Object.keys(settings).length === 0) return settings
+  if (!isVoiceCapableChannelType(channelType)) {
+    throw new SetupValidationError(
+      'INVALID_CHANNEL_SETTINGS',
+      Object.fromEntries(
+        Object.keys(settings).map((field) => [
+          field,
+          {
+            _errors: [
+              {
+                code: 'CHANNEL_TYPE_INVALID',
+                message:
+                  'Only voice (2) and stage (13) channels accept this field.',
+              },
+            ],
+          },
+        ])
+      )
+    )
+  }
+  const tier = (
+    db.prepare('SELECT premium_tier FROM guilds WHERE id = ?').get(guildId) as {
+      premium_tier: number
+    }
+  ).premium_tier
+  const errors = validateVoiceChannelSettings(
+    channelReq,
+    channelType,
+    tier,
+    listVoiceRegions().map((region) => region.id)
+  )
+  if (Object.keys(errors).length > 0)
+    throw new SetupValidationError('INVALID_CHANNEL_SETTINGS', errors)
+  return settings
+}
+
+/**
+ * Applies a setup guild's AFK settings after its channels exist, so the AFK
+ * channel may be one defined in the same request. Omission preserves the
+ * stored value; `afk_channel_id: null` clears it.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param guildReq - Setup guild definition
+ * @throws SetupValidationError with INVALID_GUILD_AFK
+ */
+function applySetupGuildAfk(
+  db: Database,
+  guildId: string,
+  guildReq: SetupGuildRequest
+): void {
+  const errors = validateGuildAfk(guildReq, (channelId) =>
+    isValidAfkChannel(db, guildId, channelId)
+  )
+  if (Object.keys(errors).length > 0)
+    throw new SetupValidationError('INVALID_GUILD_AFK', errors)
+  if (guildReq.afk_channel_id !== undefined) {
+    db.prepare('UPDATE guilds SET afk_channel_id = ? WHERE id = ?').run(
+      guildReq.afk_channel_id,
+      guildId
+    )
+  }
+  if (guildReq.afk_timeout !== undefined) {
+    db.prepare('UPDATE guilds SET afk_timeout = ? WHERE id = ?').run(
+      guildReq.afk_timeout,
+      guildId
+    )
+  }
 }
 
 /** Test setup response type */
@@ -302,14 +422,42 @@ export function setupTestEnvironment(
           assertStableChannelIdentity(existingChannel, guildId, channelType)
         }
 
-        // Create the channel (if the same ID still exists, overwrite its contents and reuse it = idempotent)
+        const settings = validateSetupVoiceSettings(
+          db,
+          guildId,
+          channelReq,
+          channelType
+        )
+        const provided = (field: keyof VoiceChannelSettings) =>
+          settings[field] === undefined ? 0 : 1
+
+        // Create the channel (if the same ID still exists, overwrite its contents and reuse it = idempotent).
+        // Omitted voice settings keep their stored values; null restores the default.
         db.prepare(
-          `INSERT INTO channels (id, guild_id, name, type) VALUES (?, ?, ?, ?)
+          `INSERT INTO channels (id, guild_id, name, type, bitrate, user_limit, rtc_region, video_quality_mode)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              guild_id = excluded.guild_id,
              name = excluded.name,
-             type = excluded.type`
-        ).run(channelId, guildId, channelReq.name, channelType)
+             type = excluded.type,
+             bitrate = CASE WHEN ? THEN excluded.bitrate ELSE channels.bitrate END,
+             user_limit = CASE WHEN ? THEN excluded.user_limit ELSE channels.user_limit END,
+             rtc_region = CASE WHEN ? THEN excluded.rtc_region ELSE channels.rtc_region END,
+             video_quality_mode = CASE WHEN ? THEN excluded.video_quality_mode ELSE channels.video_quality_mode END`
+        ).run(
+          channelId,
+          guildId,
+          channelReq.name,
+          channelType,
+          settings.bitrate ?? null,
+          settings.user_limit ?? null,
+          settings.rtc_region ?? null,
+          settings.video_quality_mode ?? null,
+          provided('bitrate'),
+          provided('user_limit'),
+          provided('rtc_region'),
+          provided('video_quality_mode')
+        )
 
         channelsResponse.push({
           id: channelId,
@@ -317,6 +465,8 @@ export function setupTestEnvironment(
           type: channelType,
         })
       }
+
+      applySetupGuildAfk(db, guildId, guildReq)
 
       guildsResponse.push({
         id: guildId,

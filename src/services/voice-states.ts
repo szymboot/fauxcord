@@ -3,6 +3,8 @@ import type { APIVoiceState } from 'discord-api-types/v10'
 import { runInTransaction, type Database } from '../db'
 import { validateTestVoiceState } from '../validators/voice-state'
 import type { TestVoiceStatePatch } from '../validators/voice-state'
+import { getChannel } from './channels'
+import { computeChannelPermissions, MOVE_MEMBERS } from './channel-permissions'
 
 /** Native guild voice state with explicit streaming and guild identity. */
 export interface GuildVoiceState extends APIVoiceState {
@@ -94,13 +96,47 @@ export interface VoiceStateFixtureMutation {
   emit: boolean
 }
 
+/** REST voice-state failures: fixture failures plus a full channel. */
+export type VoiceStateWriteError = VoiceStateFixtureError | 'CHANNEL_FULL'
+
+/**
+ * Checks Discord's user limit for a join or move into a voice/stage channel:
+ * with `user_limit` > 0, a channel already holding that many connected users
+ * admits only users with MOVE_MEMBERS. A move performed by someone else (the
+ * REST caller) is admitted when that caller has MOVE_MEMBERS.
+ * @param db - Database
+ * @param channelId - Target channel
+ * @param userId - Joining user (excluded from the occupancy count)
+ * @param actorId - REST caller performing the join or move
+ * @returns true when the channel is full for this join
+ */
+function isChannelFullFor(
+  db: Database,
+  channelId: string,
+  userId: string,
+  actorId: string
+): boolean {
+  const channel = getChannel(db, channelId)
+  if (!channel?.guild_id || !channel.user_limit) return false
+  const connected = getGuildVoiceStates(db, channel.guild_id).filter(
+    (state) => state.channel_id === channelId && state.user_id !== userId
+  ).length
+  if (connected < channel.user_limit) return false
+  const scoped = { ...channel, guild_id: channel.guild_id }
+  return ![userId, actorId].some((id) => {
+    const resolved = computeChannelPermissions(db, scoped, id)
+    return resolved !== null && (resolved.permissions & MOVE_MEMBERS) !== 0n
+  })
+}
+
 /** Applies a validated patch after checking every referenced entity. */
 function applyTestGuildVoiceState(
   db: Database,
   guildId: string,
   userId: string,
-  payload: TestVoiceStatePatch
-): VoiceStateFixtureMutation | VoiceStateFixtureError {
+  payload: TestVoiceStatePatch,
+  actorId?: string
+): VoiceStateFixtureMutation | VoiceStateWriteError {
   return runInTransaction(db, () => {
     if (!db.prepare('SELECT 1 FROM guilds WHERE id = ?').get(guildId))
       return 'UNKNOWN_GUILD'
@@ -126,6 +162,12 @@ function applyTestGuildVoiceState(
         .get(channelId) as { guild_id: string | null; type: number } | undefined
       if (channel?.guild_id !== guildId) return 'UNKNOWN_CHANNEL'
       if (channel.type !== 2 && channel.type !== 13) return 'INVALID_INPUT'
+      if (
+        actorId !== undefined &&
+        channelId !== existing?.channel_id &&
+        isChannelFullFor(db, channelId, userId, actorId)
+      )
+        return 'CHANNEL_FULL'
     } else if (
       payload.self_stream === true ||
       payload.self_video === true ||
@@ -210,7 +252,32 @@ export function setTestGuildVoiceState(
   input: unknown
 ): VoiceStateFixtureMutation | VoiceStateFixtureError {
   const payload = validateTestVoiceState(input)
+  if (!payload) return 'INVALID_INPUT'
+  // Fixture writes are a privileged override: no actor, so no user limit.
+  const result = applyTestGuildVoiceState(db, guildId, userId, payload)
+  return result === 'CHANNEL_FULL' ? 'INVALID_INPUT' : result
+}
+
+/**
+ * Validates and applies a REST voice-state write performed by `actorId`.
+ * Unlike the fixture API, joins and moves honour the target channel's
+ * `user_limit` (see `isChannelFullFor`).
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - User whose voice state changes
+ * @param input - Untrusted voice-state patch
+ * @param actorId - REST caller (bot user ID)
+ * @returns The committed mutation, or a failure code
+ */
+export function setRestGuildVoiceState(
+  db: Database,
+  guildId: string,
+  userId: string,
+  input: unknown,
+  actorId: string
+): VoiceStateFixtureMutation | VoiceStateWriteError {
+  const payload = validateTestVoiceState(input)
   return payload
-    ? applyTestGuildVoiceState(db, guildId, userId, payload)
+    ? applyTestGuildVoiceState(db, guildId, userId, payload, actorId)
     : 'INVALID_INPUT'
 }

@@ -199,6 +199,19 @@ export function registerGatewaySubscriptions(
       GatewayIntentBits.Guilds
     )
   }
+  const onGuildUpdate: Parameters<typeof gatewayBus.on<'guild.update'>>[1] = (
+    payload
+  ) => {
+    if (payload.scope.db !== db) return
+    broadcastToBot(
+      manager,
+      payload.scope.botId,
+      'GUILD_UPDATE',
+      payload.guild,
+      GatewayIntentBits.Guilds,
+      payload.scope.token
+    )
+  }
   const onChannelCreate: Parameters<
     typeof gatewayBus.on<'channel.create'>
   >[1] = (payload) => {
@@ -336,6 +349,7 @@ export function registerGatewaySubscriptions(
   gatewayBus.on('message.reaction.remove.all', onReactionRemoveAll)
   gatewayBus.on('message.reaction.remove.emoji', onReactionRemoveEmoji)
   gatewayBus.on('guild.create', onGuildCreate)
+  gatewayBus.on('guild.update', onGuildUpdate)
   gatewayBus.on('channel.create', onChannelCreate)
   gatewayBus.on('channel.update', onChannelUpdate)
   gatewayBus.on('channel.delete', onChannelDelete)
@@ -358,6 +372,7 @@ export function registerGatewaySubscriptions(
     gatewayBus.off('message.reaction.remove.all', onReactionRemoveAll)
     gatewayBus.off('message.reaction.remove.emoji', onReactionRemoveEmoji)
     gatewayBus.off('guild.create', onGuildCreate)
+    gatewayBus.off('guild.update', onGuildUpdate)
     gatewayBus.off('channel.create', onChannelCreate)
     gatewayBus.off('channel.update', onChannelUpdate)
     gatewayBus.off('channel.delete', onChannelDelete)

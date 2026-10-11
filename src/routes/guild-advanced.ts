@@ -5,7 +5,7 @@ import { validateAuditLogQuery } from '../validators/audit-log'
 import type { Context, MiddlewareHandler } from 'hono'
 import type { Database } from '../db'
 import { runInTransaction } from '../db'
-import { DiscordErrorCode, validationError } from '../errors'
+import { DiscordErrorCode, discordError, validationError } from '../errors'
 import type { AppEnv } from '../middleware/auth'
 import { parseJsonBody } from '../lib/route-helpers'
 import { getGuild } from '../services/guilds'
@@ -211,7 +211,13 @@ async function patchGuildVoiceState(
   userId: string
 ): Promise<Response> {
   const payload = await c.req.json<unknown>().catch(() => undefined)
-  const result = setGuildVoiceState(db, guildId, userId, payload)
+  const result = setGuildVoiceState(
+    db,
+    guildId,
+    userId,
+    payload,
+    c.get('bot')?.user_id ?? ''
+  )
   if (typeof result !== 'string') {
     publishGuildVoiceStateMutation(db, result)
     return c.body(null, 204)
@@ -224,6 +230,16 @@ async function patchGuildVoiceState(
         },
       }).body,
       400
+    )
+  // A full channel admits only MOVE_MEMBERS holders.
+  if (result === 'CHANNEL_FULL')
+    return c.json(
+      discordError(
+        DiscordErrorCode.MISSING_PERMISSIONS,
+        'Missing Permissions',
+        403
+      ).body,
+      403
     )
   const errors = {
     UNKNOWN_GUILD: [DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild'],

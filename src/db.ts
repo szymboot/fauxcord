@@ -46,6 +46,34 @@ function migrateChannelsThreadColumns(db: Database): void {
 const CHANNELS_FEATURE_COLUMNS: Record<string, string> = {
   voice_status: 'TEXT',
   typing_at: 'TEXT',
+  // Voice/stage settings; NULL means Discord's default for the channel type.
+  bitrate: 'INTEGER',
+  user_limit: 'INTEGER',
+  rtc_region: 'TEXT',
+  video_quality_mode: 'INTEGER',
+}
+
+/** Guild AFK settings added after the initial guild schema. */
+const GUILDS_AFK_COLUMNS: Record<string, string> = {
+  afk_channel_id: 'TEXT REFERENCES channels(id) ON DELETE SET NULL',
+  afk_timeout: 'INTEGER NOT NULL DEFAULT 300',
+}
+
+/**
+ * Adds the guild AFK columns to an existing `guilds` table when missing.
+ * @param db - Database instance
+ */
+function migrateGuildAfkColumns(db: Database): void {
+  const existing = new Set(
+    (db.prepare('PRAGMA table_info(guilds)').all() as { name: string }[]).map(
+      (col) => col.name
+    )
+  )
+  for (const [name, ddl] of Object.entries(GUILDS_AFK_COLUMNS)) {
+    if (!existing.has(name)) {
+      db.exec(`ALTER TABLE guilds ADD COLUMN ${name} ${ddl}`)
+    }
+  }
 }
 
 /**
@@ -218,6 +246,8 @@ export function initializeDatabase(dbPath: string): Database {
       explicit_content_filter         INTEGER NOT NULL DEFAULT 0,
       premium_tier                    INTEGER NOT NULL DEFAULT 0,
       preferred_locale                TEXT NOT NULL DEFAULT 'en-US',
+      afk_channel_id                  TEXT REFERENCES channels(id) ON DELETE SET NULL,
+      afk_timeout                     INTEGER NOT NULL DEFAULT 300,
       created_at                      TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -276,6 +306,10 @@ export function initializeDatabase(dbPath: string): Database {
       archive_timestamp     TEXT,
       voice_status          TEXT,
       typing_at             TEXT,
+      bitrate               INTEGER,
+      user_limit            INTEGER,
+      rtc_region            TEXT,
+      video_quality_mode    INTEGER,
       created_at            TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -1006,6 +1040,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateMemberPremiumSince(db)
   migrateChannelsThreadColumns(db)
   migrateChannelsFeatureColumns(db)
+  migrateGuildAfkColumns(db)
   migrateInteractionLocale(db)
   migrateInteractionCallbackType(db)
   migrateRestFaultSelectors(db)

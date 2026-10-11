@@ -89,7 +89,8 @@ export const CHANNEL_LIMITS = {
 } as const
 
 /** Channel update (PATCH) payload (unknown fields until validated) */
-export interface ChannelUpdatePayload {
+export interface ChannelUpdatePayload extends VoiceChannelSettingsPayload {
+  type?: unknown
   name?: unknown
   topic?: unknown
   nsfw?: unknown
@@ -330,4 +331,157 @@ export function validateVoiceStatus(
   }
 
   return errors
+}
+
+/** Voice and stage channel setting limits (from the Discord docs). */
+export const VOICE_CHANNEL_LIMITS = {
+  BITRATE_MIN: 8000,
+  /** Voice channel bitrate ceiling indexed by guild boost tier (0-3). */
+  VOICE_BITRATE_MAX_BY_TIER: [96_000, 128_000, 256_000, 384_000],
+  STAGE_BITRATE_MAX: 64_000,
+  VOICE_USER_LIMIT_MAX: 99,
+  STAGE_USER_LIMIT_MAX: 10_000,
+  VIDEO_QUALITY_MODES: [1, 2],
+  /** Discord's default bitrate for new voice and stage channels. */
+  DEFAULT_BITRATE: 64_000,
+} as const
+
+/** Voice/stage channel settings (unknown fields until validated). */
+export interface VoiceChannelSettingsPayload {
+  bitrate?: unknown
+  user_limit?: unknown
+  rtc_region?: unknown
+  video_quality_mode?: unknown
+}
+
+/** Validated voice/stage channel settings; null restores the default. */
+export interface VoiceChannelSettings {
+  bitrate?: number | null
+  user_limit?: number | null
+  rtc_region?: string | null
+  video_quality_mode?: number | null
+}
+
+/**
+ * Builds an integer range error in Discord's form-body format.
+ * @param min - Inclusive lower bound
+ * @param max - Inclusive upper bound
+ * @returns Field error object
+ */
+function intRangeError(min: number, max: number): FieldError {
+  return {
+    code: 'NUMBER_TYPE_MAX',
+    message: `Must be an integer between ${min} and ${max}.`,
+  }
+}
+
+/**
+ * Validates voice/stage channel settings for a channel of the given type.
+ * Bitrate is at least 8000 and at most 96000/128000/256000/384000 for voice
+ * channels by boost tier 0-3 (the `VIP_REGIONS` feature is not modeled) or
+ * 64000 for stage channels; `user_limit` is 0-99 for voice and 0-10000 for
+ * stage channels; `rtc_region` is a voice region ID from `GET /voice/regions`
+ * or null (automatic); `video_quality_mode` is 1 (auto) or 2 (full). Null
+ * restores each field's default.
+ * @param payload - Untrusted settings
+ * @param channelType - Voice (2) or stage (13) channel type
+ * @param premiumTier - Guild boost tier (0-3)
+ * @param regionIds - Accepted voice region IDs
+ * @returns Validation error map (empty when valid)
+ */
+export function validateVoiceChannelSettings(
+  payload: VoiceChannelSettingsPayload,
+  channelType: number,
+  premiumTier: number,
+  regionIds: readonly string[]
+): ValidationErrors {
+  const errors: ValidationErrors = {}
+  const stage = channelType === 13
+  const isInt = (value: unknown, min: number, max: number) =>
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= min &&
+    value <= max
+
+  const bitrateMax = stage
+    ? VOICE_CHANNEL_LIMITS.STAGE_BITRATE_MAX
+    : (VOICE_CHANNEL_LIMITS.VOICE_BITRATE_MAX_BY_TIER[premiumTier] ??
+      VOICE_CHANNEL_LIMITS.VOICE_BITRATE_MAX_BY_TIER[0])
+  if (
+    payload.bitrate !== undefined &&
+    payload.bitrate !== null &&
+    !isInt(payload.bitrate, VOICE_CHANNEL_LIMITS.BITRATE_MIN, bitrateMax)
+  ) {
+    errors.bitrate = {
+      _errors: [intRangeError(VOICE_CHANNEL_LIMITS.BITRATE_MIN, bitrateMax)],
+    }
+  }
+
+  const userLimitMax = stage
+    ? VOICE_CHANNEL_LIMITS.STAGE_USER_LIMIT_MAX
+    : VOICE_CHANNEL_LIMITS.VOICE_USER_LIMIT_MAX
+  if (
+    payload.user_limit !== undefined &&
+    payload.user_limit !== null &&
+    !isInt(payload.user_limit, 0, userLimitMax)
+  ) {
+    errors.user_limit = { _errors: [intRangeError(0, userLimitMax)] }
+  }
+
+  if (
+    payload.rtc_region !== undefined &&
+    payload.rtc_region !== null &&
+    (typeof payload.rtc_region !== 'string' ||
+      !regionIds.includes(payload.rtc_region))
+  ) {
+    errors.rtc_region = {
+      _errors: [
+        {
+          code: 'BASE_TYPE_CHOICES',
+          message: `Value must be one of (${regionIds.join(', ')}).`,
+        },
+      ],
+    }
+  }
+
+  if (
+    payload.video_quality_mode !== undefined &&
+    payload.video_quality_mode !== null &&
+    VOICE_CHANNEL_LIMITS.VIDEO_QUALITY_MODES.every(
+      (mode) => mode !== payload.video_quality_mode
+    )
+  ) {
+    errors.video_quality_mode = {
+      _errors: [
+        { code: 'BASE_TYPE_CHOICES', message: 'Value must be one of (1, 2).' },
+      ],
+    }
+  }
+
+  return errors
+}
+
+/**
+ * Picks the voice settings present in a payload that already passed
+ * `validateVoiceChannelSettings`.
+ * @param payload - Validated payload
+ * @returns Only the provided settings, typed
+ */
+export function pickVoiceChannelSettings(
+  payload: VoiceChannelSettingsPayload
+): VoiceChannelSettings {
+  return {
+    ...(payload.bitrate !== undefined && {
+      bitrate: payload.bitrate as number | null,
+    }),
+    ...(payload.user_limit !== undefined && {
+      user_limit: payload.user_limit as number | null,
+    }),
+    ...(payload.rtc_region !== undefined && {
+      rtc_region: payload.rtc_region as string | null,
+    }),
+    ...(payload.video_quality_mode !== undefined && {
+      video_quality_mode: payload.video_quality_mode as number | null,
+    }),
+  }
 }

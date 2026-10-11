@@ -20,7 +20,55 @@ export const GUILD_LIMITS = {
   ROLES_MAX: 250,
   WEBHOOKS_PER_CHANNEL_MAX: 15,
   WEBHOOKS_TOTAL_MAX: 1000,
+  /** Accepted `afk_timeout` values in seconds. */
+  AFK_TIMEOUTS: [60, 300, 900, 1800, 3600],
 } as const
+
+/**
+ * Validates guild AFK settings. `afk_timeout` must be one of 60, 300, 900,
+ * 1800 or 3600 seconds; `afk_channel_id`, when not null, must be a string
+ * accepted by `isAfkChannel` (a voice channel in the same guild).
+ * @param payload - Untrusted AFK fields
+ * @param payload.afk_channel_id - Candidate AFK channel ID or null
+ * @param payload.afk_timeout - Candidate AFK timeout in seconds
+ * @param isAfkChannel - Checks whether a channel ID is a valid AFK channel
+ * @returns Validation error map (empty when valid)
+ */
+export function validateGuildAfk(
+  payload: { afk_channel_id?: unknown; afk_timeout?: unknown },
+  isAfkChannel: (channelId: string) => boolean
+): ValidationErrors {
+  const invalidTimeout =
+    payload.afk_timeout !== undefined &&
+    GUILD_LIMITS.AFK_TIMEOUTS.every((value) => value !== payload.afk_timeout)
+  const invalidChannel =
+    payload.afk_channel_id !== undefined &&
+    payload.afk_channel_id !== null &&
+    (typeof payload.afk_channel_id !== 'string' ||
+      !isAfkChannel(payload.afk_channel_id))
+  return {
+    ...(invalidTimeout && {
+      afk_timeout: {
+        _errors: [
+          {
+            code: 'BASE_TYPE_CHOICES',
+            message: `Value must be one of (${GUILD_LIMITS.AFK_TIMEOUTS.join(', ')}).`,
+          },
+        ],
+      },
+    }),
+    ...(invalidChannel && {
+      afk_channel_id: {
+        _errors: [
+          {
+            code: 'CHANNEL_TYPE_INVALID',
+            message: 'Must be a voice channel in this guild.',
+          },
+        ],
+      },
+    }),
+  }
+}
 
 /** Channel creation request type */
 export interface ChannelCreatePayload {
@@ -30,6 +78,11 @@ export interface ChannelCreatePayload {
   nsfw?: boolean
   parent_id?: string | null
   position?: number | null
+  /** Voice/stage settings; validated by validateVoiceChannelSettings. */
+  bitrate?: unknown
+  user_limit?: unknown
+  rtc_region?: unknown
+  video_quality_mode?: unknown
 }
 
 /** Role creation request type */

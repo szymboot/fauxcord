@@ -47,10 +47,16 @@ curl -X POST http://localhost:3000/_test/setup \
 | `guilds[].icon`            | —        | Opaque icon hash string or null; default: null           |
 | `guilds[].owner_id`        | —        | Registered non-bot user ID; defaults to the setup bot    |
 | `guilds[].premium_tier`    | —        | Integer boost tier (`0`, `1`, `2`, or `3`); default: `0` |
+| `guilds[].afk_channel_id`  | —        | Voice channel (type `2`) of this guild, or null; default: null |
+| `guilds[].afk_timeout`     | —        | `60`, `300`, `900`, `1800` or `3600` seconds; default: `300` |
 | `guilds[].channels`        | —        | Array of channels to create                              |
 | `guilds[].channels[].id`   | —        | Channel ID (auto-generated if omitted)                   |
 | `guilds[].channels[].name` | ✅       | Channel name                                             |
 | `guilds[].channels[].type` | —        | Channel type (`0`: text, default: `0`; a reused channel ID keeps its stored type when omitted) |
+| `guilds[].channels[].bitrate`            | — | Voice/stage only: bits per second; default `64000` |
+| `guilds[].channels[].user_limit`         | — | Voice/stage only: `0` (unlimited) to `99` (voice) or `10000` (stage); default `0` |
+| `guilds[].channels[].rtc_region`         | — | Voice/stage only: a `GET /voice/regions` ID, or null (automatic); default null |
+| `guilds[].channels[].video_quality_mode` | — | Voice/stage only: `1` (auto) or `2` (full); default unset |
 
 **Response**: The setup result (including any auto-generated IDs)
 
@@ -67,6 +73,50 @@ stage (`2` ↔ `13`) remains a privileged fixture override. The ordinary Discord
 `PATCH /channels/{channel.id}` rejects any `type` change on a voice or stage
 channel and any change into one with `50035` (`BASE_TYPE_CHOICES`); other
 `type` values there are still ignored.
+
+### Voice channel settings and guild AFK fields
+
+Voice (`2`) and stage (`13`) channels always carry `bitrate`, `user_limit` and
+`rtc_region` in REST responses, `CHANNEL_CREATE`/`CHANNEL_UPDATE` and the
+`GUILD_CREATE` channel list, with Discord's defaults `64000`, `0` and `null`.
+`video_quality_mode` appears only once set, as on Discord ("1 when not
+present"). Other channel types never carry these fields. Guilds always carry
+`afk_channel_id` (default `null`) and `afk_timeout` (default `300`).
+
+Setup validates these fields with Discord's ranges from
+[Modify Channel](https://docs.discord.com/developers/resources/channel#modify-channel)
+and [Modify Guild](https://docs.discord.com/developers/resources/guild#modify-guild):
+`bitrate` is at least `8000` and at most `96000`, `128000`, `256000` or
+`384000` for voice channels at boost tier 0-3 (the stored `premium_tier`;
+the `VIP_REGIONS` feature is not modeled) and `64000` for stage channels;
+`user_limit` is at most `99` for voice and `10000` for stage channels;
+`video_quality_mode` is `1` or `2`; `afk_timeout` is one of `60`, `300`, `900`,
+`1800`, `3600`; `afk_channel_id` must be a voice channel (type `2`) of the same
+guild, which may be defined in the same setup request. Voice settings on other
+channel types and invalid values return `400` with a `message` and
+Discord-style field `errors`, with no partial fixture state or Gateway events.
+When setup reuses an ID, omitted fields keep their stored values and `null`
+restores the default (or clears `afk_channel_id`).
+
+The ordinary Discord routes accept the same fields: `POST
+/guilds/{guild.id}/channels` and `PATCH /channels/{channel.id}` (voice settings
+are ignored for other channel types, as on Discord; invalid values return
+`50035`), and `PATCH /guilds/{guild.id}` (`afk_channel_id`, `afk_timeout`).
+A successful guild modification that changes the guild dispatches native
+`GUILD_UPDATE` (the plain guild object) to the owning bot's sessions with the
+`Guilds` intent. Deleting the AFK channel clears `afk_channel_id`; no
+`GUILD_UPDATE` is sent for that implicit change.
+
+`user_limit` is enforced only on the ordinary REST voice-state routes
+(`PATCH /guilds/{guild.id}/voice-states/@me` and `/{user.id}`), which
+Fauxcord lets join or move users: a join or move into a channel already
+holding `user_limit` connected users returns `403` (`50013`) unless the joining
+user or the calling bot has `MOVE_MEMBERS` in that channel (owners and
+administrators always do). The voice-state fixture API below remains a
+privileged override and never checks the limit, so fixtures can model any
+occupancy. AFK auto-moves (Discord moving idle users into the AFK channel
+after `afk_timeout`) depend on client idle detection and are not simulated;
+use the fixture API to move a user into the AFK channel explicitly.
 
 To seed a guild icon, pass `guilds[].icon`, for example
 `"a_0123456789abcdef0123456789abcdef"`. The value is stored verbatim and appears

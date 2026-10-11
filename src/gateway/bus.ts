@@ -69,6 +69,11 @@ export interface GatewayBusEvents {
     scope: { db: Database; botId: string; token: string }
   }
   'guild.create': { guild: Record<string, unknown> }
+  'guild.update': {
+    guild: Record<string, unknown>
+    /** Exact setup scope of the updated guild. */
+    scope: { db: Database; botId: string; token: string }
+  }
   'channel.create': { channel: Record<string, unknown> }
   'channel.update': {
     channel: Record<string, unknown>
