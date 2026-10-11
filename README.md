@@ -196,6 +196,18 @@ client logs in again with IDENTIFY and receives fresh `READY`/`GUILD_CREATE`
 snapshots. Keyed recovery, cleanup and a long-poll observation of the
 replacement IDENTIFY are described in the
 [test API documentation](./docs/test-api.md#forced-re-identify-of-a-live-gateway-session).
+With `"trigger": "resume"` it instead rejects the session's next RESUME
+(op 9 `d: false`, buffered events discarded), so a client that dropped its
+connection must re-IDENTIFY; see
+[Failed RESUME](./docs/test-api.md#failed-resume-trigger-resume).
+
+### Simulate a zombie Gateway connection
+
+`POST /_test/gateway-zombie-connections` keeps one session's socket open but
+stops HEARTBEAT_ACKs and dispatches to it (events are buffered for RESUME),
+until the client detects the missing ACK, closes and RESUMEs. Evidence covers
+the start, last ACK, client close, RESUME and replayed sequences; see
+[Zombie Gateway connections](./docs/test-api.md#zombie-gateway-connections).
 
 ### Inspect channel messages (for testing)
 

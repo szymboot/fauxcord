@@ -48,6 +48,8 @@ import { GatewayEventControls } from './gateway/event-controls'
 import { createGatewayEventControlRoutes } from './routes/gateway-event-controls'
 import { GatewaySessionInvalidations } from './gateway/session-invalidations'
 import { createGatewaySessionInvalidationRoutes } from './routes/gateway-session-invalidations'
+import { GatewayZombieConnections } from './gateway/zombie-connections'
+import { createGatewayZombieConnectionRoutes } from './routes/gateway-zombie-connections'
 import { createTestRoutes } from './routes/test'
 import { createMockRoutes } from './routes/mock'
 import { createGatewayWebSocketHandler } from './gateway/server'
@@ -117,20 +119,27 @@ export function buildApp(
     db,
     gatewayHandler.sessionManager
   )
+  const zombieConnections = new GatewayZombieConnections(
+    db,
+    gatewayHandler.sessionManager
+  )
   /** Applies setup/guild lifecycle cleanup to every Gateway test control. */
   const gatewayControls = {
     reset: (token?: string): void => {
       eventControls.reset(token)
       sessionInvalidations.reset(token)
+      zombieConnections.reset(token)
     },
     deleteGuild: (guildId: string): void => {
       eventControls.deleteGuild(guildId)
       sessionInvalidations.deleteGuild(guildId)
+      zombieConnections.deleteGuild(guildId)
     },
   }
   // Test control APIs require no authentication
   app.route('/', createGatewayEventControlRoutes(eventControls))
   app.route('/', createGatewaySessionInvalidationRoutes(sessionInvalidations))
+  app.route('/', createGatewayZombieConnectionRoutes(zombieConnections))
   app.route(
     '/',
     createTestRoutes(db, config.baseUrl, config.uploadPath, gatewayControls)

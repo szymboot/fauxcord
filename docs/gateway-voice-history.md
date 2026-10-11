@@ -48,6 +48,11 @@ distinct from RESUME, which follows the existing replay behavior and does not
 rebuild `GUILD_CREATE` snapshots. To make an already connected client
 re-IDENTIFY without restarting it, use
 [`POST /_test/gateway-session-invalidations`](test-api.md#forced-re-identify-of-a-live-gateway-session).
+To make a reconnecting client's RESUME fail so it rebuilds state from a fresh
+snapshot after a gap, arm it with
+[`"trigger": "resume"`](test-api.md#failed-resume-trigger-resume); a silent
+gap before detection can be produced with a
+[zombie connection](test-api.md#zombie-gateway-connections).
 
 `POST /_test/reset` clears voice fixtures while retaining bot, guild, channel,
 and member registrations. A nonempty `token` limits cleanup to that setup's

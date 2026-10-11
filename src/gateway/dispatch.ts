@@ -33,6 +33,13 @@ export function writeDispatch(
     observe?.('buffered')
     return
   }
+  // A silenced (test zombie) connection stays open but receives nothing; the
+  // envelope is already in the replay buffer, exactly as for a closed socket.
+  if (manager.isSilenced(session.ws)) {
+    manager.observeSilencedDispatch?.(session, payload)
+    observe?.('buffered')
+    return
+  }
   observe?.('queued')
   try {
     if (observe) {

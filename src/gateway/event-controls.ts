@@ -594,7 +594,12 @@ export class GatewayEventControls {
     this.prune()
     const control = this.controls.get(id)
     if (!control) return 'UNKNOWN_SCOPE'
-    if (control.awaiting_resume || control.socket.readyState !== WebSocket.OPEN)
+    // A silenced (zombie) connection cannot receive RECONNECT either.
+    if (
+      control.awaiting_resume ||
+      control.socket.readyState !== WebSocket.OPEN ||
+      this.manager.isSilenced(control.socket)
+    )
       return 'INVALID_STATE'
     if (control.operations >= 100) return 'LIMIT'
     control.operations += 1
@@ -620,6 +625,9 @@ export class GatewayEventControls {
     control.pause_resume = false
     const pending = control.pending_resume
     control.pending_resume = undefined
+    // A retried RESUME rejected by an armed session invalidation removes the
+    // session and this control with it; report the opened gate regardless.
+    const opened = this.inspect(id)
     if (pending) {
       pending.socket.off('close', pending.onClose)
       if (
@@ -628,7 +636,7 @@ export class GatewayEventControls {
       )
         pending.retry()
     }
-    return this.inspect(id) ?? 'UNKNOWN_SCOPE'
+    return this.inspect(id) ?? opened ?? 'UNKNOWN_SCOPE'
   }
 
   /** Installs one bounded listener per controlled socket. */

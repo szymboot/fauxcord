@@ -393,6 +393,43 @@ function handleIdentify(
 }
 
 /**
+ * Lets an armed test control reject an authenticated RESUME with
+ * INVALID_SESSION (`d: false`); the control discards the session itself.
+ * @param sessionManager - Session manager
+ * @param session - Session named by the RESUME
+ * @param ws - Connection the RESUME arrived on
+ * @param data - The RESUME payload
+ * @param replay - Events the RESUME would replay, or undefined when unavailable
+ * @returns true when the RESUME was rejected and op 9 was written
+ */
+function forceResumeRejection(
+  sessionManager: SessionManager,
+  session: Session,
+  ws: WSContext,
+  data: ResumeData,
+  replay: ReturnType<SessionManager['replayFrom']>
+): boolean {
+  const observe = sessionManager.rejectResume?.(session, {
+    socket: ws.raw as never,
+    clientSequence: data.seq,
+    replay,
+  })
+  if (!observe) return false
+  observe('queued')
+  try {
+    ;(ws.raw as Session['ws']).send(
+      encodePayload({ op: GatewayOp.InvalidSession, d: false }),
+      (error) => {
+        observe(error ? 'failed' : 'sent')
+      }
+    )
+  } catch {
+    observe('failed')
+  }
+  return true
+}
+
+/**
  * Handles RESUME (op6).
  * @param sessionManager - Session manager
  * @param sessionIdByWs - Map of WSContext to sessionId
@@ -413,7 +450,8 @@ function handleResume(
   }
   const replay = sessionManager.replayFrom(session, data.seq)
   if (!replay) {
-    ws.send(encodePayload({ op: GatewayOp.InvalidSession, d: false }))
+    if (!forceResumeRejection(sessionManager, session, ws, data, replay))
+      ws.send(encodePayload({ op: GatewayOp.InvalidSession, d: false }))
     return
   }
   if (
@@ -422,6 +460,8 @@ function handleResume(
     })
   )
     return
+  if (forceResumeRejection(sessionManager, session, ws, data, replay)) return
+  const previousSocket = session.ws
   sessionManager.establishConnection(ws.raw as never)
   const previousSessionId = sessionIdByWs.get(ws)
   if (
@@ -445,6 +485,12 @@ function handleResume(
   // RESUMED is itself a Dispatch, so it consumes a distinct sequence number
   // after every replayed dispatch and is retained for any subsequent resume.
   sendDispatch(sessionManager, session, 'RESUMED', {})
+  sessionManager.observeResume?.(session, {
+    previousSocket,
+    clientSequence: data.seq,
+    replayedSequences: replay.map((entry) => entry.seq),
+    resumedSequence: session.seq,
+  })
 }
 
 /**
@@ -453,20 +499,32 @@ function handleResume(
  * @param sessionManager - Session manager
  * @param sessionIdByWs - Map of WSContext to sessionId
  * @param ws - The connected WebSocket context
+ * @param sequence - The heartbeat's `d` (client's last received sequence)
  */
 function handleHeartbeat(
   sessionManager: SessionManager,
   sessionIdByWs: WeakMap<WSContext, string>,
-  ws: WSContext
+  ws: WSContext,
+  sequence: unknown
 ): void {
   const sessionId = sessionIdByWs.get(ws)
   const session = sessionId ? sessionManager.get(sessionId) : undefined
-  ws.send(encodePayload({ op: GatewayOp.HeartbeatAck, d: null }))
+  // A silenced (test zombie) connection never gets HEARTBEAT_ACK, but its
+  // heartbeats still arrive and keep the session alive below, so the server's
+  // own timeout cannot reap the session before the client detects the zombie.
+  if (session && sessionManager.isSilenced(ws.raw as never)) {
+    sessionManager.observeSilencedHeartbeat?.(session, sequence)
+  } else {
+    ws.send(encodePayload({ op: GatewayOp.HeartbeatAck, d: null }))
+  }
   if (!session) {
     return
   }
 
-  session.lastHeartbeatAt = Date.now()
+  const now = Date.now()
+  session.lastHeartbeatAt = now
+  if (!sessionManager.isSilenced(ws.raw as never))
+    session.lastHeartbeatAckAt = now
   armHeartbeatTimeout(sessionManager, ws, session.sessionId)
 }
 
@@ -531,7 +589,7 @@ export function createGatewayWebSocketHandler(
           break
         }
         case GatewayOp.Heartbeat: {
-          handleHeartbeat(sessionManager, sessionIdByWs, ws)
+          handleHeartbeat(sessionManager, sessionIdByWs, ws, payload.d)
           break
         }
         default: {
