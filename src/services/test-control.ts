@@ -278,7 +278,8 @@ function assertStableChannelIdentity(
  * @throws Error with CONFLICT for duplicate tokens, INVALID_OWNER_ID for
  * malformed owner IDs, INVALID_GUILD_ICON for malformed icon hashes,
  * INVALID_GUILD_PREMIUM_TIER for invalid boost tiers, UNKNOWN_USER for
- * missing owners, BOT_OWNER for bots, INVALID_CHANNEL_TYPE_CHANGE for
+ * missing owners, BOT_OWNER for bots, INVALID_CHANNEL_TYPE for non-integer
+ * channel types, INVALID_CHANNEL_TYPE_CHANGE for
  * voice-capable <-> other type changes, or VOICE_CHANNEL_GUILD_CHANGE for
  * cross-guild moves of voice-capable channels
  */
@@ -460,6 +461,13 @@ export function setupTestEnvironment(
 
       const channelRequests = guildReq.channels ?? []
       for (const channelReq of channelRequests) {
+        if (
+          channelReq.type !== undefined &&
+          (typeof channelReq.type !== 'number' ||
+            !Number.isSafeInteger(channelReq.type) ||
+            channelReq.type < 0)
+        )
+          throw new Error('INVALID_CHANNEL_TYPE')
         const channelId = channelReq.id ?? generateSnowflake()
         const existingChannel = db
           .prepare('SELECT guild_id, type FROM channels WHERE id = ?')

@@ -754,6 +754,46 @@ describe('Voice channel and guild AFK fields', () => {
       expect(await readStatus(restJoin(listenerId))).toBe(204)
     })
 
+    it.each([
+      ['an active', 403],
+      ['an expired', 204],
+    ])(
+      'applies MOVE_MEMBERS from a member with %s timeout accordingly',
+      async (_label, status) => {
+        await humanOwnedGuild()
+        expect(await readStatus(restJoin(humanId))).toBe(204)
+        const overwrite = await context.app.request(
+          `/api/v10/channels/${voiceId}/permissions/${listenerId}`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: 'Bot limited',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ type: 1, allow: MOVE_MEMBERS, deny: '0' }),
+          }
+        )
+        expect(overwrite.status).toBe(204)
+        const until = new Date(
+          Date.now() + (status === 403 ? 3_600_000 : -3_600_000)
+        ).toISOString()
+        context.db
+          .prepare(
+            'UPDATE guild_members SET communication_disabled_until = ? WHERE guild_id = ? AND user_id = ?'
+          )
+          .run(until, guildId, listenerId)
+        const before = snapshot()
+        const emit = vi.spyOn(gatewayBus, 'emit')
+        expect(await readStatus(restJoin(listenerId))).toBe(status)
+        if (status !== 403) {
+          return
+        }
+
+        expect(snapshot()).toEqual(before)
+        expect(emit).not.toHaveBeenCalled()
+      }
+    )
+
     it('lets the fixture API bypass the user limit', async () => {
       await humanOwnedGuild()
       expect(await readStatus(fixtureJoin(humanId))).toBe(200)

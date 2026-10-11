@@ -6,6 +6,8 @@ import type { ChannelObject } from './channels'
 const ADMINISTRATOR = 1n << 3n
 /** MOVE_MEMBERS permission bit (also bypasses voice channel user limits). */
 export const MOVE_MEMBERS = 1n << 24n
+/** Permissions a timed-out member keeps: VIEW_CHANNEL and READ_MESSAGE_HISTORY. */
+const TIMED_OUT_PERMISSIONS = (1n << 10n) | (1n << 16n)
 /** Every permission bit, granted to owners and administrators. */
 export const ALL_PERMISSIONS = (1n << 64n) - 1n
 
@@ -25,7 +27,9 @@ export interface ChannelPermissions {
  * Discord's algorithm: base role permissions are combined, then the
  * `@everyone` overwrite, the member's role overwrites, and finally the
  * member's own overwrite are applied. Owners and administrators receive every
- * permission regardless of channel overwrites.
+ * permission regardless of channel overwrites and timeouts; other members
+ * with an active timeout keep only VIEW_CHANNEL and READ_MESSAGE_HISTORY
+ * (https://docs.discord.com/developers/topics/permissions#permissions-for-timed-out-members).
  * @param db - Database
  * @param channel - Guild channel (`guild_id` must be set)
  * @param userId - User whose permissions are resolved
@@ -47,8 +51,11 @@ export function computeChannelPermissions(
     return { permissions: ALL_PERMISSIONS, administrator: true }
 
   const member = db
-    .prepare('SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ?')
-    .get(guildId, userId)
+    .prepare(
+      'SELECT communication_disabled_until FROM guild_members WHERE guild_id = ? AND user_id = ?'
+    )
+    .get(guildId, userId) as
+    { communication_disabled_until: string | null } | undefined
   if (!member) return null
 
   const roles = db
@@ -93,6 +100,11 @@ export function computeChannelPermissions(
   if (personal)
     permissions =
       (permissions & ~BigInt(personal.deny)) | BigInt(personal.allow)
+
+  const timedOut =
+    member.communication_disabled_until !== null &&
+    Date.parse(member.communication_disabled_until) > Date.now()
+  if (timedOut) permissions &= TIMED_OUT_PERMISSIONS
 
   return { permissions, administrator: false }
 }

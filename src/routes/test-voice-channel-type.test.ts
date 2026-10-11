@@ -94,6 +94,30 @@ describe('Voice channel type stability', () => {
     }
   )
 
+  it.each([
+    [textId, '2'],
+    [textId, '13'],
+    [voiceId, '0'],
+    [textId, 1.5],
+    [textId, -1],
+  ])(
+    'rejects channel %s with non-integer type %o atomically',
+    async (channelId, type) => {
+      const before = snapshot()
+      const emit = vi.spyOn(gatewayBus, 'emit')
+      const response = await setup('Bot second', [
+        { id: channelId, name: 'renamed', type },
+      ])
+      expect(response.status).toBe(400)
+      await expect(response.json()).resolves.toEqual({
+        message: 'Channel type must be a non-negative integer',
+        code: 0,
+      })
+      expect(snapshot()).toEqual(before)
+      expect(emit).not.toHaveBeenCalled()
+    }
+  )
+
   it('keeps voice states consistent when a voice channel stays voice-capable', async () => {
     const response = await setup('Bot second', [
       { id: voiceId, name: 'renamed-voice', type: 13 },

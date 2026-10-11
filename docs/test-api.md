@@ -63,6 +63,9 @@ curl -X POST http://localhost:3000/_test/setup \
 **Note**: Calling this twice with the same token returns `409 Conflict`.  
 For subsequent calls, delete the existing data first via `/_test/reset` or `DELETE /_test/setup/:token`.
 
+`guilds[].channels[].type` must be a non-negative integer when given; strings
+such as `"2"` return `400`.
+
 Reusing an existing channel ID updates that channel in place, with Discord's
 channel-type rules: voice (`2`) and stage (`13`) channels cannot become other
 types, other channels cannot become voice or stage channels, and a voice or
@@ -119,7 +122,8 @@ A successful guild modification that changes the guild dispatches native
 Fauxcord lets join or move users: a join or move into a channel already
 holding `user_limit` connected users returns `403` (`50013`) unless the joining
 user or the calling bot has `MOVE_MEMBERS` in that channel (owners and
-administrators always do). The voice-state fixture API below remains a
+administrators always do; a member with an active timeout keeps only
+`VIEW_CHANNEL` and `READ_MESSAGE_HISTORY`, as on Discord). The voice-state fixture API below remains a
 privileged override and never checks the limit, so fixtures can model any
 occupancy. AFK auto-moves (Discord moving idle users into the AFK channel
 after `afk_timeout`) depend on client idle detection and are not simulated;

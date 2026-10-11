@@ -237,6 +237,15 @@ export function createTestRoutes(
           400
         )
       }
+      if (err instanceof Error && err.message === 'INVALID_CHANNEL_TYPE') {
+        return c.json(
+          {
+            message: 'Channel type must be a non-negative integer',
+            code: 0,
+          },
+          400
+        )
+      }
       if (
         err instanceof Error &&
         err.message === 'INVALID_CHANNEL_TYPE_CHANGE'
