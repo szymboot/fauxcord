@@ -306,9 +306,9 @@ disconnect real Discord sends, before the member removal event:
 1. Only when the member had a connected voice/stage state. The payload has the
    same semantics as a fixture disconnect: `channel_id: null`, the previous
    voice `session_id`, `self_stream`/`self_video` `false`,
-   `request_to_speak_timestamp: null`, other flags (`deaf`, `mute`,
-   `self_mute`, `suppress`, …) unchanged, and the departing member's `member`
-   object read before deletion. Members without a voice state, or with a kept
+   `request_to_speak_timestamp: null`, server `mute`/`deaf` from the member,
+   other flags (`self_mute`, `self_deaf`, `suppress`) unchanged, and the
+   departing member's `member` object read before deletion. Members without a voice state, or with a kept
    disconnected state (`channel_id: null`), get no voice event.
 2. Only when the banned user was a member.
 3. Only when the ban is new. Banning a non-member publishes only

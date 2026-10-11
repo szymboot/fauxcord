@@ -701,6 +701,31 @@ describe('voice disconnects when members are removed', () => {
     }
   )
 
+  it.each(REMOVALS)(
+    '$name takes server mute/deaf from the member, not a divergent stored row',
+    async ({ run, expected }) => {
+      await joinVoice(ALICE, { channel_id: voice, mute: true })
+      // Legacy/direct-SQL divergence: the row contradicts the member's flags.
+      server.db
+        .prepare(
+          'UPDATE guild_voice_states SET mute = 0, deaf = 1 WHERE guild_id = ? AND user_id = ?'
+        )
+        .run(guild, ALICE)
+      const client = await connect(GatewayIntentBits.GuildVoiceStates)
+
+      expect(await run()).toBe(expected)
+
+      const frames = await drain(client)
+      expect(frames).toHaveLength(1)
+      expect(frames[0].d).toMatchObject({
+        channel_id: null,
+        mute: true,
+        deaf: false,
+        member: { mute: true, deaf: false },
+      })
+    }
+  )
+
   /** Event names a cleanup path must never publish. */
   function removalEvents(frames: Frame[]): Frame[] {
     return frames.filter((frame) =>
