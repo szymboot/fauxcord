@@ -260,7 +260,7 @@ export class GatewayEventControls {
     return Boolean(
       this.db
         .prepare(
-          'SELECT 1 FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ? AND b.user_id = ? AND b.token = ?'
+          'SELECT 1 FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ? AND g.bot_present = 1 AND b.user_id = ? AND b.token = ?'
         )
         .get(
           request.guild_id,

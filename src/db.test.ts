@@ -606,7 +606,7 @@ describe('initializeDatabase', () => {
           db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
         ).map((column) => column.name)
       expect(columns('guilds')).toEqual(
-        expect.arrayContaining(['afk_channel_id', 'afk_timeout'])
+        expect.arrayContaining(['afk_channel_id', 'afk_timeout', 'bot_present'])
       )
       expect(columns('channels')).toEqual(
         expect.arrayContaining([
@@ -619,6 +619,10 @@ describe('initializeDatabase', () => {
       expect(
         db.prepare('SELECT afk_channel_id, afk_timeout FROM guilds').get()
       ).toEqual({ afk_channel_id: null, afk_timeout: 300 })
+      // Guilds that predate the column keep their bot attached.
+      expect(db.prepare('SELECT bot_present FROM guilds').get()).toEqual({
+        bot_present: 1,
+      })
 
       // Deleting the AFK channel clears the reference; deleting the guild
       // still cascades through channels without foreign-key violations.

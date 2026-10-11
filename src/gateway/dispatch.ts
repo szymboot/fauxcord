@@ -4,6 +4,32 @@ import { encodePayload } from './protocol'
 import { hasIntent } from './intents'
 import type { DispatchTransport, Session, SessionManager } from './session'
 
+/** Dispatches whose guild is identified by `d.id` instead of `d.guild_id`. */
+const GUILD_OBJECT_EVENTS = new Set([
+  'GUILD_CREATE',
+  'GUILD_UPDATE',
+  'GUILD_DELETE',
+])
+
+/**
+ * Resolves the guild a dispatch belongs to: `guild_id`, or `id` for events
+ * whose payload is the guild itself.
+ * @param eventName - Dispatch event name
+ * @param data - Event data
+ * @returns The guild ID, or undefined for events outside any guild
+ */
+export function dispatchGuildId(
+  eventName: string,
+  data: unknown
+): string | undefined {
+  if (!data || typeof data !== 'object') return undefined
+  const record = data as { guild_id?: unknown; id?: unknown }
+  if (typeof record.guild_id === 'string') return record.guild_id
+  return GUILD_OBJECT_EVENTS.has(eventName) && typeof record.id === 'string'
+    ? record.id
+    : undefined
+}
+
 /** Combines optional transport observers into one callback. */
 function combineObservers(
   first: ((status: DispatchTransport) => void) | undefined,
@@ -68,8 +94,8 @@ export function deliverDispatch(
 
 /**
  * Sends a Dispatch (op0) event to a single session, updating its seq and
- * replay buffer. A dispatch suppressed by a simulated guild outage is dropped
- * before sequencing.
+ * replay buffer. A dispatch of a guild the session's bot left or was removed from, or
+ * one suppressed by a simulated guild outage, is dropped before sequencing.
  * @param manager - Session manager
  * @param session - Destination session
  * @param eventName - Dispatch event name (e.g. "MESSAGE_CREATE")
@@ -85,6 +111,12 @@ export function sendDispatch(
     payload: GatewayPayload<unknown>
   ) => ((status: DispatchTransport) => void) | undefined
 ): void {
+  // A guild whose bot left or was removed is invisible to every session.
+  if (manager.isGuildHiddenFrom) {
+    const guildId = dispatchGuildId(eventName, data)
+    if (guildId !== undefined && manager.isGuildHiddenFrom(session, guildId))
+      return
+  }
   if (manager.suppressDispatch?.(session, eventName, data)) return
   const seq = manager.nextSeq(session)
   const payload = {

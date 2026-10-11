@@ -275,11 +275,11 @@ describe('GUILD_DELETE when the bot loses a guild', () => {
   })
 
   it.each([
-    ['leave', `/api/users/@me/guilds/${GUILD}`],
-    ['delete', `/guilds/${GUILD}`],
+    ['leave', `/api/users/@me/guilds/${GUILD}`, 200],
+    ['delete', `/guilds/${GUILD}`, 404],
   ])(
-    'removes the guild from REST and later READY/GUILD_CREATE after %s',
-    async (_kind, path) => {
+    'drops the guild from the bot list and later READY/GUILD_CREATE after %s',
+    async (_kind, path, guildStatus) => {
       const { db, http, open } = await start()
       seedBotWithGuilds(db)
       const first = await open()
@@ -287,7 +287,8 @@ describe('GUILD_DELETE when the bot loses a guild', () => {
       expect(await statusOf(http(path, { method: 'DELETE' }))).toBe(204)
 
       expect(await idsOf(http('/users/@me/guilds'))).toEqual([OTHER_GUILD])
-      expect(await statusOf(http(`/guilds/${GUILD}`))).toBe(404)
+      // Leaving keeps the fixture; only an explicit delete destroys it.
+      expect(await statusOf(http(`/guilds/${GUILD}`))).toBe(guildStatus)
 
       const second = await open()
       const { ready, guildCreates } = await identify(second, TOKEN, ALL_INTENTS)
@@ -327,10 +328,22 @@ describe('GUILD_DELETE when the bot loses a guild', () => {
       })
       expect(await client.drain()).toEqual([])
       expect(await idsOf(http('/users/@me/guilds'))).toEqual([OTHER_GUILD])
+      // The guild and its channels survive; only the bot's membership goes.
+      expect(await statusOf(http(`/guilds/${GUILD}`))).toBe(200)
+      expect(
+        db.prepare('SELECT 1 FROM channels WHERE guild_id = ?').get(GUILD)
+      ).toBeDefined()
+      expect(
+        db
+          .prepare(
+            'SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ?'
+          )
+          .get(GUILD, BOT)
+      ).toBeUndefined()
     }
   )
 
-  it('removes the guild when a bulk ban includes the bot itself', async () => {
+  it('detaches the bot when a bulk ban includes the bot itself', async () => {
     const { db, http, open } = await start()
     seedBotWithGuilds(db)
     const humanId = seedMember(db, GUILD)
@@ -355,7 +368,12 @@ describe('GUILD_DELETE when the bot loses a guild', () => {
     expect(await nextTypes(client, 1)).toEqual(['GUILD_DELETE'])
     expect(client.ws.readyState).toBe(WebSocket.OPEN)
     expect(await client.drain()).toEqual([])
-    expect(await statusOf(http(`/guilds/${GUILD}`))).toBe(404)
+    expect(await statusOf(http(`/guilds/${GUILD}`))).toBe(200)
+    expect(
+      db
+        .prepare('SELECT user_id FROM guild_bans WHERE guild_id = ? ORDER BY 1')
+        .all(GUILD)
+    ).toEqual([{ user_id: BOT }, { user_id: humanId }])
   })
 
   it('still kicks other members without removing the guild', async () => {
@@ -462,19 +480,26 @@ describe('GUILD_DELETE when the bot loses a guild', () => {
       'GUILD_DELETE',
     ])
 
+    // The detached bot is no longer a member, so it cannot post.
     const send = await http(`/channels/${CHANNEL}/messages`, {
       method: 'POST',
       body: JSON.stringify({ content: 'after leave' }),
     })
-    expect(send.status).toBe(404)
+    expect(send.status).toBe(403)
+    // Fixtures keep working, but nothing reaches the bot's sessions.
     const injected = await http(`/_test/channels/${CHANNEL}/messages`, {
       method: 'POST',
       body: JSON.stringify({ author: { id: humanId }, content: 'human' }),
     })
-    expect(injected.status).toBe(404)
+    expect(injected.status).toBe(201)
     expect(
-      await statusOf(http(`/guilds/${GUILD}/roles`, { method: 'POST' }))
-    ).toBe(404)
+      await statusOf(
+        http(`/guilds/${GUILD}/roles`, {
+          method: 'POST',
+          body: JSON.stringify({ name: 'later' }),
+        })
+      )
+    ).toBe(200)
     expect(await client.drain()).toEqual([])
   })
 

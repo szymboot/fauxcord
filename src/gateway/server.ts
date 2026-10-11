@@ -285,7 +285,7 @@ function handleIdentify(
   // for, so they report ready before the actual GUILD_CREATE dispatches
   // (sent below) have been processed.
   const existingGuildIds = db
-    .prepare('SELECT id FROM guilds WHERE bot_token = ?')
+    .prepare('SELECT id FROM guilds WHERE bot_token = ? AND bot_present = 1')
     .all(bot.token) as { id: string }[]
 
   const readyData: ReadyPayload = {
@@ -571,6 +571,19 @@ export function createGatewayWebSocketHandler(
   }
 ): { upgrade: WSEvents; sessionManager: SessionManager } {
   const sessionManager = new SessionManager(options.heartbeatIntervalMs)
+  sessionManager.isGuildHiddenFrom = (session, guildId) =>
+    db
+      .prepare(
+        `SELECT 1 FROM guilds g WHERE g.id = ? AND (g.bot_present = 0 OR EXISTS (
+           SELECT 1 FROM guild_bot_removals r
+           WHERE r.guild_id = g.id AND r.bot_token = ?))`
+      )
+      .get(
+        guildId,
+        session.token.startsWith('Bot ')
+          ? session.token
+          : `Bot ${session.token}`
+      ) !== undefined
   // Maps ws (WSContext) to sessionId; referenced from onClose/onMessage.
   const sessionIdByWs = new WeakMap<WSContext, string>()
 

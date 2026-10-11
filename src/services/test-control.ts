@@ -421,7 +421,8 @@ export function setupTestEnvironment(
            icon = CASE WHEN ? THEN excluded.icon ELSE guilds.icon END,
            premium_tier = CASE WHEN ? THEN excluded.premium_tier ELSE guilds.premium_tier END,
            owner_id = excluded.owner_id,
-           bot_token = excluded.bot_token`
+           bot_token = excluded.bot_token,
+           bot_present = 1`
       ).run(
         guildId,
         guildReq.name,
@@ -460,6 +461,15 @@ export function setupTestEnvironment(
       // manages the bot's own guild member (e.g. self role assignment).
       db.prepare(
         'INSERT OR IGNORE INTO guild_members (guild_id, user_id) VALUES (?, ?)'
+      ).run(guildId, userId)
+      // A rejoining setup sees its guild again.
+      db.prepare(
+        'DELETE FROM guild_bot_removals WHERE guild_id = ? AND bot_token = ?'
+      ).run(guildId, request.token)
+      // Re-listing a guild whose bot was banned re-adds the bot (rejoin), so
+      // the stale ban must not remain.
+      db.prepare(
+        'DELETE FROM guild_bans WHERE guild_id = ? AND user_id = ?'
       ).run(guildId, userId)
 
       pendingEvents.push(() => {
@@ -1119,9 +1129,10 @@ interface CommandIdRow {
  * given) and falls back to a global command of the same name; a request
  * with no `guild_id` only ever matches a global command.
  *
- * A `guild_id` must name an existing guild of the application's bot and a
- * `channel_id` an existing channel (of that guild, when given), so that no
- * interaction can be dispatched for a guild the bot has left or lost.
+ * A `guild_id` must name an existing guild the application's bot is still in
+ * and a `channel_id` an existing channel (of that guild, when given) outside
+ * guilds the bot left or lost, so that no interaction is created for them. A
+ * request with only a guild `channel_id` is created in that channel's guild.
  * @param db - Database
  * @param request - Test interaction request body
  * @returns The created interaction, or why no interaction was created
@@ -1130,24 +1141,36 @@ export function createTestInteraction(
   db: Database,
   request: TestInteractionRequest
 ): CreateTestInteractionResult {
-  if (
-    request.guild_id !== undefined &&
-    !db
+  /** Whether the application's bot is still in a guild of its setup. */
+  const botInGuild = (guildId: string): boolean =>
+    db
       .prepare(
-        'SELECT 1 FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ? AND b.user_id = ?'
+        'SELECT 1 FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ? AND g.bot_present = 1 AND b.user_id = ?'
       )
-      .get(request.guild_id, request.application_id)
-  )
+      .get(guildId, request.application_id) !== undefined
+  if (request.guild_id !== undefined && !botInGuild(request.guild_id))
     return { ok: false, reason: 'unknown_guild' }
+  // A channel-only request still happens in the channel's guild, which the
+  // interaction must carry so removed setups never receive it.
+  let interactionGuildId = request.guild_id
   if (request.channel_id !== undefined) {
     const channel = db
-      .prepare('SELECT guild_id FROM channels WHERE id = ?')
+      .prepare(
+        `SELECT c.guild_id FROM channels c
+         LEFT JOIN guilds g ON g.id = c.guild_id
+         WHERE c.id = ? AND COALESCE(g.bot_present, 1) = 1`
+      )
       .get(request.channel_id) as { guild_id: string | null } | undefined
     if (
       !channel ||
       (request.guild_id !== undefined && channel.guild_id !== request.guild_id)
     )
       return { ok: false, reason: 'unknown_channel' }
+    if (channel.guild_id !== null) {
+      if (!botInGuild(channel.guild_id))
+        return { ok: false, reason: 'unknown_channel' }
+      interactionGuildId = channel.guild_id
+    }
   }
   const guildCommand = request.guild_id
     ? (db
@@ -1183,7 +1206,7 @@ export function createTestInteraction(
     token: interactionToken,
     type: request.type ?? 2,
     locale: request.locale,
-    guildId: request.guild_id,
+    guildId: interactionGuildId,
     channelId: request.channel_id,
     commandId: command.id,
     data: { options: request.options ?? [] },

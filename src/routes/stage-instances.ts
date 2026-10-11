@@ -28,7 +28,7 @@ function missingAccess(c: Context<AppEnv>): Response {
 
 function ownsGuild(c: Context<AppEnv>, db: Database, guildId: string): boolean {
   const guild = db
-    .prepare('SELECT bot_token FROM guilds WHERE id = ?')
+    .prepare('SELECT bot_token FROM guilds WHERE id = ? AND bot_present = 1')
     .get(guildId) as { bot_token: string } | undefined
   return guild?.bot_token === c.get('bot')?.token
 }

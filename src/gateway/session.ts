@@ -177,6 +177,13 @@ export class SessionManager {
     payload: GatewayPayload<unknown>
   ) => void
   /**
+   * Reports a guild the session must no longer see: its bot left or was
+   * removed (the fixture survives), for every session, or this session's own
+   * setup was removed from it earlier. Native dispatches of such a guild are
+   * dropped before sequencing.
+   */
+  isGuildHiddenFrom?: (session: Session, guildId: string) => boolean
+  /**
    * Drops a native dispatch before sequencing (simulated guild outage), so it
    * consumes no sequence number and never enters the replay buffer.
    */

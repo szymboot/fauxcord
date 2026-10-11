@@ -225,10 +225,12 @@ ws.on('message', (raw) => {
 })
 ```
 
-When the bot leaves a guild (`DELETE /users/@me/guilds/:guildId`) or the guild
-is deleted (`DELETE /guilds/:guildId`), its sessions with the `GUILDS` intent
-receive `GUILD_DELETE` (`{ "id": "<guild id>" }`) and the guild disappears from
-later READY payloads. See
+When the bot leaves a guild (`DELETE /users/@me/guilds/:guildId`), is kicked or
+banned, or the guild is deleted (`DELETE /guilds/:guildId`), its sessions with
+the `GUILDS` intent receive `GUILD_DELETE` (`{ "id": "<guild id>" }`) and the
+guild disappears from later READY payloads. Leaving, a kick or a ban only
+detaches the bot: the guild and its human members, channels and voice states
+survive for test controls, while deleting the guild removes everything. See
 [Test API](test-api.md#remove-a-guild-from-the-bot-through-discord-rest-guild_delete).
 
 ---
