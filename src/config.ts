@@ -4,6 +4,11 @@
  * Loads the settings required for server operation from environment variables.
  */
 
+import {
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  isValidHeartbeatInterval,
+} from './gateway/session'
+
 /** Server configuration interface */
 export interface Config {
   /** Listen port */
@@ -37,12 +42,6 @@ function isValidLogLevel(level: string): level is Config['logLevel'] {
   return ['debug', 'info', 'warn', 'error'].includes(level)
 }
 
-/** Real Discord's heartbeat interval (ms), used unless overridden. */
-const DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_MS = 41_250
-/** Accepted heartbeat interval range (ms). */
-const MIN_GATEWAY_HEARTBEAT_INTERVAL_MS = 100
-const MAX_GATEWAY_HEARTBEAT_INTERVAL_MS = 600_000
-
 /**
  * Parses GATEWAY_HEARTBEAT_INTERVAL_MS, falling back to Discord's default for
  * a missing, non-integer or out-of-range value.
@@ -51,12 +50,9 @@ const MAX_GATEWAY_HEARTBEAT_INTERVAL_MS = 600_000
  */
 function parseHeartbeatInterval(raw: string | undefined): number {
   if (raw === undefined || !/^\d+$/.test(raw.trim()))
-    return DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_MS
+    return DEFAULT_HEARTBEAT_INTERVAL_MS
   const value = Number.parseInt(raw, 10)
-  return value >= MIN_GATEWAY_HEARTBEAT_INTERVAL_MS &&
-    value <= MAX_GATEWAY_HEARTBEAT_INTERVAL_MS
-    ? value
-    : DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_MS
+  return isValidHeartbeatInterval(value) ? value : DEFAULT_HEARTBEAT_INTERVAL_MS
 }
 
 /**

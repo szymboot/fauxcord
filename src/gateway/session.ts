@@ -7,6 +7,24 @@ const REPLAY_BUFFER_SIZE = 100
 
 /** Default heartbeat interval (ms) announced in HELLO; matches real Discord. */
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 41_250
+/** Smallest accepted heartbeat interval (ms). */
+export const MIN_HEARTBEAT_INTERVAL_MS = 100
+/** Largest accepted heartbeat interval (ms). */
+export const MAX_HEARTBEAT_INTERVAL_MS = 600_000
+
+/**
+ * Whether a value is an accepted heartbeat interval: an integer number of
+ * milliseconds between MIN_HEARTBEAT_INTERVAL_MS and MAX_HEARTBEAT_INTERVAL_MS.
+ * @param value - Candidate interval
+ * @returns true when the value can be announced in HELLO
+ */
+export function isValidHeartbeatInterval(value: number): boolean {
+  return (
+    Number.isSafeInteger(value) &&
+    value >= MIN_HEARTBEAT_INTERVAL_MS &&
+    value <= MAX_HEARTBEAT_INTERVAL_MS
+  )
+}
 
 /** Socket write progress of one Gateway frame, never application completion. */
 export type DispatchTransport = 'buffered' | 'queued' | 'sent' | 'failed'
@@ -85,10 +103,16 @@ export class SessionManager {
   /**
    * @param heartbeatIntervalMs - Heartbeat interval (ms) announced in HELLO;
    * sessions without a heartbeat for twice this long are closed and removed
+   * @throws RangeError when the interval is not an integer in the accepted range
    */
   constructor(
     readonly heartbeatIntervalMs: number = DEFAULT_HEARTBEAT_INTERVAL_MS
-  ) {}
+  ) {
+    if (!isValidHeartbeatInterval(heartbeatIntervalMs))
+      throw new RangeError(
+        `Gateway heartbeat interval must be an integer from ${String(MIN_HEARTBEAT_INTERVAL_MS)} to ${String(MAX_HEARTBEAT_INTERVAL_MS)} ms, got ${String(heartbeatIntervalMs)}`
+      )
+  }
 
   /** Test-only interception after native sequencing; true holds the envelope. */
   captureDispatch?: (

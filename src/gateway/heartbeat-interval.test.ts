@@ -227,3 +227,11 @@ describe('Configurable Gateway heartbeat interval', () => {
     }
   })
 })
+
+describe('Programmatic heartbeat interval validation', () => {
+  it('rejects an invalid interval before any server is started', async () => {
+    await expect(
+      createTestGatewayServer({ heartbeatIntervalMs: NaN })
+    ).rejects.toThrow(RangeError)
+  })
+})
