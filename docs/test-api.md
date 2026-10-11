@@ -3681,8 +3681,10 @@ curl -X PUT http://localhost:3000/api/v10/channels/333333333333333333/permission
 ```
 
 Missing guild membership or `VIEW_CHANNEL` (`1024`) returns HTTP `403`, code
-`50001` (`Missing Access`). (Removing the bot itself through REST — leave, kick or ban — removes the whole
-guild instead, so later sends return `404`; see
+`50001` (`Missing Access`). (Removing the bot itself through REST — leave, kick or ban — only
+detaches it from the surviving guild, so it has no membership or owner shortcut and its later sends
+return `403`/`50001`, not `404`; deleting the guild with `DELETE /guilds/:guildId` makes them
+return `404`. See
 [Remove a guild from the bot](#remove-a-guild-from-the-bot-through-discord-rest-guild_delete).) Missing `SEND_MESSAGES` (`2048`) returns HTTP `403`,
 code `50013` (`Missing Permissions`). A nonempty explicit `embeds` array also
 requires `EMBED_LINKS` (`16384`), including embed-only messages and messages
