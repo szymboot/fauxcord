@@ -171,6 +171,55 @@ describe('Voice channel and guild AFK fields', () => {
       ).resolves.toMatchObject({ bitrate: 96_000, video_quality_mode: 2 })
     })
 
+    it('converts a numeric string type before applying voice settings', async () => {
+      const response = await api(`/guilds/${guildId}/channels`, 'POST', {
+        name: 'string-voice',
+        type: '2',
+        bitrate: 32_000,
+        user_limit: 3,
+      })
+      expect(response.status).toBe(201)
+      const channel = (await response.json()) as { id: string }
+      expect(channel).toMatchObject({ type: 2, bitrate: 32_000, user_limit: 3 })
+      await expect(
+        readJson(api(`/channels/${channel.id}`))
+      ).resolves.toMatchObject({ type: 2, bitrate: 32_000, user_limit: 3 })
+    })
+
+    it('validates voice settings for a numeric string type', async () => {
+      const before = snapshot()
+      const response = await api(`/guilds/${guildId}/channels`, 'POST', {
+        name: 'string-voice',
+        type: '2',
+        user_limit: 100,
+      })
+      expect(response.status).toBe(400)
+      await expect(response.json()).resolves.toMatchObject({
+        code: 50_035,
+        errors: { user_limit: {} },
+      })
+      expect(snapshot()).toEqual(before)
+    })
+
+    it.each(['voice', 2.5, -1, { toString: null }])(
+      'rejects a non-integer type %o without creating a channel',
+      async (type) => {
+        const before = snapshot()
+        const response = await api(`/guilds/${guildId}/channels`, 'POST', {
+          name: 'bad-type',
+          type,
+        })
+        expect(response.status).toBe(400)
+        await expect(response.json()).resolves.toMatchObject({
+          code: 50_035,
+          errors: {
+            type: { _errors: [{ code: 'NUMBER_TYPE_COERCE' }] },
+          },
+        })
+        expect(snapshot()).toEqual(before)
+      }
+    )
+
     it('ignores voice settings on non-voice channels like Discord', async () => {
       const response = await api(`/guilds/${guildId}/channels`, 'POST', {
         name: 'text',

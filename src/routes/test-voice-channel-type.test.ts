@@ -244,6 +244,20 @@ describe('Voice channel type stability', () => {
       }
     )
 
+    it('treats a numeric string type like the number', async () => {
+      const same = await patch(voiceId, { type: '2', name: 'string-same' })
+      expect(same.status).toBe(200)
+      await expect(same.json()).resolves.toMatchObject({ type: 2 })
+      const before = snapshot()
+      const changed = await patch(voiceId, { type: '0', name: 'string-text' })
+      expect(changed.status).toBe(400)
+      await expect(changed.json()).resolves.toMatchObject({
+        code: 50_035,
+        errors: { type: { _errors: [{ code: 'BASE_TYPE_CHOICES' }] } },
+      })
+      expect(snapshot()).toEqual(before)
+    })
+
     it('accepts the current type unchanged', async () => {
       const response = await patch(voiceId, { type: 2, name: 'same-type' })
       expect(response.status).toBe(200)

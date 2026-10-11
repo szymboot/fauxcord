@@ -104,7 +104,9 @@ and the responses observed from the live API:
 | `afk_timeout` | `60`, `300`, `900`, `1800` or `3600` | `50035`, `BASE_TYPE_CHOICES` |
 | `afk_channel_id` | a voice channel (type `2`) of the same guild, or `null` | `50035` (Discord's exact field code is undocumented; Fauxcord uses `CHANNEL_TYPE_INVALID`) |
 
-Non-integer values return `NUMBER_TYPE_COERCE`. In setup, the AFK channel may
+Non-integer values return `NUMBER_TYPE_COERCE`. On the REST routes a channel
+`type` given as a numeric string (e.g. `"2"`) is converted to the number before
+any voice-specific validation, so its voice settings are applied. In setup, the AFK channel may
 be defined in the same request. Voice settings on other channel types and
 invalid values return `400` with a `message` and Discord-style field `errors`
 (a stage bitrate above `64000` is reported as field code `BITRATE_TOO_HIGH`),

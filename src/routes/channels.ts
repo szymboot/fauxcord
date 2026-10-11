@@ -21,6 +21,7 @@ import {
   bitrateTooHigh,
   isStageBitrateTooHigh,
   normalizeVoiceChannelSettings,
+  parseChannelType,
   pickVoiceChannelSettings,
   validateChannelTypeChange,
   validateChannelUpdate,
@@ -85,9 +86,11 @@ export function createChannelRoutes(
           .prepare('SELECT premium_tier FROM guilds WHERE id = ?')
           .get(current.guild_id) as { premium_tier: number } | undefined)
       : undefined
+    const parsedType = parseChannelType(payload.type)
     const errors = {
       ...validateChannelUpdate(payload),
-      ...(current && validateChannelTypeChange(current.type, payload.type)),
+      ...parsedType.errors,
+      ...(current && validateChannelTypeChange(current.type, parsedType.type)),
       ...(voice &&
         validateVoiceChannelSettings(
           payload,

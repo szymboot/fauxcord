@@ -25,6 +25,7 @@ import {
   bitrateTooHigh,
   isStageBitrateTooHigh,
   normalizeVoiceChannelSettings,
+  parseChannelType,
   pickVoiceChannelSettings,
   validateVoiceChannelSettings,
 } from '../validators/channel'
@@ -169,14 +170,19 @@ export function createGuildRoutes(
 
     const payload = (await parseJsonBody(c)) as unknown as ChannelCreatePayload
 
+    // Parse `type` once so the voice decision, validation and the stored row
+    // all use the same integer (numeric strings such as "2" are converted).
+    const parsedType = parseChannelType(payload.type)
+    const type = parsedType.type ?? 0
     // Discord applies voice settings to voice and stage channels only.
-    const voice = isVoiceCapableChannelType(payload.type ?? 0)
+    const voice = isVoiceCapableChannelType(type)
     const errors = {
       ...validateChannelCreate(payload),
+      ...parsedType.errors,
       ...(voice &&
         validateVoiceChannelSettings(
           payload,
-          payload.type ?? 0,
+          type,
           guild.premium_tier,
           listVoiceRegions().map((region) => region.id)
         )),
@@ -184,19 +190,16 @@ export function createGuildRoutes(
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
     }
-    if (voice && isStageBitrateTooHigh(payload.bitrate, payload.type ?? 0)) {
+    if (voice && isStageBitrateTooHigh(payload.bitrate, type)) {
       return c.json(bitrateTooHigh().body, 400)
     }
 
     const newChannel = createGuildChannel(db, {
       ...(voice &&
-        normalizeVoiceChannelSettings(
-          pickVoiceChannelSettings(payload),
-          payload.type ?? 0
-        )),
+        normalizeVoiceChannelSettings(pickVoiceChannelSettings(payload), type)),
       guildId,
       name: payload.name,
-      type: payload.type,
+      type,
       topic: payload.topic,
       nsfw: payload.nsfw,
       parentId: payload.parent_id,

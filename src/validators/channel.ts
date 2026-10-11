@@ -161,6 +161,42 @@ export function validateChannelUpdate(
   return errors
 }
 
+/** Result of parsing an untrusted channel `type` field. */
+export interface ParsedChannelType {
+  /** Integer type, or undefined when omitted or null. */
+  type?: number
+  /** Field errors when the value is not an integer. */
+  errors: ValidationErrors
+}
+
+/**
+ * Parses an untrusted channel `type`. Integer fields accept numeric strings
+ * (e.g. `"2"`), which are converted before any type-dependent decision so
+ * that the same number is validated and stored; other non-integers return
+ * `NUMBER_TYPE_COERCE`.
+ * @param value - Untrusted `type` field
+ * @returns The parsed type and any field errors
+ */
+export function parseChannelType(value: unknown): ParsedChannelType {
+  if (value === undefined || value === null) return { errors: {} }
+  const type =
+    typeof value === 'string' && /^\d{1,9}$/.test(value) ? Number(value) : value
+  return typeof type === 'number' && Number.isSafeInteger(type) && type >= 0
+    ? { type, errors: {} }
+    : {
+        errors: {
+          type: {
+            _errors: [
+              {
+                code: 'NUMBER_TYPE_COERCE',
+                message: `Value "${typeof value === 'string' ? value : JSON.stringify(value)}" is not int.`,
+              },
+            ],
+          },
+        },
+      }
+}
+
 /**
  * Whether an untrusted channel type value denotes a voice (2) or stage (13)
  * channel.
