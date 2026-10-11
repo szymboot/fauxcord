@@ -507,6 +507,78 @@ describe('guild fixtures survive the bot leaving, being kicked or banned', () =>
     expect(await statusOf(`/applications/${BOT}/commands`)).toBe(200)
   })
 
+  it('denies a removed setup guild REST after a same-user takeover, even after setup deletion', async () => {
+    const db = await start()
+    db.prepare(
+      'INSERT INTO oauth2_clients (client_id, client_secret, bot_token) VALUES (?, ?, ?)'
+    ).run(BOT, 'secret-a', TOKEN)
+    db.prepare(
+      `INSERT INTO oauth2_access_tokens (token, client_id, user_id, scope, expires_at)
+       VALUES ('bearer-a', ?, ?, 'applications.commands.permissions.update', datetime('now', '+1 day'))`
+    ).run(BOT, ALICE)
+    await http(`/users/@me/guilds/${GUILD}`, 'DELETE')
+    // Detached under its own setup, the removed bot still reads the fixture.
+    expect(await statusOf(`/guilds/${GUILD}/members`)).toBe(200)
+
+    // A new setup with the SAME bot user ID takes the guild over, restoring
+    // the shared membership that the old token must not inherit.
+    const setup = await fetch(
+      (server?.url ?? '').replace('ws://', 'http://') + '/_test/setup',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: OTHER_TOKEN,
+          user: { id: BOT, username: 'Twin' },
+          guilds: [{ id: GUILD, name: 'Twin guild' }],
+        }),
+      }
+    )
+    expect(setup.status).toBe(201)
+    const sendOld = (): Promise<number> =>
+      statusOf(`/channels/${CHANNEL}/messages`, 'POST', { content: 'old' })
+    expect(await sendOld()).toBe(403)
+    expect(await statusOf(`/api/v10/guilds/${GUILD}/members`)).toBe(403)
+    expect(
+      await statusOf(
+        `/channels/${CHANNEL}/messages`,
+        'POST',
+        { content: 'new' },
+        OTHER_TOKEN
+      )
+    ).toBe(200)
+    // Unauthenticated fixture controls are unaffected.
+    expect(
+      await statusOf(`/_test/guilds/${GUILD}/voice-states/${ALICE}`, 'PATCH', {
+        channel_id: VOICE,
+      })
+    ).toBe(200)
+
+    // Deleting the removed setup revokes its OAuth2 credentials instead of
+    // leaving an unlinked token that could keep managing its commands.
+    expect(
+      await statusOf(`/_test/setup/${encodeURIComponent(TOKEN)}`, 'DELETE')
+    ).toBe(204)
+    expect(
+      db
+        .prepare("SELECT 1 FROM oauth2_access_tokens WHERE token = 'bearer-a'")
+        .get()
+    ).toBeUndefined()
+    const revoked = await fetch(
+      (server?.url ?? '').replace('ws://', 'http://') +
+        `/applications/${BOT}/guilds/${GUILD}/commands/1/permissions`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer bearer-a',
+        },
+        body: JSON.stringify({ permissions: [] }),
+      }
+    )
+    expect(revoked.status).toBe(401)
+  })
+
   it('rejoins through setup: re-lists the guild, clears the ban and sends GUILD_CREATE', async () => {
     const db = await start()
     seedVoiceState(db, GUILD, ALICE, VOICE)

@@ -216,7 +216,7 @@ current seed file format registers only bots.
 
 ## `DELETE /_test/setup/:token` — Completely delete an environment
 
-Deletes the Bot and all of its related data (Guilds, Channels, Messages, Webhooks),
+Deletes the Bot, its OAuth2 access tokens and all of its related data (Guilds, Channels, Messages, Webhooks),
 including guilds the bot already left or was removed from (those survive the removal
 until their setup is deleted or the guild is deleted explicitly). This is silent: unlike deleting a guild through REST, no
 `GUILD_DELETE` or other Gateway event is dispatched.
@@ -3908,9 +3908,12 @@ After the bot is detached:
   re-adds the bot as a member, clears a ban of the bot's user ID and sends
   `GUILD_CREATE` with the surviving fixture (channels, members, voice
   states). Later IDENTIFYs list the guild again. The removed setup's sessions
-  never see the guild again, and its Bot or linked OAuth2 credentials stay
-  denied on the guild-scoped command routes, even if another setup takes the
-  guild over (an earlier removal is recorded per
+  never see the guild again, and once another setup takes the guild over, its
+  Bot token (and OAuth2 credentials linked to it) are denied with `403`
+  `Missing Access` on every guild-scoped native REST route (`/guilds/:id…`,
+  `/channels/:id…`, `/applications/:id/guilds/:id…`), even when the new setup
+  reuses the same bot user ID. Until a takeover, a detached guild under the
+  removed setup keeps the limitations described below (an earlier removal is recorded per
   guild, survives deletion of that setup, and is cleared only when the same
   token lists the guild again or the guild is deleted).
 

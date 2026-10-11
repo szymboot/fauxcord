@@ -607,6 +607,13 @@ export function deleteTestSetup(db: Database, token: string): boolean {
   // application_commands.guild_id -> guilds ON DELETE CASCADE). Global-scope
   // application_commands and every interactions row have no FK to bots
   // (there is no applications table), so they are cleaned up explicitly.
+  // OAuth2 access tokens of the setup's clients die with it, so a deleted
+  // setup's credentials cannot outlive the bot they were linked to.
+  db.prepare(
+    `DELETE FROM oauth2_access_tokens WHERE client_id IN (
+       SELECT client_id FROM oauth2_clients WHERE bot_token = ?
+     )`
+  ).run(token)
   db.prepare('DELETE FROM bots WHERE token = ?').run(token)
   getRestPageHolds(db).reset(token)
   getRestFaultRuntime(db).prune()
