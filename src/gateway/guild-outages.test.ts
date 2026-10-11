@@ -27,6 +27,7 @@ interface Client {
 interface DispatchObservation {
   session_id: string
   trigger: string
+  unavailable?: boolean
   sequence: number
   ready_sequence?: number | null
   transport: string
@@ -50,6 +51,7 @@ interface Outage {
   status: string
   ended_by: string | null
   ttl_ms: number
+  identify_dispatch: string
   started_at: number
   expires_at: number
   ended_at: number | null
@@ -302,6 +304,7 @@ describe('Gateway guild outage control', () => {
       status: 'unavailable',
       ended_by: null,
       ttl_ms: 60_000,
+      identify_dispatch: 'guild_delete',
       ended_at: null,
       retained_until: null,
       guild_creates: [],
@@ -611,6 +614,79 @@ describe('Gateway guild outage control', () => {
     ])
   })
 
+  it('IDENTIFY during an outage can receive the unavailable stub as GUILD_CREATE instead', async () => {
+    const outage = await start({ identify_dispatch: 'guild_create' })
+    expect(outage.identify_dispatch).toBe('guild_create')
+    // Sessions live at the start still get GUILD_DELETE (guild became unavailable).
+    await frame(client, (entry) => entry.t === 'GUILD_DELETE')
+    await voice(GUILD_A, HUMAN_A, { channel_id: VOICE_A })
+
+    const late = await connect()
+    const ready = late.frames.find((entry) => entry.t === 'READY')
+    expect(ready?.d?.guilds).toEqual(
+      expect.arrayContaining([{ id: GUILD_A, unavailable: true }])
+    )
+    await fence(late)
+    expect(late.frames.some((entry) => entry.t === 'GUILD_DELETE')).toBe(false)
+    const stubs = late.frames.filter(
+      (entry) => entry.t === 'GUILD_CREATE' && entry.d?.id === GUILD_A
+    )
+    // Exactly the unavailable guild object, never guild data.
+    expect(stubs.map((entry) => entry.d)).toEqual([
+      { id: GUILD_A, unavailable: true },
+    ])
+    expect(
+      late.frames.find(
+        (entry) => entry.t === 'GUILD_CREATE' && entry.d?.id === GUILD_B
+      )?.d
+    ).toMatchObject({ unavailable: false })
+
+    const during = await inspect(outage.id)
+    expect(during.guild_deletes.map((entry) => entry.session_id)).toEqual([
+      client.sessionId,
+    ])
+    expect(during.guild_creates).toMatchObject([
+      {
+        session_id: late.sessionId,
+        trigger: 'identify',
+        unavailable: true,
+        sequence: stubs[0]?.s,
+        ready_sequence: ready?.s,
+        member_count: 0,
+        voice_states_total: 0,
+      },
+    ])
+
+    await end(outage.id)
+    const recovered = await frame(
+      late,
+      (entry) =>
+        entry.t === 'GUILD_CREATE' &&
+        entry.d?.id === GUILD_A &&
+        entry.d.unavailable === false
+    )
+    expect(recovered.d?.voice_states).toMatchObject([
+      { user_id: HUMAN_A, channel_id: VOICE_A },
+    ])
+    const settled = await inspect(outage.id, 5000)
+    const recoveries = settled.guild_creates.filter(
+      (entry) => entry.trigger === 'recovery'
+    )
+    expect(recoveries).toHaveLength(2)
+    expect(recoveries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          session_id: client.sessionId,
+          unavailable: false,
+        }),
+        expect.objectContaining({
+          session_id: late.sessionId,
+          unavailable: false,
+        }),
+      ])
+    )
+  })
+
   it('keeps suppressing for sessions without the Guilds intent but sends them no GUILD_DELETE', async () => {
     const voiceOnly = await connect(
       TOKEN,
@@ -681,6 +757,23 @@ describe('Gateway guild outage control', () => {
         guild_id: GUILD_B,
       })
     ).toBe(409)
+    expect(
+      await status(ROOT, 'POST', {
+        ownership_key: key,
+        bot_id: BOT_ID,
+        guild_id: GUILD_A,
+        identify_dispatch: 'guild_create',
+      })
+    ).toBe(409)
+    // The explicit default is the same request.
+    expect(
+      await status(ROOT, 'POST', {
+        ownership_key: key,
+        bot_id: BOT_ID,
+        guild_id: GUILD_A,
+        identify_dispatch: 'guild_delete',
+      })
+    ).toBe(201)
 
     const byKey = await request(address)
     expect(byKey.status).toBe(200)
@@ -901,6 +994,8 @@ describe('Gateway guild outage control', () => {
       { bot_id: BOT_ID, guild_id: GUILD_A, ttl_ms: 600_001 },
       { bot_id: BOT_ID, guild_id: GUILD_A, ttl_ms: 1.5 },
       { bot_id: BOT_ID, guild_id: GUILD_A, ownership_key: 'bad key' },
+      { bot_id: BOT_ID, guild_id: GUILD_A, identify_dispatch: 'bogus' },
+      { bot_id: BOT_ID, guild_id: GUILD_A, identify_dispatch: null },
     ]) {
       const response = await request(ROOT, 'POST', body)
       expect(response.status).toBe(400)

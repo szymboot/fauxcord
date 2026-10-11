@@ -21,9 +21,19 @@ function validateRequest(value: unknown): GuildOutageRequest | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     return undefined
   const data = value as Record<string, unknown>
-  const allowed = new Set(['ownership_key', 'bot_id', 'guild_id', 'ttl_ms'])
+  const allowed = new Set([
+    'ownership_key',
+    'bot_id',
+    'guild_id',
+    'ttl_ms',
+    'identify_dispatch',
+  ])
   if (Object.keys(data).some((key) => !allowed.has(key))) return undefined
   const ttlMs = data.ttl_ms === undefined ? DEFAULT_TTL_MS : data.ttl_ms
+  const identifyDispatch =
+    data.identify_dispatch === undefined
+      ? 'guild_delete'
+      : data.identify_dispatch
   const { ownership_key: key, bot_id: botId, guild_id: guildId } = data
   return typeof botId === 'string' &&
     typeof guildId === 'string' &&
@@ -33,12 +43,14 @@ function validateRequest(value: unknown): GuildOutageRequest | undefined {
     ttlMs <= MAX_TTL_MS &&
     SNOWFLAKE.test(botId) &&
     SNOWFLAKE.test(guildId) &&
-    (key === undefined || isAuditOwnershipKey(key))
+    (key === undefined || isAuditOwnershipKey(key)) &&
+    (identifyDispatch === 'guild_delete' || identifyDispatch === 'guild_create')
     ? {
         ...(key !== undefined && { ownership_key: key }),
         bot_id: botId,
         guild_id: guildId,
         ttl_ms: ttlMs,
+        identify_dispatch: identifyDispatch,
       }
     : undefined
 }

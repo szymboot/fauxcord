@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { GatewayIntentBits } from 'discord-api-types/v10'
 import type { Database } from '../db'
 import { buildGuildCreatePayload } from '../services/guilds'
-import type { DispatchTransport, Session, SessionManager } from './session'
+import type {
+  DispatchTransport,
+  IdentifyGuildOutage,
+  Session,
+  SessionManager,
+} from './session'
 import type { GatewayPayload } from './protocol'
 import { sendDispatch } from './dispatch'
 import { hasIntent } from './intents'
@@ -27,12 +32,17 @@ const GUILD_OBJECT_EVENTS = new Set([
   'GUILD_DELETE',
 ])
 
+/** Unavailable stub event sent to sessions that IDENTIFY during an outage. */
+export type IdentifyDispatch = 'guild_delete' | 'guild_create'
+
 /** Validated outage request; the key is optional, TTL bounds the outage. */
 export interface GuildOutageRequest {
   ownership_key?: string
   bot_id: string
   guild_id: string
   ttl_ms: number
+  /** Defaults to `guild_delete` */
+  identify_dispatch?: IdentifyDispatch
 }
 
 /** Exact public owner address known before sending a keyed POST. */
@@ -63,11 +73,18 @@ interface GuildDeleteObservation {
   dispatched_at: number
 }
 
-/** Observation of one recovery GUILD_CREATE written to a session. */
+/**
+ * Observation of one GUILD_CREATE written to a session: the recovery snapshot,
+ * or an unavailable stub for a session that IDENTIFYed during the outage.
+ */
 interface GuildCreateObservation {
   session_id: string
-  trigger: 'recovery'
+  trigger: 'recovery' | 'identify'
+  /** True for the `{ id, unavailable: true }` stub (`identify` trigger) */
+  unavailable: boolean
   sequence: number | null
+  /** READY sequence of the identifying session (`identify` trigger only) */
+  ready_sequence: number | null
   transport: DispatchTransport
   dispatched_at: number
   member_count: number
@@ -86,6 +103,7 @@ interface OutageRecord {
   bot_id: string
   guild_id: string
   ttl_ms: number
+  identify_dispatch: IdentifyDispatch
   /** Normalized setup token owning the guild (never exposed). */
   token: string
   status: 'unavailable' | 'recovered'
@@ -110,6 +128,7 @@ interface OutageRecord {
 /** Bounded lifetime reservation; a null ID permanently prevents resurrection. */
 interface OwnershipReservation extends GuildOutageOwnership {
   ttl_ms?: number
+  identify_dispatch?: IdentifyDispatch
   id: string | null
 }
 
@@ -136,12 +155,15 @@ function dispatchGuildId(eventName: string, data: unknown): string | undefined {
     : undefined
 }
 
-/** Copies only bounded public facts from a recovery GUILD_CREATE envelope. */
+/** Copies only bounded public facts from a GUILD_CREATE envelope. */
 function summarizeGuildCreate(
   session: Session,
-  payload: GatewayPayload<unknown>
+  payload: GatewayPayload<unknown>,
+  trigger: GuildCreateObservation['trigger'],
+  readySequence: number | null
 ): GuildCreateObservation {
   const data = payload.d as {
+    unavailable?: unknown
     member_count?: unknown
     channels?: unknown
     voice_states?: unknown
@@ -151,8 +173,10 @@ function summarizeGuildCreate(
     : []
   return {
     session_id: session.sessionId,
-    trigger: 'recovery',
+    trigger,
+    unavailable: data.unavailable === true,
     sequence: payload.s ?? null,
+    ready_sequence: readySequence,
     transport: 'queued',
     dispatched_at: Date.now(),
     member_count: typeof data.member_count === 'number' ? data.member_count : 0,
@@ -229,6 +253,12 @@ export class GatewayGuildOutages {
     // outage signal itself, without it the bot lost the guild (left, kicked,
     // banned or deleted), which Discord reports even for unavailable guilds.
     if (eventName === 'GUILD_DELETE') return false
+    // The IDENTIFY-time unavailable GUILD_CREATE stub is an outage signal too.
+    if (
+      eventName === 'GUILD_CREATE' &&
+      (data as { unavailable?: unknown }).unavailable === true
+    )
+      return false
     const record = this.activeFor(session, guildId)
     if (!record) return false
     record.suppressed += 1
@@ -239,29 +269,42 @@ export class GatewayGuildOutages {
     return true
   }
 
-  /** Maps READY guilds in an active outage to GUILD_DELETE observers. */
+  /** Maps READY guilds in an active outage to the unavailable stub to send. */
   private identify(
     session: Session,
     guildIds: string[],
     readySequence: number
-  ): Map<
-    string,
-    (
-      payload: GatewayPayload<unknown>
-    ) => ((status: DispatchTransport) => void) | undefined
-  > {
-    const result = new Map<
-      string,
-      (
-        payload: GatewayPayload<unknown>
-      ) => ((status: DispatchTransport) => void) | undefined
-    >()
+  ): Map<string, IdentifyGuildOutage> {
+    const result = new Map<string, IdentifyGuildOutage>()
     if (this.active.size === 0) return result
     for (const guildId of guildIds) {
       const record = this.activeFor(session, guildId)
       if (!record) continue
-      result.set(guildId, (payload) =>
-        this.observeDelete(record, session, payload, 'identify', readySequence)
+      result.set(
+        guildId,
+        record.identify_dispatch === 'guild_create'
+          ? {
+              event: 'GUILD_CREATE',
+              observe: (payload) =>
+                this.observeCreate(
+                  record,
+                  session,
+                  payload,
+                  'identify',
+                  readySequence
+                ),
+            }
+          : {
+              event: 'GUILD_DELETE',
+              observe: (payload) =>
+                this.observeDelete(
+                  record,
+                  session,
+                  payload,
+                  'identify',
+                  readySequence
+                ),
+            }
       )
     }
     return result
@@ -294,17 +337,19 @@ export class GatewayGuildOutages {
     }
   }
 
-  /** Records one recovery GUILD_CREATE envelope and returns its write observer. */
+  /** Records one GUILD_CREATE envelope and returns its write observer. */
   private observeCreate(
     record: OutageRecord,
     session: Session,
-    payload: GatewayPayload<unknown>
+    payload: GatewayPayload<unknown>,
+    trigger: GuildCreateObservation['trigger'],
+    readySequence: number | null
   ): ((status: DispatchTransport) => void) | undefined {
     if (record.guild_creates.length >= MAX_DISPATCHES) {
       record.guild_creates_skipped += 1
       return undefined
     }
-    const entry = summarizeGuildCreate(session, payload)
+    const entry = summarizeGuildCreate(session, payload, trigger, readySequence)
     record.guild_creates.push(entry)
     return (status) => {
       entry.transport = status
@@ -337,12 +382,14 @@ export class GatewayGuildOutages {
    * record for an identical keyed retry.
    */
   create(request: GuildOutageRequest): string | object {
+    const identifyDispatch = request.identify_dispatch ?? 'guild_delete'
     const key = request.ownership_key
     const owner = key === undefined ? undefined : this.owners.get(key)
     if (owner) {
       return owner.bot_id === request.bot_id &&
         owner.guild_id === request.guild_id &&
         owner.ttl_ms === request.ttl_ms &&
+        owner.identify_dispatch === identifyDispatch &&
         owner.id
         ? (this.inspect(owner.id) ?? 'CONFLICT')
         : 'CONFLICT'
@@ -363,6 +410,7 @@ export class GatewayGuildOutages {
       bot_id: request.bot_id,
       guild_id: request.guild_id,
       ttl_ms: request.ttl_ms,
+      identify_dispatch: identifyDispatch,
       token,
       status: 'unavailable',
       ended_by: null,
@@ -387,6 +435,7 @@ export class GatewayGuildOutages {
         bot_id: request.bot_id,
         guild_id: request.guild_id,
         ttl_ms: request.ttl_ms,
+        identify_dispatch: identifyDispatch,
         id,
       })
     }
@@ -448,7 +497,7 @@ export class GatewayGuildOutages {
       for (const session of this.sessionsInScope(record)) {
         if (!hasIntent(session.intents, GatewayIntentBits.Guilds)) continue
         sendDispatch(this.manager, session, 'GUILD_CREATE', guild, (payload) =>
-          this.observeCreate(record, session, payload)
+          this.observeCreate(record, session, payload, 'recovery', null)
         )
       }
     } finally {
@@ -468,6 +517,7 @@ export class GatewayGuildOutages {
           status: record.status,
           ended_by: record.ended_by,
           ttl_ms: record.ttl_ms,
+          identify_dispatch: record.identify_dispatch,
           started_at: record.started_at,
           expires_at: record.expires_at,
           ended_at: record.ended_at,

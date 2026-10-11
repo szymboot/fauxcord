@@ -3085,7 +3085,14 @@ From the official Gateway documentation
   (`members`, `channels`, `voice_states`, …).
 - On connect, **Ready** lists every guild as an Unavailable Guild object, and
   "Guilds that are unavailable due to an outage will send a Guild Delete
-  event" instead of the lazy-load Guild Create.
+  event" instead of the lazy-load Guild Create. The same section also says
+  "During an outage, the guild object in scenarios 1 and 3 may be marked as
+  unavailable", i.e. the lazy-load Guild Create itself may carry the
+  unavailable guild object `{ "id": "…", "unavailable": true }`. Discord
+  confirmed that this Guild Create variant is intended
+  ([discord-api-docs#5054](https://github.com/discord/discord-api-docs/issues/5054)).
+  Both variants occur on the real Gateway, so `identify_dispatch` selects
+  which one Fauxcord sends.
 
 Discord does not document event delivery for an unavailable guild beyond the
 fact that its state arrives through the recovery Guild Create. Fauxcord models
@@ -3096,8 +3103,8 @@ snapshot.
 | Phase | What connected sessions of the setup receive |
 | ----- | -------------------------------------------- |
 | Start | `GUILD_DELETE` `{ "id": guild_id, "unavailable": true }`, normally sequenced and stored in the RESUME replay buffer. |
-| Unavailable | Nothing for that guild except `GUILD_DELETE`. Every other dispatch whose `guild_id` (or `id` for `GUILD_CREATE`/`GUILD_UPDATE`/`GUILD_DELETE`) is the guild — voice states, members, messages, reactions, channels, roles, interactions, … — is dropped **before sequencing**: it consumes no sequence number, is never added to the replay buffer and is never delivered later. Fixtures and REST still change and persist state. |
-| IDENTIFY during the outage | `READY` lists the guild as `{ "id": guild_id, "unavailable": true }` (as every guild); instead of its `GUILD_CREATE`, the session receives `GUILD_DELETE` `{ "id": guild_id, "unavailable": true }` in `READY` guild order. Other guilds get their `GUILD_CREATE`. |
+| Unavailable | Nothing for that guild except `GUILD_DELETE` and the IDENTIFY-time unavailable `GUILD_CREATE` stub. Every other dispatch whose `guild_id` (or `id` for `GUILD_CREATE`/`GUILD_UPDATE`/`GUILD_DELETE`) is the guild — voice states, members, messages, reactions, channels, roles, interactions, … — is dropped **before sequencing**: it consumes no sequence number, is never added to the replay buffer and is never delivered later. Fixtures and REST still change and persist state. |
+| IDENTIFY during the outage | `READY` lists the guild as `{ "id": guild_id, "unavailable": true }` (as every guild). Instead of the full `GUILD_CREATE`, the session receives the unavailable stub `{ "id": guild_id, "unavailable": true }` in `READY` guild order: as `GUILD_DELETE` by default, or as `GUILD_CREATE` with `identify_dispatch: "guild_create"`. Other guilds get their full `GUILD_CREATE`. |
 | RESUME during the outage | Replays the outage `GUILD_DELETE` if the client had not seen it, and other guilds' events; never a suppressed event. The guild stays unavailable. |
 | End | Suppression stops, then `GUILD_CREATE` with the full **current** snapshot (the same builder as the IDENTIFY snapshot: members, channels, `voice_states`, and the member objects of users in voice) is sent to every registered session of the setup. Later events flow normally. |
 
@@ -3131,7 +3138,8 @@ Scope details:
   "ownership_key": "outage-0b8a7d6e",
   "bot_id": "111111111111111111",
   "guild_id": "222222222222222222",
-  "ttl_ms": 60000
+  "ttl_ms": 60000,
+  "identify_dispatch": "guild_delete"
 }
 ```
 
@@ -3141,18 +3149,19 @@ Scope details:
 | `bot_id`        | ✅       | Registered bot user ID (1–20 digit snowflake).                                                              |
 | `guild_id`      | ✅       | A guild owned by that bot's setup.                                                                          |
 | `ttl_ms`        | —        | Maximum outage duration, integer `1`–`600000`, default `60000`. On expiry the outage **ends with the recovery `GUILD_CREATE`** (`ended_by: "ttl"`). |
+| `identify_dispatch` | —    | `"guild_delete"` (default) or `"guild_create"`: which event carries the unavailable stub for sessions that IDENTIFY during the outage. Sessions live at the start always get `GUILD_DELETE`. |
 
 Responses:
 
-- `201` with the outage object below. A retry with the same key, owner and
-  `ttl_ms` returns the existing record (`201`) without dispatching again.
-- `400` for malformed JSON, a non-object, unknown fields, or invalid IDs, key
-  or TTL; `413` for bodies over 16 KiB.
+- `201` with the outage object below. A retry with the same key, owner,
+  `ttl_ms` and `identify_dispatch` returns the existing record (`201`) without dispatching again.
+- `400` for malformed JSON, a non-object, unknown fields, or invalid IDs, key,
+  TTL or `identify_dispatch`; `413` for bodies over 16 KiB.
 - `404` `UNKNOWN_SCOPE` when the guild does not exist or is not owned by that
   bot's setup.
 - `409` `BUSY` when the guild already has an active outage for that setup.
-- `409` `CONFLICT` when the key is reserved with a different owner or
-  `ttl_ms`, was closed by DELETE, or its record retired.
+- `409` `CONFLICT` when the key is reserved with a different owner,
+  `ttl_ms` or `identify_dispatch`, was closed by DELETE, or its record retired.
 - `429` `LIMIT` when 32 outage records (active plus recovered-but-retained)
   or 4096 key reservations exist in this Gateway instance.
 
@@ -3171,6 +3180,7 @@ session is allowed; it then only affects later IDENTIFYs.
   "status": "recovered",
   "ended_by": "request",
   "ttl_ms": 60000,
+  "identify_dispatch": "guild_delete",
   "started_at": 1791936000000,
   "expires_at": 1791936060000,
   "ended_at": 1791936012000,
@@ -3199,7 +3209,9 @@ session is allowed; it then only affects later IDENTIFYs.
     {
       "session_id": "0123456789abcdef0123456789abcdef",
       "trigger": "recovery",
+      "unavailable": false,
       "sequence": 43,
+      "ready_sequence": null,
       "transport": "sent",
       "dispatched_at": 1791936012001,
       "member_count": 2,
@@ -3234,9 +3246,13 @@ session is allowed; it then only affects later IDENTIFYs.
   session, its Gateway `sequence`, and the trigger: `outage_start` for
   sessions registered at start, `identify` for sessions that IDENTIFYed during
   the outage (with that session's READY sequence in `ready_sequence`).
-- `guild_creates`: one entry per recovery `GUILD_CREATE`, with its sequence
-  and a bounded summary of the snapshot (100 voice states each, full count in
-  `voice_states_total`).
+- `guild_creates`: one entry per written `GUILD_CREATE` of this outage, with
+  its sequence and trigger: `recovery` for the full snapshot (`unavailable:
+  false`, with a bounded summary: 100 voice states each, full count in
+  `voice_states_total`), or `identify` for the unavailable stub sent to a
+  session that IDENTIFYed during the outage with `identify_dispatch:
+  "guild_create"` (`unavailable: true`, its READY sequence in
+  `ready_sequence`, empty summary).
 - At most 50 entries are retained per list; further frames are still sent and
   counted in `guild_deletes_skipped`/`guild_creates_skipped`.
 - `transport` is the server socket write (`queued`, `sent`, `failed`, or

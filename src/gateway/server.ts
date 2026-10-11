@@ -12,7 +12,11 @@ import type { WSContext, WSEvents } from 'hono/ws'
 import type { Database } from '../db'
 import { getUser } from '../services/users'
 import { buildGuildCreatePayload } from '../services/guilds'
-import { SessionManager, type Session } from './session'
+import {
+  SessionManager,
+  type IdentifyGuildOutage,
+  type Session,
+} from './session'
 import { GatewayOp, GatewayCloseCode } from './opcodes'
 import { encodePayload, decodePayload } from './protocol'
 import type { IdentifyData, ResumeData } from './protocol'
@@ -332,11 +336,13 @@ function handleIdentify(
   const readySequence = sessionManager.nextSeq(session)
   const guildsIntent = hasIntent(data.intents, GatewayIntentBits.Guilds)
   const guildIds = existingGuildIds.map(({ id }) => id)
-  // Guilds in a simulated outage stay unavailable: Discord sends GUILD_DELETE
-  // (`unavailable: true`) for them instead of the lazy-load GUILD_CREATE.
+  // Guilds in a simulated outage stay unavailable: instead of the lazy-load
+  // GUILD_CREATE, Discord sends an unavailable stub `{ id, unavailable: true }`
+  // as GUILD_DELETE (documented) or GUILD_CREATE (also documented as possible
+  // during outages); the outage control chooses which.
   const outages =
     sessionManager.identifyGuildOutages?.(session, guildIds, readySequence) ??
-    new Map()
+    new Map<string, IdentifyGuildOutage>()
   // Test controls may watch this IDENTIFY to prove READY/GUILD_CREATE writes.
   const observer = sessionManager.observeIdentify?.(session, {
     readySequence,
@@ -388,16 +394,16 @@ function handleIdentify(
         : { guildId, guild: buildGuildCreatePayload(db, guildId) }
     )
   )()
-  // READY order is kept; outage guilds get their GUILD_DELETE in place.
+  // READY order is kept; outage guilds get their unavailable stub in place.
   for (const { guildId, guild } of payloads) {
     const outage = outages.get(guildId)
     if (outage) {
       sendDispatch(
         sessionManager,
         session,
-        'GUILD_DELETE',
+        outage.event,
         { id: guildId, unavailable: true },
-        outage
+        outage.observe
       )
     } else if (guild) {
       sendDispatch(

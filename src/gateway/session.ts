@@ -73,6 +73,16 @@ export interface IdentifyObserver {
   ) => ((status: DispatchTransport) => void) | undefined
 }
 
+/** How an identifying session learns that a READY guild is in an outage. */
+export interface IdentifyGuildOutage {
+  /** Stub event sent instead of the full GUILD_CREATE (`{ id, unavailable: true }`) */
+  event: 'GUILD_DELETE' | 'GUILD_CREATE'
+  /** Observes the stub envelope, returning its write observer */
+  observe: (
+    payload: GatewayPayload<unknown>
+  ) => ((status: DispatchTransport) => void) | undefined
+}
+
 /** Represents a single Gateway connection (session) */
 export interface Session {
   /** Session ID (used when resuming) */
@@ -177,18 +187,13 @@ export class SessionManager {
   ) => boolean
   /**
    * Returns the READY guilds currently in a simulated outage for an
-   * identifying session, each mapped to an observer of its GUILD_DELETE.
+   * identifying session, each mapped to the unavailable stub to send.
    */
   identifyGuildOutages?: (
     session: Session,
     guildIds: string[],
     readySequence: number
-  ) => Map<
-    string,
-    (
-      payload: GatewayPayload<unknown>
-    ) => ((status: DispatchTransport) => void) | undefined
-  >
+  ) => Map<string, IdentifyGuildOutage>
 
   private readonly silencedSockets = new WeakSet<WebSocket>()
   private readonly removalListeners = new Set<(session: Session) => void>()
