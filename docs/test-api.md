@@ -228,7 +228,9 @@ channels, already disconnected states and other guilds are untouched. Text and
 other non-voice channels emit only `CHANNEL_DELETE`.
 
 Ordering is deterministic: the disconnects are sent first, in ascending numeric
-`user_id` (snowflake) order, followed by `CHANNEL_DELETE`. Discord's
+`user_id` order, followed by `CHANNEL_DELETE`. All-digit IDs compare by value
+(leading zeros ignored, ties broken by raw text); any non-decimal IDs that a
+fixture stored follow in raw text order. Discord's
 [gateway events documentation](https://docs.discord.com/developers/events/gateway-events)
 documents both events but neither this cascade nor an ordering guarantee;
 Fauxcord emits disconnects first so client libraries can still resolve the
@@ -260,7 +262,7 @@ is published. `/_test/reset`, setup cleanup and guild deletion remain silent.
 - `disconnectGuildVoiceChannelMembers(db, channelId)`, disconnecting every
   valid member connected to a voice/stage channel with the same semantics as a
   `channel_id: null` fixture patch and returning the mutations in numeric
-  `user_id` order. `deleteChannel` calls it inside its deletion transaction and
+  `user_id` order (`compareUserIds(left, right)`, also exported). `deleteChannel` calls it inside its deletion transaction and
   publishes the results before `CHANNEL_DELETE`; it emits nothing itself.
 
 `src/services/voice-state-events.ts` exports

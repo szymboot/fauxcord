@@ -195,14 +195,38 @@ function applyTestGuildVoiceState(
   })
 }
 
+/** Matches any all-digit ID, canonical snowflake or not (e.g. `002`). */
+const DECIMAL_ID = /^\d+$/
+
+/**
+ * Total, deterministic order for stored user IDs: all-digit IDs by numeric
+ * value (leading zeros ignored, ties broken by raw text), followed by any
+ * non-decimal IDs in raw text order.
+ * @param left - First user ID
+ * @param right - Second user ID
+ * @returns Negative, zero or positive like any `Array#sort` comparator
+ */
+export function compareUserIds(left: string, right: string): number {
+  const leftDecimal = DECIMAL_ID.test(left)
+  const rightDecimal = DECIMAL_ID.test(right)
+  if (leftDecimal !== rightDecimal) return leftDecimal ? -1 : 1
+  if (leftDecimal) {
+    const difference = BigInt(left) - BigInt(right)
+    if (difference !== 0n) return difference < 0n ? -1 : 1
+  }
+  if (left === right) return 0
+  return left < right ? -1 : 1
+}
+
 /**
  * Disconnects every valid member connected to a guild voice or stage channel,
  * as Discord does when that channel is deleted. Each state is disconnected
  * exactly like a `channel_id: null` fixture patch (session and other flags
  * retained; streaming, video and request-to-speak cleared). Results are in
- * numeric snowflake `user_id` order. Other channel types, legacy orphan rows
- * and members connected elsewhere are untouched. Emits nothing: the caller
- * publishes the returned mutations after its transaction commits.
+ * numeric `user_id` order (see {@link compareUserIds}). Other channel types,
+ * legacy orphan rows and members connected elsewhere are untouched. Emits
+ * nothing: the caller publishes the returned mutations after its transaction
+ * commits.
  * @param db - Database
  * @param channelId - Channel about to be deleted
  * @returns Committed disconnect mutations, one per affected member
@@ -217,12 +241,16 @@ export function disconnectGuildVoiceChannelMembers(
         `SELECT vs.guild_id, vs.user_id FROM guild_voice_states vs
       JOIN guild_members m ON m.guild_id = vs.guild_id AND m.user_id = vs.user_id
       JOIN channels c ON c.id = vs.channel_id AND c.guild_id = vs.guild_id
-      WHERE vs.channel_id = ? AND c.type IN (2, 13)
-      ORDER BY length(vs.user_id), vs.user_id`
+      WHERE vs.channel_id = ? AND c.type IN (2, 13)`
       )
       .all(channelId) as { guild_id: string; user_id: string }[]
+    // Sort in JS: stored IDs are not guaranteed canonical (path parameters
+    // such as PUT /guilds/:id/members/:userId accept arbitrary text).
+    const ordered = rows.toSorted((left, right) =>
+      compareUserIds(left.user_id, right.user_id)
+    )
     const mutations: VoiceStateFixtureMutation[] = []
-    for (const row of rows) {
+    for (const row of ordered) {
       const result = applyTestGuildVoiceState(db, row.guild_id, row.user_id, {
         channel_id: null,
       })

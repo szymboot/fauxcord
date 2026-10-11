@@ -8,6 +8,8 @@ import {
   seedChannel,
 } from '../test-helpers'
 import {
+  compareUserIds,
+  disconnectGuildVoiceChannelMembers,
   getGuildVoiceState,
   getGuildVoiceStates,
   setTestGuildVoiceState,
@@ -102,5 +104,52 @@ describe('Shared voice-state foundation', () => {
     expect(getGuildVoiceState(db, guild, user)?.self_stream).toBe(false)
     db.prepare('DELETE FROM guilds WHERE id = ?').run(guild)
     expect(getGuildVoiceState(db, guild, user)).toBeNull()
+  })
+})
+
+describe('compareUserIds', () => {
+  it('orders decimal IDs numerically, then by raw text, then non-decimal IDs', () => {
+    const ids = [
+      'abc',
+      '10',
+      '002',
+      '2',
+      '100000000000000000',
+      '99999999999999999',
+    ]
+    expect(ids.toSorted(compareUserIds)).toEqual([
+      '002',
+      '2',
+      '10',
+      '99999999999999999',
+      '100000000000000000',
+      'abc',
+    ])
+  })
+})
+
+describe('disconnectGuildVoiceChannelMembers', () => {
+  it('returns disconnects in numeric order for noncanonical stored IDs', () => {
+    const db = initializeDatabase(':memory:')
+    const guild = seedGuild(db, seedBot(db))
+    const channel = seedVoiceChannel(db, guild)
+    for (const id of ['10', '002', 'abc']) {
+      seedMember(db, guild, id)
+      expect(
+        setTestGuildVoiceState(db, guild, id, { channel_id: channel })
+      ).toMatchObject({ state: { channel_id: channel } })
+    }
+
+    const mutations = disconnectGuildVoiceChannelMembers(db, channel)
+
+    expect(mutations.map((mutation) => mutation.state.user_id)).toEqual([
+      '002',
+      '10',
+      'abc',
+    ])
+    expect(
+      mutations.every((mutation) => mutation.state.channel_id === null)
+    ).toBe(true)
+    closeDatabase(db)
   })
 })
