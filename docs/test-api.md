@@ -126,6 +126,8 @@ current seed file format registers only bots.
 ## `DELETE /_test/setup/:token` — Completely delete an environment
 
 Deletes the Bot and all of its related data (Guilds, Channels, Messages, Webhooks).
+This is silent: unlike leaving or deleting a guild through REST, no `GUILD_DELETE`
+or other Gateway event is dispatched.
 Guild-scoped audit-log fixtures, audit response controls, REST fault controls, and their consumption history are also removed.
 
 ```bash
@@ -1572,6 +1574,10 @@ curl -X POST http://localhost:3000/_test/interactions \
 **Response**: `201` with the created interaction object (matches the
 Discord `Interaction` shape). `404` (`{"message": "404: Not Found", "code": 0}`)
 when `command_name` does not match any registered command in scope.
+`404` `{"message": "Unknown Guild", "code": 10004}` when `guild_id` is not an
+existing guild of the application's bot (for example after the bot left it),
+and `404` `{"message": "Unknown Channel", "code": 10003}` when `channel_id` does
+not exist or belongs to a different guild than `guild_id`.
 
 The optional `locale` field accepts the invoking user's
 [Discord locale](https://docs.discord.com/developers/reference#locales), such
@@ -2775,7 +2781,9 @@ curl -X PUT http://localhost:3000/api/v10/channels/333333333333333333/permission
 ```
 
 Missing guild membership or `VIEW_CHANNEL` (`1024`) returns HTTP `403`, code
-`50001` (`Missing Access`). Missing `SEND_MESSAGES` (`2048`) returns HTTP `403`,
+`50001` (`Missing Access`). (Removing the bot itself through REST — leave, kick or ban — removes the whole
+guild instead, so later sends return `404`; see
+[Remove a guild from the bot](#remove-a-guild-from-the-bot-through-discord-rest-guild_delete).) Missing `SEND_MESSAGES` (`2048`) returns HTTP `403`,
 code `50013` (`Missing Permissions`). A nonempty explicit `embeds` array also
 requires `EMBED_LINKS` (`16384`), including embed-only messages and messages
 with `SUPPRESS_EMBEDS`. Omitted, `null`, or empty embeds and plain URL content
@@ -2904,6 +2912,65 @@ Discord does not document several details; Fauxcord's choices:
   regardless of the target's stage moderator status).
 - Role hierarchy, timeouts of the acting bot, channel user limits and
   `PRIORITY_SPEAKER` are not modeled for voice moderation.
+
+---
+
+## Remove a guild from the bot through Discord REST (`GUILD_DELETE`)
+
+A bot loses a guild when it leaves, is kicked or banned, or the guild is
+deleted. Fauxcord models each of these as real Discord does and sends
+`GUILD_DELETE` to every live Gateway session of the guild's bot (same setup
+token) that has the `GUILDS` intent:
+
+```json
+{ "op": 0, "t": "GUILD_DELETE", "s": 42, "d": { "id": "222222222222222222" } }
+```
+
+`d` is an [unavailable guild object](https://discord.com/developers/docs/resources/guild#unavailable-guild-object)
+**without** `unavailable`, which is how Discord marks "the user left or was
+removed" (`unavailable: true` is reserved for outages, which are not modeled).
+
+| Path                                                    | Dispatches, in order                                                |
+| ------------------------------------------------------- | ------------------------------------------------------------------- |
+| `DELETE /users/@me/guilds/:guildId` (leave)             | `GUILD_MEMBER_REMOVE` for the bot (`GUILD_MEMBERS`), `GUILD_DELETE` |
+| `DELETE /guilds/:guildId/members/:botId` (kick)         | `GUILD_MEMBER_REMOVE` for the bot (`GUILD_MEMBERS`), `GUILD_DELETE` |
+| `PUT /guilds/:guildId/bans/:botId` (ban)                | `GUILD_MEMBER_REMOVE` for the bot (`GUILD_MEMBERS`), `GUILD_DELETE` |
+| `POST /guilds/:guildId/bulk-ban` with the bot's user ID | `GUILD_MEMBER_REMOVE` for the bot (`GUILD_MEMBERS`), `GUILD_DELETE` |
+| `DELETE /guilds/:guildId`                               | `GUILD_DELETE`                                                      |
+
+Fauxcord's only REST actor is the bot itself, so a kick or ban whose target is
+the guild's own bot stands in for an administrator removing it. A bulk ban
+first bans the other listed users, lists the bot in `banned_users`, and then
+removes the guild. Kicking or banning anyone else is unchanged.
+
+Discord documents `GUILD_MEMBER_REMOVE` for "leave/kick/ban" and both events for
+Leave Guild, but not their relative order; Fauxcord sends `GUILD_MEMBER_REMOVE`
+first so that nothing for the guild follows `GUILD_DELETE`. Both are ordinary sequenced dispatches retained in the replay
+buffer, so a client that was disconnected receives them on `RESUME`.
+
+Each Fauxcord guild belongs to exactly one bot, so leaving it removes the guild
+and all of its cascaded data, like deleting it. Afterwards:
+
+- `GET /users/@me/guilds` no longer lists it and guild/channel REST calls return
+  `404` (`Unknown Guild`/`Unknown Channel`), as do test-control injections such
+  as `POST /_test/channels/:channelId/messages` and `POST /_test/interactions`,
+  so no further events for the guild can be produced.
+- A later IDENTIFY omits it from READY's `guilds` and sends no `GUILD_CREATE`.
+- Gateway event controls and session-invalidation observations scoped to the
+  guild are canceled **after** `GUILD_DELETE` is written; held events are
+  discarded, as with any other cancellation.
+- Other bots and other setups sharing the same bot user ID receive nothing.
+
+Leaving a guild that does not exist or belongs to another bot returns `404`
+with `{"message":"Unknown Guild","code":10004}` and dispatches nothing. Discord
+rejects a guild owner leaving its own guild; Fauxcord does not enforce
+ownership here (setups default the owner to the bot), so the bot can always
+leave.
+
+Test-control cleanup (`DELETE /_test/setup/:token`, `POST /_test/reset`) is
+always silent.
+
+---
 
 ## REST pagination page holds
 

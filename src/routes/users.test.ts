@@ -4,6 +4,8 @@ import {
   seedApplicationOwner,
   seedBearerCredential,
   seedBot,
+  seedChannel,
+  seedGuild,
 } from '../test-helpers'
 import { createTestUser } from '../services/test-control'
 import type { Database } from '../db'
@@ -542,5 +544,74 @@ describe('POST /users/@me/channels', () => {
 
     expect(secondRes.status).toBe(200)
     expect(secondBody.id).not.toBe(firstBody.id)
+  })
+})
+
+describe('DELETE /users/@me/guilds/:guildId', () => {
+  let db: Database
+  let app: ReturnType<typeof createFullTestApp>['app']
+  let cleanup: () => void
+  const token = 'Bot testtoken'
+  const guildId = '222222222222222222'
+
+  beforeEach(() => {
+    const ctx = createFullTestApp()
+    db = ctx.db
+    app = ctx.app
+    cleanup = ctx.cleanup
+    seedBot(db, token)
+    seedGuild(db, token, guildId)
+    seedChannel(db, guildId)
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('leaves the guild, removing it and its data from the bot', async () => {
+    const res = await app.request(`/api/v10/users/@me/guilds/${guildId}`, {
+      method: 'DELETE',
+      headers: { Authorization: token },
+    })
+    expect(res.status).toBe(204)
+    expect(
+      db.prepare('SELECT id FROM guilds WHERE id = ?').get(guildId)
+    ).toBeUndefined()
+    expect(
+      db.prepare('SELECT id FROM channels WHERE guild_id = ?').all(guildId)
+    ).toEqual([])
+    const guilds = await app.request('/users/@me/guilds', {
+      headers: { Authorization: token },
+    })
+    expect(await guilds.json()).toEqual([])
+  })
+
+  it('returns 404 Unknown Guild for a guild the bot is not in', async () => {
+    seedBot(db, 'Bot othertoken', '444444444444444444')
+    seedGuild(db, 'Bot othertoken', '555555555555555555')
+    for (const id of ['999999999999999999', '555555555555555555']) {
+      const res = await app.request(`/users/@me/guilds/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: token },
+      })
+      expect(res.status).toBe(404)
+      expect(await res.json()).toEqual({
+        message: 'Unknown Guild',
+        code: 10_004,
+      })
+    }
+    expect(
+      db.prepare('SELECT id FROM guilds WHERE id = ?').get('555555555555555555')
+    ).toBeDefined()
+  })
+
+  it('returns 401 without authorization', async () => {
+    const res = await app.request(`/users/@me/guilds/${guildId}`, {
+      method: 'DELETE',
+    })
+    expect(res.status).toBe(401)
+    expect(
+      db.prepare('SELECT id FROM guilds WHERE id = ?').get(guildId)
+    ).toBeDefined()
   })
 })

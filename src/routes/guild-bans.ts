@@ -7,7 +7,12 @@
 import { Hono } from 'hono'
 import type { Database } from '../db'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
-import { getGuild } from '../services/guilds'
+import type { GatewayEventControls } from '../gateway/event-controls'
+import {
+  getGuild,
+  getGuildBotUserId,
+  removeGuildFromBot,
+} from '../services/guilds'
 import {
   getGuildBan,
   getGuildBans,
@@ -20,9 +25,13 @@ import { requireEntity, parseLimitQuery } from '../lib/route-helpers'
 /**
  * Creates the guild bans API routes.
  * @param db - Database
+ * @param eventControls - Gateway test controls cleared when the bot is banned
  * @returns Hono router instance
  */
-export function createGuildBanRoutes(db: Database): Hono {
+export function createGuildBanRoutes(
+  db: Database,
+  eventControls?: Pick<GatewayEventControls, 'deleteGuild'>
+): Hono {
   const app = new Hono()
 
   // GET /guilds/:guildId/bans — List a guild's bans
@@ -107,6 +116,14 @@ export function createGuildBanRoutes(db: Database): Hono {
     }
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
+    }
+
+    // Banning the guild's own bot removes the guild from that bot
+    // (GUILD_MEMBER_REMOVE + GUILD_DELETE); the ban goes with the guild.
+    if (userId === getGuildBotUserId(db, guildId)) {
+      removeGuildFromBot(db, guildId, 'ban')
+      eventControls?.deleteGuild(guildId)
+      return c.body(null, 204)
     }
 
     // The audit header wins, retaining its existing verbatim behavior. Hono

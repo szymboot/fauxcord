@@ -225,6 +225,12 @@ ws.on('message', (raw) => {
 })
 ```
 
+When the bot leaves a guild (`DELETE /users/@me/guilds/:guildId`) or the guild
+is deleted (`DELETE /guilds/:guildId`), its sessions with the `GUILDS` intent
+receive `GUILD_DELETE` (`{ "id": "<guild id>" }`) and the guild disappears from
+later READY payloads. See
+[Test API](test-api.md#remove-a-guild-from-the-bot-through-discord-rest-guild_delete).
+
 ---
 
 ## 9. Slash commands and interactions

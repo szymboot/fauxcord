@@ -13,7 +13,8 @@ import {
   getApplication,
   updateBotUser,
 } from '../services/users'
-import { getBotGuilds } from '../services/guilds'
+import { getBotGuilds, removeGuildFromBot } from '../services/guilds'
+import type { GatewayEventControls } from '../gateway/event-controls'
 import {
   getOrCreateDmChannel,
   createGroupDmChannel,
@@ -94,9 +95,13 @@ function requireOAuthApplicationAccess(
 /**
  * Creates the Users API routes.
  * @param db - Database
+ * @param eventControls - Gateway test controls cleared when the bot leaves
  * @returns Hono router instance
  */
-export function createUserRoutes(db: Database): Hono<AppEnv> {
+export function createUserRoutes(
+  db: Database,
+  eventControls?: Pick<GatewayEventControls, 'deleteGuild'>
+): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
 
   // GET /users/@me — Retrieve the authenticated bot user's information
@@ -310,9 +315,19 @@ export function createUserRoutes(db: Database): Hono<AppEnv> {
   app.delete('/users/@me/guilds/:guildId', (c) => {
     const bot = c.get('bot')
     if (!bot) return c.json({ message: '401: Unauthorized', code: 0 }, 401)
-    db.prepare(
-      'DELETE FROM guild_members WHERE guild_id = ? AND user_id = ?'
-    ).run(c.req.param('guildId'), bot.user_id)
+    const guildId = c.req.param('guildId')
+    const guild = db
+      .prepare('SELECT bot_token FROM guilds WHERE id = ?')
+      .get(guildId) as { bot_token: string } | undefined
+    // A bot can only leave a guild it is in; Discord answers Unknown Guild.
+    if (guild?.bot_token !== bot.token)
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild', 404).body,
+        404
+      )
+    // Sends GUILD_MEMBER_REMOVE and GUILD_DELETE before the guild is removed.
+    removeGuildFromBot(db, guildId, 'leave')
+    eventControls?.deleteGuild(guildId)
     return c.body(null, 204)
   })
 

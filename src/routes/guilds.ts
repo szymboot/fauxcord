@@ -9,7 +9,7 @@ import { Hono } from 'hono'
 import type { Database } from '../db'
 import type { GatewayEventControls } from '../gateway/event-controls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
-import { getGuild, updateGuild, deleteGuild } from '../services/guilds'
+import { getGuild, updateGuild, removeGuildFromBot } from '../services/guilds'
 import { getGuildChannels, createGuildChannel } from '../services/channels'
 import { getGuildWebhooks } from '../services/webhooks'
 import {
@@ -28,6 +28,7 @@ import { createGuildInviteRoutes } from './guild-invites'
 /**
  * Creates the guilds API routes.
  * @param db - Database
+ * @param eventControls - Gateway test controls cleared when a guild is removed
  * @returns Hono router instance
  */
 export function createGuildRoutes(
@@ -84,7 +85,8 @@ export function createGuildRoutes(
   app.delete('/guilds/:guildId', (c) => {
     const { guildId } = c.req.param()
 
-    const deleted = deleteGuild(db, guildId)
+    // Sends GUILD_DELETE to the guild's bot before its data is removed.
+    const deleted = removeGuildFromBot(db, guildId, 'delete')
     if (!deleted) {
       const err = discordError(
         DiscordErrorCode.UNKNOWN_GUILD,
@@ -172,9 +174,9 @@ export function createGuildRoutes(
   })
 
   app.route('/', createGuildRoleRoutes(db))
-  app.route('/', createGuildMemberRoutes(db))
+  app.route('/', createGuildMemberRoutes(db, eventControls))
   app.route('/', createGuildEmojiRoutes(db))
-  app.route('/', createGuildBanRoutes(db))
+  app.route('/', createGuildBanRoutes(db, eventControls))
   app.route('/', createGuildInviteRoutes(db))
 
   return app

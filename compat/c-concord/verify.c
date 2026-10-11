@@ -131,6 +131,9 @@
 #define GUILD_ID 200000000000000001ULL
 #define CHANNEL_ID 300000000000000001ULL
 #define BOT_USER_ID 100000000000000001ULL
+/* Synthetic, never-a-member ban target: banning the guild's own bot removes
+ * the guild from that bot (GUILD_DELETE + deletion), breaking later checks. */
+#define BAN_TARGET_ID 700000000000000001ULL
 
 /* ---------------------------------------------------------------------- */
 /* Result reporting                                                        */
@@ -851,14 +854,14 @@ main(void)
         struct discord_ban ban_ret = { 0 };
         struct discord_ret_ban ret = { .sync = &ban_ret };
         record_call("GET /guilds/{guild_id}/bans/{user_id}",
-                    discord_get_guild_ban(client, GUILD_ID, BOT_USER_ID, &ret), client);
+                    discord_get_guild_ban(client, GUILD_ID, BAN_TARGET_ID, &ret), client);
     }
     /* PUT /guilds/{guild_id}/bans/{user_id} */
     {
         struct discord_ret ret = { .sync = true };
         struct discord_create_guild_ban params = { .delete_message_days = 0 };
         record_call("PUT /guilds/{guild_id}/bans/{user_id}",
-                    discord_create_guild_ban(client, GUILD_ID, BOT_USER_ID, &params, &ret), client);
+                    discord_create_guild_ban(client, GUILD_ID, BAN_TARGET_ID, &params, &ret), client);
     }
     /* GET /guilds/{guild_id}/bans */
     {
@@ -1205,7 +1208,7 @@ main(void)
         struct discord_ret ret = { .sync = true };
         struct discord_remove_guild_ban params = { 0 };
         record_call("DELETE /guilds/{guild_id}/bans/{user_id}",
-                    discord_remove_guild_ban(client, GUILD_ID, BOT_USER_ID, &params, &ret), client);
+                    discord_remove_guild_ban(client, GUILD_ID, BAN_TARGET_ID, &params, &ret), client);
     }
     /* DELETE /guilds/{guild_id}/emojis/{emoji_id} */
     {

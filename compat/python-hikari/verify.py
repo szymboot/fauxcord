@@ -97,6 +97,10 @@ ENDPOINTS = json.loads((COMMON_DIR / "endpoints.json").read_text(encoding="utf-8
 
 BOT = SETUP["user"]["id"]
 GUILD = SETUP["guilds"][0]["id"]
+# Ban a synthetic, never-a-member user ID rather than the bot itself:
+# banning the guild's own bot removes the guild from that bot (Fauxcord
+# sends GUILD_DELETE and deletes it), which would break every later check.
+BAN_TARGET = "700000000000000001"
 CH = SETUP["guilds"][0]["channels"][0]["id"]
 # setup.json's token includes the "Bot " prefix (as Fauxcord's /_test/setup
 # expects); hikari's RESTApp.acquire() wants the raw token without it, with
@@ -235,7 +239,7 @@ async def main() -> None:
                 pass  # reaction endpoints may still exercise the wire format
 
             try:
-                await rest.ban_user(GUILD, BOT)
+                await rest.ban_user(GUILD, BAN_TARGET)
             except Exception:
                 pass  # bootstrap best-effort; some rows depend on the ban existing
 
@@ -499,15 +503,15 @@ async def main() -> None:
                 "GET /gateway/bot": (rest.fetch_gateway_bot_info, None),
                 "GET /gateway": (rest.fetch_gateway_url, None),
                 "DELETE /guilds/{guild_id}/bans/{user_id}": (
-                    lambda: rest.unban_user(GUILD, BOT),
+                    lambda: rest.unban_user(GUILD, BAN_TARGET),
                     None,
                 ),
                 "GET /guilds/{guild_id}/bans/{user_id}": (
-                    lambda: rest.fetch_ban(GUILD, BOT),
+                    lambda: rest.fetch_ban(GUILD, BAN_TARGET),
                     None,
                 ),
                 "PUT /guilds/{guild_id}/bans/{user_id}": (
-                    lambda: rest.ban_user(GUILD, BOT),
+                    lambda: rest.ban_user(GUILD, BAN_TARGET),
                     None,
                 ),
                 "GET /guilds/{guild_id}/bans": (fetch_bans, None),
