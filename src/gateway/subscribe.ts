@@ -107,12 +107,13 @@ export function registerGatewaySubscriptions(
       guild_id: payload.guildId,
       emoji: payload.emoji,
       ...(payload.member && { member: payload.member }),
-      ...(payload.scope && {
-        burst: false,
-        type: 0,
-        burst_colors: [],
+      ...(payload.messageAuthorId && {
         message_author_id: payload.messageAuthorId,
       }),
+      // Fauxcord persists only normal reactions.
+      burst: false,
+      type: 0,
+      burst_colors: [],
     }
     if (payload.scope) {
       if (payload.scope.db !== db) return
@@ -145,6 +146,8 @@ export function registerGatewaySubscriptions(
         message_id: payload.messageId,
         guild_id: payload.guildId,
         emoji: payload.emoji,
+        burst: false,
+        type: 0,
       },
       GatewayIntentBits.GuildMessageReactions
     )
