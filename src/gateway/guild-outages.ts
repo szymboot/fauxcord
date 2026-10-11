@@ -9,7 +9,7 @@ import type {
   SessionManager,
 } from './session'
 import type { GatewayPayload } from './protocol'
-import { sendDispatch } from './dispatch'
+import { dispatchGuildId, sendDispatch } from './dispatch'
 import { hasIntent } from './intents'
 
 /** Maximum outage records (active and retained) per Gateway instance. */
@@ -24,13 +24,6 @@ const MAX_VOICE_STATES = 100
 const MAX_WAITERS = 64
 /** How long evidence of a recovered outage stays inspectable. */
 export const RETAIN_MS = 120_000
-
-/** Dispatches whose guild is identified by `d.id` instead of `d.guild_id`. */
-const GUILD_OBJECT_EVENTS = new Set([
-  'GUILD_CREATE',
-  'GUILD_UPDATE',
-  'GUILD_DELETE',
-])
 
 /** Unavailable stub event sent to sessions that IDENTIFY during an outage. */
 export type IdentifyDispatch = 'guild_delete' | 'guild_create'
@@ -143,19 +136,6 @@ function normalizeToken(token: string): string {
 /** Key of an active outage: one setup token and one guild. */
 function activeKey(token: string, guildId: string): string {
   return `${token}\0${guildId}`
-}
-
-/**
- * Resolves the guild a dispatch belongs to: `guild_id`, or `id` for events
- * whose payload is the guild itself.
- */
-function dispatchGuildId(eventName: string, data: unknown): string | undefined {
-  if (!data || typeof data !== 'object') return undefined
-  const record = data as { guild_id?: unknown; id?: unknown }
-  if (typeof record.guild_id === 'string') return record.guild_id
-  return GUILD_OBJECT_EVENTS.has(eventName) && typeof record.id === 'string'
-    ? record.id
-    : undefined
 }
 
 /** Copies only bounded public facts from a GUILD_CREATE envelope. */
@@ -373,7 +353,7 @@ export class GatewayGuildOutages {
   private ownerToken(botId: string, guildId: string): string | undefined {
     const row = this.db
       .prepare(
-        'SELECT g.bot_token AS token FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ? AND b.user_id = ?'
+        'SELECT g.bot_token AS token FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ? AND g.bot_present = 1 AND b.user_id = ?'
       )
       .get(guildId, botId) as { token: string } | undefined
     return row?.token

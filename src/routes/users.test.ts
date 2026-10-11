@@ -568,7 +568,7 @@ describe('DELETE /users/@me/guilds/:guildId', () => {
     cleanup()
   })
 
-  it('leaves the guild, removing it and its data from the bot', async () => {
+  it('leaves the guild, detaching the bot but keeping the fixture', async () => {
     const res = await app.request(`/api/v10/users/@me/guilds/${guildId}`, {
       method: 'DELETE',
       headers: { Authorization: token },
@@ -576,14 +576,23 @@ describe('DELETE /users/@me/guilds/:guildId', () => {
     expect(res.status).toBe(204)
     expect(
       db.prepare('SELECT id FROM guilds WHERE id = ?').get(guildId)
-    ).toBeUndefined()
+    ).toBeDefined()
     expect(
       db.prepare('SELECT id FROM channels WHERE guild_id = ?').all(guildId)
-    ).toEqual([])
+    ).toHaveLength(1)
     const guilds = await app.request('/users/@me/guilds', {
       headers: { Authorization: token },
     })
     expect(await guilds.json()).toEqual([])
+    const again = await app.request(`/users/@me/guilds/${guildId}`, {
+      method: 'DELETE',
+      headers: { Authorization: token },
+    })
+    expect(again.status).toBe(404)
+    expect(await again.json()).toEqual({
+      message: 'Unknown Guild',
+      code: 10_004,
+    })
   })
 
   it('returns 404 Unknown Guild for a guild the bot is not in', async () => {

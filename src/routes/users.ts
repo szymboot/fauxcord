@@ -317,15 +317,17 @@ export function createUserRoutes(
     if (!bot) return c.json({ message: '401: Unauthorized', code: 0 }, 401)
     const guildId = c.req.param('guildId')
     const guild = db
-      .prepare('SELECT bot_token FROM guilds WHERE id = ?')
-      .get(guildId) as { bot_token: string } | undefined
-    // A bot can only leave a guild it is in; Discord answers Unknown Guild.
-    if (guild?.bot_token !== bot.token)
+      .prepare('SELECT bot_token, bot_present FROM guilds WHERE id = ?')
+      .get(guildId) as { bot_token: string; bot_present: number } | undefined
+    // A bot can only leave a guild it is in; Discord answers Unknown Guild,
+    // also when it already left.
+    if (guild?.bot_token !== bot.token || guild.bot_present !== 1)
       return c.json(
         discordError(DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild', 404).body,
         404
       )
-    // Sends GUILD_MEMBER_REMOVE and GUILD_DELETE before the guild is removed.
+    // Detaches the bot, sending GUILD_MEMBER_REMOVE and GUILD_DELETE; the
+    // guild and its fixtures survive.
     removeGuildFromBot(db, guildId, 'leave')
     eventControls?.deleteGuild(guildId)
     return c.body(null, 204)

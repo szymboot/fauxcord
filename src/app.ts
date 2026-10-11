@@ -16,6 +16,7 @@ import { versionMiddleware } from './middleware/version'
 import { createAuthMiddleware, type AppEnv } from './middleware/auth'
 import { rateLimitMiddleware } from './middleware/rate-limit'
 import { createLatencyMiddleware } from './middleware/latency'
+import { createRemovedSetupMiddleware } from './middleware/removed-setup'
 import { createRestFaultMiddleware } from './middleware/rest-faults'
 import { createRestPageHoldMiddleware } from './middleware/rest-page-holds'
 import { getRestPageHolds } from './services/rest-page-holds'
@@ -204,6 +205,7 @@ export function buildApp(
   app.use('*', authMiddleware)
   app.use('*', latencyMiddleware)
   app.use('*', rateLimitMiddleware)
+  app.use('*', createRemovedSetupMiddleware(db))
   app.use('*', createRestPageHoldMiddleware(db))
   app.use('*', createRestFaultMiddleware(db))
 

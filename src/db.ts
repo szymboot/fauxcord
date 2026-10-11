@@ -54,14 +54,16 @@ const CHANNELS_FEATURE_COLUMNS: Record<string, string> = {
   video_quality_mode: 'INTEGER',
 }
 
-/** Guild AFK settings added after the initial guild schema. */
+/** Guild columns added after the initial guild schema (AFK settings, bot presence). */
 const GUILDS_AFK_COLUMNS: Record<string, string> = {
   afk_channel_id: 'TEXT REFERENCES channels(id) ON DELETE SET NULL',
   afk_timeout: 'INTEGER NOT NULL DEFAULT 300',
+  // 0 once the owning bot left, was kicked or banned; the fixture survives.
+  bot_present: 'INTEGER NOT NULL DEFAULT 1',
 }
 
 /**
- * Adds the guild AFK columns to an existing `guilds` table when missing.
+ * Adds the later guild columns to an existing `guilds` table when missing.
  * @param db - Database instance
  */
 function migrateGuildAfkColumns(db: Database): void {
@@ -323,7 +325,18 @@ export function initializeDatabase(dbPath: string): Database {
       preferred_locale                TEXT NOT NULL DEFAULT 'en-US',
       afk_channel_id                  TEXT REFERENCES channels(id) ON DELETE SET NULL,
       afk_timeout                     INTEGER NOT NULL DEFAULT 300,
+      bot_present                     INTEGER NOT NULL DEFAULT 1,
       created_at                      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Setups whose bot left, was kicked or banned from a guild that survived.
+    -- Their sessions never see that guild again, even after another setup
+    -- takes it over or their own setup is deleted (sessions outlive it).
+    -- Re-listing the guild under the same token in setup clears the row.
+    CREATE TABLE IF NOT EXISTS guild_bot_removals (
+      guild_id  TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+      bot_token TEXT NOT NULL,
+      PRIMARY KEY (guild_id, bot_token)
     );
 
     CREATE TABLE IF NOT EXISTS guild_audit_log_entries (

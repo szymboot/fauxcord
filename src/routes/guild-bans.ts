@@ -118,14 +118,6 @@ export function createGuildBanRoutes(
       return c.json(validationError(errors).body, 400)
     }
 
-    // Banning the guild's own bot removes the guild from that bot
-    // (GUILD_MEMBER_REMOVE + GUILD_DELETE); the ban goes with the guild.
-    if (userId === getGuildBotUserId(db, guildId)) {
-      removeGuildFromBot(db, guildId, 'ban')
-      eventControls?.deleteGuild(guildId)
-      return c.body(null, 204)
-    }
-
     // The audit header wins, retaining its existing verbatim behavior. Hono
     // already decodes query values (including '+' spaces) exactly once.
     const reason =
@@ -137,6 +129,15 @@ export function createGuildBanRoutes(
       payload.delete_message_days ?? queryDeleteMessageDays ?? 0
     const deleteMessageSeconds =
       payload.delete_message_seconds ?? deleteMessageDays * 86_400
+    // Banning the guild's own bot detaches it from the guild
+    // (GUILD_MEMBER_REMOVE + GUILD_DELETE) and records the ban; the guild
+    // itself survives.
+    if (userId === getGuildBotUserId(db, guildId)) {
+      removeGuildFromBot(db, guildId, 'ban', { reason, deleteMessageSeconds })
+      eventControls?.deleteGuild(guildId)
+      return c.body(null, 204)
+    }
+
     createGuildBan(db, guildId, userId, reason, deleteMessageSeconds)
     return c.body(null, 204)
   })

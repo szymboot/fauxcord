@@ -166,6 +166,31 @@ function deleteRecentGuildMessages(
 }
 
 /**
+ * Records the ban of a guild's own bot when it is removed from the guild. The
+ * bot's membership is deleted by the caller, which publishes the removal
+ * events; this writes the ban row (keeping an existing reason) and deletes the
+ * bot's recent messages like any ban, and emits nothing.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - The bot's user ID
+ * @param reason - Ban reason, or null
+ * @param deleteMessageSeconds - Age window (seconds) of messages to delete
+ */
+export function recordGuildBotBan(
+  db: Database,
+  guildId: string,
+  userId: string,
+  reason: string | null,
+  deleteMessageSeconds: number
+): void {
+  db.prepare(
+    `INSERT INTO guild_bans (guild_id, user_id, reason) VALUES (?, ?, ?)
+     ON CONFLICT(guild_id, user_id) DO NOTHING`
+  ).run(guildId, userId, reason)
+  deleteRecentGuildMessages(db, guildId, userId, deleteMessageSeconds)
+}
+
+/**
  * Creates a guild ban and removes the user's guild membership.
  * Banning a user implies kicking them, so their `guild_members` and
  * `member_roles` rows are deleted in the same transaction. When

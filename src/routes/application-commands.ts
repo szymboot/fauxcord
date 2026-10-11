@@ -6,7 +6,7 @@
  */
 
 import { Hono } from 'hono'
-import type { Context } from 'hono'
+import type { Context, Next } from 'hono'
 import type { Database } from '../db'
 import type { AppEnv } from '../middleware/auth'
 import { parseJsonBody, requireEntity } from '../lib/route-helpers'
@@ -117,6 +117,39 @@ function hasDuplicateNameInPayload(
  */
 export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
+
+  /**
+   * Denies guild-scoped command and permission routes while the guild's bot
+   * is absent (it left or was removed). The stored commands and permissions
+   * survive for a later rejoin; a removed setup stays denied after another
+   * setup takes the guild over (see the removed-setup middleware).
+   * @param c - Authenticated Hono context
+   * @param next - Next handler
+   * @returns A 403 Missing Access response, or undefined to continue
+   */
+  const denyDetachedGuild = async (
+    c: Context<AppEnv>,
+    next: Next
+  ): Promise<Response | undefined> => {
+    const detached = db
+      .prepare('SELECT 1 FROM guilds WHERE id = ? AND bot_present = 0')
+      .get(c.req.param('guildId'))
+    if (detached)
+      return c.json(
+        discordError(DiscordErrorCode.MISSING_ACCESS, 'Missing Access', 403)
+          .body,
+        403
+      )
+    await next()
+  }
+  app.use(
+    '/applications/:applicationId/guilds/:guildId/commands',
+    denyDetachedGuild
+  )
+  app.use(
+    '/applications/:applicationId/guilds/:guildId/commands/*',
+    denyDetachedGuild
+  )
 
   // GET /applications/:applicationId/commands — list global commands
   app.get('/applications/:applicationId/commands', (c) => {

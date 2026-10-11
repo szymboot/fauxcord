@@ -340,8 +340,8 @@ export function createGuildMemberRoutes(
     )
     if (guild instanceof Response) return guild
 
-    // Kicking the guild's own bot removes the guild from that bot
-    // (GUILD_MEMBER_REMOVE + GUILD_DELETE, then the guild is deleted).
+    // Kicking the guild's own bot detaches it from the guild
+    // (GUILD_MEMBER_REMOVE + GUILD_DELETE); the guild itself survives.
     if (userId === getGuildBotUserId(db, guildId)) {
       removeGuildFromBot(db, guildId, 'kick')
       eventControls?.deleteGuild(guildId)

@@ -41,11 +41,19 @@ export function resolveChannelPermissions(
   userId: string
 ): ResolvedChannelPermissions | null {
   const guild = db
-    .prepare('SELECT owner_id FROM guilds WHERE id = ?')
-    .get(guildId) as { owner_id: string } | undefined
+    .prepare(
+      `SELECT g.owner_id, g.bot_present, b.user_id AS bot_user_id
+       FROM guilds g LEFT JOIN bots b ON b.token = g.bot_token WHERE g.id = ?`
+    )
+    .get(guildId) as
+    | { owner_id: string; bot_present: number; bot_user_id: string | null }
+    | undefined
   // seedGuild intentionally uses the fixture bot as owner. Owners inherently
-  // have access even in the minimal helper fixture without a member row.
-  if (guild?.owner_id === userId) return { privileged: true, permissions: 0n }
+  // have access even in the minimal helper fixture without a member row,
+  // except a bot that left or was removed: it has no access at all.
+  const detachedBot = guild?.bot_present === 0 && guild.bot_user_id === userId
+  if (!detachedBot && guild?.owner_id === userId)
+    return { privileged: true, permissions: 0n }
 
   const member = db
     .prepare('SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ?')

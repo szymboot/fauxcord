@@ -241,7 +241,7 @@ export class GatewayZombieConnections {
     return Boolean(
       this.db
         .prepare(
-          'SELECT 1 FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ? AND b.user_id = ?' +
+          'SELECT 1 FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ? AND g.bot_present = 1 AND b.user_id = ?' +
             (token === undefined ? '' : ' AND b.token = ?')
         )
         .get(guildId, botId, ...(token === undefined ? [] : [token]))

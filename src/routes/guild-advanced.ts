@@ -264,11 +264,12 @@ function requireGuildAccess(
   guildId: string
 ): Response | JsonObject {
   const row = db
-    .prepare('SELECT bot_token FROM guilds WHERE id = ?')
-    .get(guildId) as { bot_token: string } | undefined
+    .prepare('SELECT bot_token, bot_present FROM guilds WHERE id = ?')
+    .get(guildId) as { bot_token: string; bot_present: number } | undefined
   if (!row) return unknown(c, DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild')
   const bot = c.get('bot')
-  return bot?.token === row.bot_token
+  // A bot that left or was removed no longer has access to the guild.
+  return row.bot_present === 1 && bot?.token === row.bot_token
     ? row
     : c.json(
         { message: 'Missing Access', code: DiscordErrorCode.MISSING_ACCESS },
@@ -467,7 +468,7 @@ export function createGuildAdvancedRoutes(
     if (Object.keys(secondsErrors).length > 0)
       return c.json(validationError(secondsErrors).body, 400)
     // The guild's own bot is reported as banned in its request position but
-    // removed from the guild only after the other bans commit and publish.
+    // detached from the guild only after the other bans commit and publish.
     const botUserId = getGuildBotUserId(db, guildId)
     const result = bulkBanGuildMembers(
       db,
@@ -477,7 +478,10 @@ export function createGuildAdvancedRoutes(
       botUserId
     )
     if (botUserId !== undefined && result.banned_users.includes(botUserId)) {
-      removeGuildFromBot(db, guildId, 'ban')
+      removeGuildFromBot(db, guildId, 'ban', {
+        reason: null,
+        deleteMessageSeconds: typeof seconds === 'number' ? seconds : 0,
+      })
       eventControls?.deleteGuild(guildId)
     }
     // Discord answers with 500000 instead of a body when nobody was banned.

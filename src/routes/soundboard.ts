@@ -49,7 +49,8 @@ export function createSoundboardRoutes(db?: Database): Hono<AppEnv> {
     }
     const channel = db
       .prepare(
-        `SELECT c.guild_id, c.type, g.bot_token
+        `SELECT c.guild_id, c.type,
+                CASE WHEN g.bot_present = 1 THEN g.bot_token END AS bot_token
          FROM channels c LEFT JOIN guilds g ON g.id = c.guild_id
          WHERE c.id = ?`
       )
