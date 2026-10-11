@@ -48,7 +48,11 @@ re-IDENTIFY without restarting it, use
 `POST /_test/reset` clears voice fixtures while retaining bot, guild, channel,
 and member registrations. A nonempty `token` limits cleanup to that setup's
 guilds; an omitted or empty token clears all voice fixtures. Deleting a setup,
-guild, channel, user, or membership removes its affected voice fixtures.
+guild, user, or membership silently removes its affected voice fixtures.
+Deleting a connected voice or stage channel through `DELETE /channels/:id`
+instead disconnects its members like real Discord: the states are kept with
+`channel_id: null` and live `VOICE_STATE_UPDATE` disconnects are sent (see
+[Channel deletion disconnects members](test-api.md#channel-deletion-disconnects-members)).
 Recreating deleted setup IDs does not restore the previous states. Unrelated
 setups keep their fixtures after scoped cleanup.
 

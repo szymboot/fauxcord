@@ -210,8 +210,33 @@ through this path. Their writable fields are `channel_id`, `suppress` and
 
 Voice fixtures are cleared by `/_test/reset`: a nonempty token scopes deletion
 to that Bot's guilds, and omission/empty token clears all voice states. Setup,
-guild, channel, user and membership deletion remove affected states. Other
+guild, user and membership deletion silently remove affected states. Other
 setups and memberships remain intact.
+
+### Channel deletion disconnects members
+
+Deleting a voice (type 2) or stage (type 13) channel with
+`DELETE /channels/:channelId` disconnects every member connected to it, as real
+Discord does. Each affected state is changed exactly like a
+`{"channel_id": null}` fixture patch: it is retained with `channel_id: null`,
+the same voice `session_id` and other flags, while `self_stream`, `self_video`
+and `request_to_speak_timestamp` are cleared. One native `VOICE_STATE_UPDATE`
+(with `member`) is published per member through the normal voice path, so the
+`GuildVoiceStates` intent, Bot/token scoping, sequencing, RESUME replay and
+`VOICE_STATE_UPDATE` capture controls all apply. Members connected to other
+channels, already disconnected states and other guilds are untouched. Text and
+other non-voice channels emit only `CHANNEL_DELETE`.
+
+Ordering is deterministic: the disconnects are sent first, in ascending numeric
+`user_id` (snowflake) order, followed by `CHANNEL_DELETE`. Discord's
+[gateway events documentation](https://docs.discord.com/developers/events/gateway-events)
+documents both events but neither this cascade nor an ordering guarantee;
+Fauxcord emits disconnects first so client libraries can still resolve the
+previous channel from their cache when handling them. Do not depend on this
+order when the same code must also run against real Discord.
+
+The deletion and disconnects are committed in one transaction before any event
+is published. `/_test/reset`, setup cleanup and guild deletion remain silent.
 
 ### Shared service contract for Gateway integrations
 
@@ -232,12 +257,17 @@ setups and memberships remain intact.
   commits, or `INVALID_INPUT`, `UNKNOWN_GUILD`, `UNKNOWN_USER`, `UNKNOWN_MEMBER`,
   `UNKNOWN_CHANNEL` before writes. The route returns only `state`. A native
   publisher can use `changed && emit` after success; this service emits nothing.
+- `disconnectGuildVoiceChannelMembers(db, channelId)`, disconnecting every
+  valid member connected to a voice/stage channel with the same semantics as a
+  `channel_id: null` fixture patch and returning the mutations in numeric
+  `user_id` order. `deleteChannel` calls it inside its deletion transaction and
+  publishes the results before `CHANNEL_DELETE`; it emits nothing itself.
 
 `src/services/voice-state-events.ts` exports
 `publishGuildVoiceStateMutation(db, mutation)`. The fixture and stage routes
-call it after the shared storage transaction returns successfully. It attaches
-the existing member/user, resolves the guild's Bot/token scope and emits the
-typed `voice.state.update` domain event. Gateway subscriptions filter it by
+and channel deletion call it after the shared storage transaction returns
+successfully. It attaches the existing member/user, resolves the guild's
+Bot/token scope and emits the typed `voice.state.update` domain event. Gateway subscriptions filter it by
 database, token and intent before normal dispatch sequencing.
 
 `src/validators/voice-state.ts` exports `TestVoiceStatePatch` and
@@ -1803,7 +1833,8 @@ reaction-clear DELETE endpoints have native producers.
 For voice, arm the same control API with
 `"events": ["VOICE_STATE_UPDATE"]` and drive real transitions through
 `PATCH /_test/guilds/:guildId/voice-states/:userId` (or the existing stage PATCH
-routes). The selected session must have the Guild Voice States intent; filtering
+routes, or `DELETE /channels/:channelId` of an occupied voice/stage channel).
+The selected session must have the Guild Voice States intent; filtering
 happens before capture. Silent `emit: false` fixtures, no-op writes, rejected
 requests, and changes to an already disconnected state produce no event to
 capture. Voice dispatches follow the guild's registered bot, exact setup token,

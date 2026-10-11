@@ -196,6 +196,43 @@ function applyTestGuildVoiceState(
 }
 
 /**
+ * Disconnects every valid member connected to a guild voice or stage channel,
+ * as Discord does when that channel is deleted. Each state is disconnected
+ * exactly like a `channel_id: null` fixture patch (session and other flags
+ * retained; streaming, video and request-to-speak cleared). Results are in
+ * numeric snowflake `user_id` order. Other channel types, legacy orphan rows
+ * and members connected elsewhere are untouched. Emits nothing: the caller
+ * publishes the returned mutations after its transaction commits.
+ * @param db - Database
+ * @param channelId - Channel about to be deleted
+ * @returns Committed disconnect mutations, one per affected member
+ */
+export function disconnectGuildVoiceChannelMembers(
+  db: Database,
+  channelId: string
+): VoiceStateFixtureMutation[] {
+  return runInTransaction(db, () => {
+    const rows = db
+      .prepare(
+        `SELECT vs.guild_id, vs.user_id FROM guild_voice_states vs
+      JOIN guild_members m ON m.guild_id = vs.guild_id AND m.user_id = vs.user_id
+      JOIN channels c ON c.id = vs.channel_id AND c.guild_id = vs.guild_id
+      WHERE vs.channel_id = ? AND c.type IN (2, 13)
+      ORDER BY length(vs.user_id), vs.user_id`
+      )
+      .all(channelId) as { guild_id: string; user_id: string }[]
+    const mutations: VoiceStateFixtureMutation[] = []
+    for (const row of rows) {
+      const result = applyTestGuildVoiceState(db, row.guild_id, row.user_id, {
+        channel_id: null,
+      })
+      if (typeof result !== 'string') mutations.push(result)
+    }
+    return mutations
+  })
+}
+
+/**
  * Validates and atomically patches one synthetic member's voice state.
  * First creation requires channel_id (null is permitted). Moves and flag
  * updates retain the session; reconnecting after null creates a new session.
