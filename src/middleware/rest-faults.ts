@@ -11,13 +11,30 @@ export function createRestFaultMiddleware(
 ): MiddlewareHandler<AppEnv> {
   const runtime = getRestFaultRuntime(db)
   return async (c, next) => {
-    const path = c.req.path.replace(/^\/api(?:\/v10)?(?=\/)/, '')
+    const path = c.req.path
+      .replace(/^\/api(?:\/v10)?(?=\/)/, '')
+      .replace(/^\/users\/%40me\/channels$/, '/users/@me/channels')
+    let recipientId: string | undefined
+    if (path === '/users/@me/channels' && c.req.method === 'POST') {
+      const payload: unknown = await c.req.raw
+        .clone()
+        .json()
+        .catch(() => undefined)
+      if (
+        typeof payload === 'object' &&
+        payload !== null &&
+        'recipient_id' in payload &&
+        typeof payload.recipient_id === 'string'
+      )
+        recipientId = payload.recipient_id
+    }
     const fault = consumeRestFault(
       db,
       c.req.method,
       path,
       c.get('bot')?.token,
-      new URL(c.req.url).searchParams
+      new URL(c.req.url).searchParams,
+      recipientId
     )
     if (fault) {
       if (fault.mode === 'rate_limit') {

@@ -197,6 +197,7 @@ describe('REST fault selector index migration', () => {
       db.exec(`
         DROP INDEX idx_active_rest_fault;
         DROP INDEX idx_active_rest_get_fault;
+        DROP INDEX idx_active_rest_dm_fault;
         CREATE UNIQUE INDEX idx_active_rest_fault
           ON test_rest_faults(method, path) WHERE remaining > 0;
       `)

@@ -389,9 +389,19 @@ function insertRestFault(
       .prepare(
         `SELECT f.id FROM test_rest_faults f JOIN guilds g ON g.id = f.guild_id
          WHERE f.method = ? AND f.path = ? AND f.query = ? AND f.remaining > 0
-         AND (f.method != 'GET' OR g.bot_token = ?)`
+         AND ((f.method != 'GET' AND f.path != '/users/@me/channels') OR g.bot_token = ?)
+         AND (f.path != '/users/@me/channels'
+           OR json_extract(f.options, '$.recipient_id') IS NULL
+           OR ? IS NULL OR json_extract(f.options, '$.recipient_id') = ?)`
       )
-      .get(request.method, request.path, query, guild.bot_token)
+      .get(
+        request.method,
+        request.path,
+        query,
+        guild.bot_token,
+        request.recipient_id ?? null,
+        request.recipient_id ?? null
+      )
   )
     return 'CONFLICT'
   const id = generateSnowflake()
@@ -411,17 +421,18 @@ function insertRestFault(
     request.message,
     request.times,
     request.times,
-    JSON.stringify(
-      request.mode
-        ? {
-            mode: request.mode,
-            timeout_ms: request.timeout_ms,
-            retry_after: request.retry_after,
-            global: request.global,
-            delay_ms: request.delay_ms,
-          }
-        : {}
-    ),
+    JSON.stringify({
+      ...(request.recipient_id !== undefined && {
+        recipient_id: request.recipient_id,
+      }),
+      ...(request.mode && {
+        mode: request.mode,
+        timeout_ms: request.timeout_ms,
+        retry_after: request.retry_after,
+        global: request.global,
+        delay_ms: request.delay_ms,
+      }),
+    }),
     request.mode ? Date.now() + (request.timeout_ms ?? 30_000) : 0,
     request.mode ? guild.bot_token : null
   )
@@ -434,7 +445,7 @@ function insertRestFault(
   return result
 }
 
-/** Arms an exact request within a guild; GET duplicates are scoped to its bot. */
+/** Arms an exact request with guild cleanup and bot-scoped user selectors. */
 export function createRestFault(
   db: Database,
   request: RestFaultRequest
@@ -468,7 +479,8 @@ export function consumeRestFault(
   method: string,
   path: string,
   botToken?: string,
-  search = new URLSearchParams()
+  search = new URLSearchParams(),
+  recipientId?: string
 ): RestFault | undefined {
   pruneRestFaults(db)
   let query = ''
@@ -493,14 +505,23 @@ export function consumeRestFault(
     WHERE id = (
       SELECT f.id FROM test_rest_faults f JOIN guilds g ON g.id = f.guild_id
       WHERE f.method = ? AND f.path = ? AND f.query = ? AND f.remaining > 0
-      AND (f.method != 'GET' OR g.bot_token = ?)
+      AND ((f.method != 'GET' AND f.path != '/users/@me/channels') OR g.bot_token = ?)
+      AND (f.path != '/users/@me/channels'
+        OR json_extract(f.options, '$.recipient_id') IS NULL
+        OR json_extract(f.options, '$.recipient_id') = ?)
       AND (f.owner_token IS NULL OR f.owner_token = ?)
       LIMIT 1
     )
     RETURNING *`
       )
-      .get(method, path, query, botToken ?? null, botToken ?? null) as
-      StoredRestFault | undefined
+      .get(
+        method,
+        path,
+        query,
+        botToken ?? null,
+        recipientId ?? null,
+        botToken ?? null
+      ) as StoredRestFault | undefined
   )
 }
 
