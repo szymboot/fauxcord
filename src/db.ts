@@ -403,6 +403,17 @@ export function initializeDatabase(dbPath: string): Database {
 
     CREATE INDEX IF NOT EXISTS idx_channels_guild ON channels(guild_id);
 
+    CREATE TABLE IF NOT EXISTS test_closed_dms (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      bot_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      owner_token TEXT NOT NULL REFERENCES bots(token) ON DELETE CASCADE,
+      UNIQUE (guild_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_closed_dms_owner
+      ON test_closed_dms(owner_token);
+
     CREATE TABLE IF NOT EXISTS test_rest_faults (
       id TEXT PRIMARY KEY,
       guild_id TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,

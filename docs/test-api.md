@@ -1137,6 +1137,65 @@ persistence/uploads/Gateway dispatch before failure. The retry client is a small
 HTTP test client; discord-bot's library configuration and handler integration
 remain downstream work.
 
+## `POST /_test/closed-dms` — Close a human user's DMs to one bot
+
+Register the human with `POST /_test/users`, then install the restriction:
+
+```json
+{
+  "guild_id": "222222222222222222",
+  "user_id": "444444444444444444"
+}
+```
+
+Both fields are required nonzero Snowflake strings (1–20 digits, no leading
+zeros). Extra fields are rejected. The guild must exist and belong to a bot
+setup, and the user must exist and be human; guild membership is not required.
+Invalid bodies (including malformed JSON and bot recipients) return HTTP `400`
+with Discord's `Invalid Form Body` / `50035` field errors. Unknown guilds/users
+return HTTP `404` with `10004` / `10013` respectively.
+
+Returns HTTP `201`:
+
+```json
+{
+  "id": "<control UUID>",
+  "guild_id": "222222222222222222",
+  "bot_id": "111111111111111111",
+  "user_id": "444444444444444444"
+}
+```
+
+Repeated creation for the same guild/user pair returns the same control and
+`201`. The guild selects its exact owning bot setup token and provides cleanup
+scope, as with global user GET REST faults. The restriction applies to that
+bot's 1:1 DMs with this user, including channels created before the fixture.
+`POST /users/@me/channels` still succeeds and reuses the DM normally. Every
+`POST /channels/{dmChannelId}/messages` while the fixture is active returns
+HTTP `403` with `{"message":"Cannot send messages to this user","code":50007}`.
+It stores no message, embeds or attachments and dispatches no `MESSAGE_CREATE`.
+Other users, bot setup tokens, guild channels and group DMs are unaffected.
+
+The restriction remains active until removed or cleaned up; it has no attempt
+counter, expiry or asynchronous wait. A send already persisted before creation
+is unaffected. `POST /_test/reset` clears all restrictions, or only those owned
+by the supplied `token`. `DELETE /_test/setup/:token`, deletion of the cleanup
+guild or user, and reassignment of the guild to another setup also remove it.
+Restrictions for other bots survive scoped cleanup. If you install multiple
+controls for the same bot/user under different guilds, all must be removed to
+restore delivery.
+
+## `GET /_test/closed-dms/:id` — Inspect a closed-DM restriction
+
+Returns HTTP `200` with the creation response and `Cache-Control: no-store`.
+An unknown or cleaned-up control returns HTTP `404` / code `0`.
+
+## `DELETE /_test/closed-dms/:id` — Reopen DMs
+
+Returns HTTP `204` when removed; unknown/already removed controls return HTTP
+`404` / code `0`, matching REST-fault removal. Delivery resumes immediately
+using the same DM channel unless another restriction still covers the pair.
+
 ## `GET /_test/rest-faults/:id` — Inspect consumption
 
 Returns the control object, including `remaining` and `consumed`, or `404` for

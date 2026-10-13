@@ -53,6 +53,7 @@ import { validateGuildMemberUpdate } from '../validators/guild'
 import { validateMemberDateFixture } from '../validators/member-dates'
 import { validateTestUserGlobalName } from '../validators/test-user-global-name'
 import { validateRestFault } from '../validators/rest-fault'
+import { createClosedDmRoutes } from './test-closed-dms'
 import {
   validateTestReaction,
   validateTestReactionRemoval,
@@ -140,6 +141,7 @@ export function createTestRoutes(
   const app = new Hono()
   app.route('/', createAuditLogResponseRoutes(db))
   app.route('/', createTestVoiceStateRoutes(db))
+  app.route('/', createClosedDmRoutes(db))
 
   app.post('/_test/guilds/:guildId/audit-logs', async (c) => {
     const guildId = c.req.param('guildId')
