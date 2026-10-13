@@ -570,7 +570,8 @@ curl -X POST http://localhost:3000/_test/reset \
 
 Only messages sent by that Bot and Webhooks/Invites belonging to that Bot's Guilds are deleted.
 REST fault controls in that Bot's Guilds are also deleted, including controls targeting
-human-authored messages. Audit-log fixtures are cleared by the target Guild's Bot token,
+human-authored messages, global user reads, and DM channel creation.
+Audit-log fixtures are cleared by the target Guild's Bot token,
 regardless of their actor or target author. Voice states in that Bot's Guilds are also cleared. Other Bots' Guilds keep their controls and audit history.
 
 ---
@@ -853,6 +854,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | Method   | Path                                                | Use                         |
 | -------- | --------------------------------------------------- | --------------------------- |
 | `POST`   | `/channels/{channelId}/messages`                    | Message / edit-log sending  |
+| `POST`   | `/users/@me/channels`                               | DM channel creation         |
 | `DELETE` | `/channels/{channelId}/messages/{messageId}`        | Triggering-message deletion |
 | `PUT`    | `/guilds/{guildId}/bans/{userId}`                   | Ban creation                |
 | `PATCH`  | `/guilds/{guildId}/members/{userId}`                | Member update / mute        |
@@ -869,7 +871,7 @@ slash. It selects the exact Channel, Channel/Message, or Guild/User/Role IDs, so
 unrelated requests cannot consume the fault. The Channel must belong to an existing Guild,
 or the Guild must exist (`404` otherwise). The target Message/User/Role does not
 need to exist yet, allowing prearming before message injection. Existing
-`POST`/`DELETE`/`PUT`/`PATCH` faults apply to any authenticated caller issuing that
+Channel/Guild `POST`/`DELETE`/`PUT`/`PATCH` faults apply to any authenticated caller issuing that
 exact request, regardless of token or body.
 
 `GET` faults apply only to the registered Bot that owns the scope's Guild
@@ -900,6 +902,50 @@ the same User target; otherwise serialize them. An active GET control for the
 same method/path, normalized query (for list GETs), and owning Bot returns `409`, including when another Guild of
 that Bot is supplied. No all-GET or wildcard selector is supported.
 
+DM channel creation uses the same owning-Bot and cleanup scope as global user
+GETs. Set `method` to `POST`, `path` to `/users/@me/channels`, and **require** a
+numeric string `guild_id` of an existing Guild. Its owning Bot is the only caller
+that can consume the control, even when creating a DM for a user outside that
+Guild. Optionally set `recipient_id` to an exact numeric string (1–20 digits) to
+match the request body's `recipient_id`; omit it to fault every channel creation
+on this route by that Bot. The recipient need not exist when arming the fault.
+For example:
+
+```json
+{
+  "method": "POST",
+  "path": "/users/@me/channels",
+  "guild_id": "222222222222222222",
+  "recipient_id": "555555555555555555",
+  "status": 403,
+  "code": 50007,
+  "message": "Cannot send messages to this user",
+  "times": 1
+}
+```
+
+Other Bots, nonmatching recipients, and other endpoints run normally without
+consuming this fault. Matching happens before ordinary request validation; an
+unnarrowed selector also matches group-DM requests on this route. A failed attempt
+never creates a private channel or enters the ordinary route. DM message sends
+retain their normal behavior. All existing modes (`rate_limit`, `delay`, and
+`disconnect`) and their bounds, expiry, and inspection semantics apply here too.
+
+Missing/non-numeric `guild_id`, invalid `recipient_id` (including numbers or
+`null`), a `recipient_id` on any other selector, or a `query` on this selector
+returns `400` with `{"message":"400: Bad Request","code":0}`. Unknown Guilds
+return `404`. Active selectors for the same Bot that overlap return `409`: this
+includes the same recipient across different cleanup Guilds and an unnarrowed
+selector overlapping any recipient selector. Different recipients and different
+Bots may have independent controls. After exhaustion or cancellation, the
+selector can be armed again. Guild deletion, setup deletion, global reset, and
+`POST /_test/reset` with the owning Bot's `token` remove both active and exhausted
+DM controls and their consumption history, exactly like global user GET faults.
+The discord-bot Harness's per-test `ResetGuilds` deletes the Bot's setup before
+registering it again, so these Guild-linked controls are removed by the same
+foreign-key cascade as global user GET faults.
+Use separate Bot tokens or serialize scenarios targeting the same recipient.
+
 `status` is an integer from `400` through `599`; `code` is a nonnegative safe
 integer; `message` is a nonempty string of at most 1000 characters. `times` is an
 integer from `1` through `100`, defaulting to `1`. Invalid/malformed input returns
@@ -908,7 +954,7 @@ integer from `1` through `100`, defaulting to `1`. Invalid/malformed input retur
 On a matching authenticated request, Fauxcord atomically decrements `remaining`
 and increments `consumed`, then returns the chosen status with exactly
 `{"message":"...","code":...}`. The ordinary route does not run: no message
-creation (including attachments and polls), deletion, ban/purge, member update,
+creation (including attachments and polls), DM channel creation, deletion, ban/purge, member update,
 role assignment, or corresponding Gateway mutation event happens. Authentication runs first (`401` attempts do not count);
 the normal latency and rate-limit headers still apply. After exhaustion, requests
 use the ordinary REST behavior, including ordinary validation and 404 responses.

@@ -2,8 +2,10 @@
 export interface RestFaultRequest {
   method: 'DELETE' | 'PUT' | 'PATCH' | 'POST' | 'GET'
   path: string
-  /** Cleanup scope and owning bot selector; required only for global user GETs. */
+  /** Cleanup scope and owning bot selector; required for global user routes. */
   guild_id?: string
+  /** Optional exact body selector, supported only for DM channel creation. */
+  recipient_id?: string
   /** Exact normalized page selector, supported only on the three list GETs. */
   query?: RestFaultQuery
   status: number
@@ -177,6 +179,14 @@ export function validateRestFault(
 
   const userRead =
     body.method === 'GET' && /^\/users\/\d{1,20}$/.test(body.path)
+  const dmCreate = body.method === 'POST' && body.path === '/users/@me/channels'
+  if (
+    body.recipient_id !== undefined &&
+    (!dmCreate ||
+      typeof body.recipient_id !== 'string' ||
+      !/^\d{1,20}$/.test(body.recipient_id))
+  )
+    return undefined
   const guildRead =
     body.method === 'GET' &&
     /^\/guilds\/\d{1,20}\/(?:audit-logs|members|bans|members\/\d{1,20})$/.test(
@@ -196,8 +206,8 @@ export function validateRestFault(
   )
     return undefined
   if (
-    (userRead && body.guild_id === undefined) ||
-    (body.method === 'GET' &&
+    ((userRead || dmCreate) && body.guild_id === undefined) ||
+    ((dmCreate || body.method === 'GET') &&
       body.guild_id !== undefined &&
       (typeof body.guild_id !== 'string' ||
         !/^\d{1,20}$/.test(body.guild_id) ||
@@ -207,6 +217,7 @@ export function validateRestFault(
 
   const supported =
     userRead ||
+    dmCreate ||
     guildRead ||
     pageRead ||
     (body.method === 'POST' &&
@@ -223,7 +234,11 @@ export function validateRestFault(
     ? {
         method: body.method as RestFaultRequest['method'],
         path: body.path,
-        ...(userRead && { guild_id: body.guild_id as string }),
+        ...((userRead || dmCreate) && { guild_id: body.guild_id as string }),
+        ...(dmCreate &&
+          body.recipient_id !== undefined && {
+            recipient_id: body.recipient_id,
+          }),
         ...(query && { query }),
         status,
         code,

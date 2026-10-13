@@ -212,7 +212,7 @@ function migrateInteractionCallbackType(db: Database): void {
   }
 }
 
-/** Preserves legacy controls while allowing separate bots to fault one GET path. */
+/** Preserves legacy controls while admitting bot-scoped user route selectors. */
 function migrateRestFaultSelectors(db: Database): void {
   db.transaction(() => {
     const columns = db.prepare('PRAGMA table_info(test_rest_faults)').all() as {
@@ -236,7 +236,11 @@ function migrateRestFaultSelectors(db: Database): void {
       DROP INDEX IF EXISTS idx_active_rest_fault;
       CREATE UNIQUE INDEX idx_active_rest_fault
         ON test_rest_faults(method, path)
-        WHERE remaining > 0 AND method != 'GET';
+        WHERE remaining > 0 AND method != 'GET'
+          AND path != '/users/@me/channels';
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_active_rest_dm_fault
+        ON test_rest_faults(guild_id, COALESCE(json_extract(options, '$.recipient_id'), ''))
+        WHERE remaining > 0 AND method = 'POST' AND path = '/users/@me/channels';
       DROP INDEX IF EXISTS idx_active_rest_get_fault;
       CREATE UNIQUE INDEX idx_active_rest_get_fault
         ON test_rest_faults(method, path, guild_id, query)
