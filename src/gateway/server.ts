@@ -23,8 +23,16 @@ import type { IdentifyData, ResumeData } from './protocol'
 import { sendDispatch, writeDispatch } from './dispatch'
 import { hasIntent } from './intents'
 
-/** Heartbeat timeout as a multiple of the announced heartbeat interval. */
-const HEARTBEAT_TIMEOUT_INTERVALS = 2
+/**
+ * Path prefix of the per-session `resume_gateway_url`. The path serves the
+ * same Gateway as `/`; it only tells the server, before HELLO, which session
+ * a new connection intends to RESUME.
+ */
+export const GATEWAY_RESUME_PATH = '/_gateway/resume'
+/** `readyState` of an open WebSocket connection. */
+const WS_OPEN = 1
+/** Resume path of one session, with an optional trailing slash. */
+const RESUME_PATH = /^\/_gateway\/resume\/([\da-f]{32})\/?$/
 
 /** Bot info resolved from an IDENTIFY token, used to build the READY user object */
 interface IdentifiedBot {
@@ -149,6 +157,27 @@ function toWsUrl(baseUrl: string): string {
 }
 
 /**
+ * Builds a session's `resume_gateway_url`. It is path-based so clients that
+ * append `?v=10&encoding=json` by string concatenation (DiscordGo,
+ * discord.js) still produce a valid URL.
+ * @param baseUrl - Server base URL (http(s) or ws(s))
+ * @param sessionId - Session ID
+ * @returns The ws(s) URL the client should RESUME on
+ */
+export function resumeGatewayUrl(baseUrl: string, sessionId: string): string {
+  return `${toWsUrl(baseUrl).replace(/\/+$/, '')}${GATEWAY_RESUME_PATH}/${sessionId}`
+}
+
+/**
+ * Extracts the session a connection targets from its upgrade URL.
+ * @param url - Upgrade request URL
+ * @returns The session ID for a resume path, otherwise undefined
+ */
+function resumeTargetOf(url: URL | null | undefined): string | undefined {
+  return url ? RESUME_PATH.exec(url.pathname)?.[1] : undefined
+}
+
+/**
  * (Re)arms the Heartbeat timeout timer.
  * @param sessionManager - Session manager
  * @param ws - The connected WebSocket context
@@ -172,7 +201,7 @@ function armHeartbeatTimeout(
       // session is still reaped below.
     }
     sessionManager.remove(sessionId)
-  }, sessionManager.heartbeatIntervalMs * HEARTBEAT_TIMEOUT_INTERVALS)
+  }, sessionManager.heartbeatTimeoutMs)
 }
 
 /**
@@ -317,7 +346,9 @@ function handleIdentify(
       unavailable: true,
     })),
     session_id: session.sessionId,
-    resume_gateway_url: toWsUrl(options.baseUrl),
+    // Per session, like real Discord's resume URLs: test controls can then
+    // recognize a reconnecting client before HELLO (see `holdHello`).
+    resume_gateway_url: resumeGatewayUrl(options.baseUrl, session.sessionId),
     // `private_channels` is not part of discord-api-types's
     // GatewayReadyDispatchData (long deprecated, always empty), but real
     // Discord still sends it and Discord.Net's ReadyEvent model reads
@@ -473,10 +504,18 @@ function handleResume(
     ws.send(encodePayload({ op: GatewayOp.InvalidSession, d: false }))
     return
   }
+  if (
+    sessionManager.holdResume?.(session, ws.raw as never, () => {
+      handleResume(sessionManager, sessionIdByWs, ws, data)
+    })
+  )
+    return
   const replay = sessionManager.replayFrom(session, data.seq)
   if (!replay) {
-    if (!forceResumeRejection(sessionManager, session, ws, data, replay))
+    if (!forceResumeRejection(sessionManager, session, ws, data, replay)) {
       ws.send(encodePayload({ op: GatewayOp.InvalidSession, d: false }))
+      sessionManager.observeUnreplayableResume?.(session, data.seq)
+    }
     return
   }
   if (
@@ -532,6 +571,10 @@ function handleHeartbeat(
   ws: WSContext,
   sequence: unknown
 ): void {
+  // A heartbeat still in flight on a closing connection (e.g. one the server
+  // just dropped) can neither be ACKed nor keep its session alive; otherwise
+  // it would re-arm a timeout a test control deliberately suspended.
+  if (ws.readyState !== WS_OPEN) return
   const sessionId = sessionIdByWs.get(ws)
   const session = sessionId ? sessionManager.get(sessionId) : undefined
   // One receipt time keeps the zombie record and the session in agreement.
@@ -587,17 +630,31 @@ export function createGatewayWebSocketHandler(
       ) !== undefined
   // Maps ws (WSContext) to sessionId; referenced from onClose/onMessage.
   const sessionIdByWs = new WeakMap<WSContext, string>()
+  // Connections whose HELLO a test control withholds; they are not yet
+  // speaking the Gateway protocol, so anything they send is ignored.
+  const helloWithheld = new WeakSet<WSContext>()
 
   const upgrade: WSEvents = {
     onOpen: (_event, ws) => {
-      ws.send(
-        encodePayload({
-          op: GatewayOp.Hello,
-          d: { heartbeat_interval: sessionManager.heartbeatIntervalMs },
-        })
-      )
+      /** Writes HELLO, which starts the client's IDENTIFY or RESUME. */
+      const hello = (): void => {
+        helloWithheld.delete(ws)
+        ws.send(
+          encodePayload({
+            op: GatewayOp.Hello,
+            d: { heartbeat_interval: sessionManager.heartbeatIntervalMs },
+          })
+        )
+      }
+      const target = resumeTargetOf(ws.url)
+      if (target) {
+        helloWithheld.add(ws)
+        if (sessionManager.holdHello?.(target, ws.raw as never, hello)) return
+      }
+      hello()
     },
     onMessage: (event, ws) => {
+      if (helloWithheld.has(ws)) return
       // event.data is WSMessageReceive (string | Blob | ArrayBufferLike),
       // but Gateway clients are expected to always send JSON text frames,
       // so anything non-string is ignored as an invalid message.

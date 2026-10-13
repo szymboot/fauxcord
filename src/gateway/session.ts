@@ -11,6 +11,8 @@ export const DEFAULT_HEARTBEAT_INTERVAL_MS = 41_250
 export const MIN_HEARTBEAT_INTERVAL_MS = 100
 /** Largest accepted heartbeat interval (ms). */
 export const MAX_HEARTBEAT_INTERVAL_MS = 600_000
+/** Heartbeat timeout as a multiple of the announced heartbeat interval. */
+const HEARTBEAT_TIMEOUT_INTERVALS = 2
 
 /**
  * Whether a value is an accepted heartbeat interval: an integer number of
@@ -126,6 +128,11 @@ export class SessionManager {
       )
   }
 
+  /** Time (ms) without a HEARTBEAT after which a session is reaped. */
+  get heartbeatTimeoutMs(): number {
+    return this.heartbeatIntervalMs * HEARTBEAT_TIMEOUT_INTERVALS
+  }
+
   /** Test-only interception after native sequencing; true holds the envelope. */
   captureDispatch?: (
     session: Session,
@@ -136,9 +143,30 @@ export class SessionManager {
 
   /** Clears a socket's deferred resumes when it establishes another session. */
   invalidatePendingResume?: (socket: WebSocket) => void
+  /** Forgets a socket's held RESUME when it establishes another session. */
+  invalidateHeldResume?: (socket: WebSocket) => void
 
   /** Rebinds explicitly reconnecting controls; ordinary replacement invalidates. */
   resumeEventControls?: (session: Session, socket: WebSocket) => void
+  /**
+   * Lets a test control withhold HELLO from a new connection opened on a
+   * session's `resume_gateway_url`; returns true when HELLO is withheld and
+   * `hello` will be called once the control releases the connection.
+   */
+  holdHello?: (
+    sessionId: string,
+    socket: WebSocket,
+    hello: () => void
+  ) => boolean
+  /**
+   * Lets a test control defer an authenticated RESUME of a session whose
+   * reconnect it holds; returns true when deferred, `retry` runs on release.
+   */
+  holdResume?: (
+    session: Session,
+    socket: WebSocket,
+    retry: () => void
+  ) => boolean
   /** Defers a validated RESUME while a test deliberately buffers native updates. */
   gateResume?: (
     session: Session,
@@ -167,6 +195,12 @@ export class SessionManager {
     session: Session,
     attempt: ResumeAttempt
   ) => ((status: DispatchTransport) => void) | undefined
+  /**
+   * Observes an authenticated RESUME answered with INVALID_SESSION because
+   * its cursor cannot be replayed (e.g. the replay buffer overflowed); the
+   * session itself is kept.
+   */
+  observeUnreplayableResume?: (session: Session, clientSequence: number) => void
   /** Observes a successful RESUME after its replay and RESUMED were queued. */
   observeResume?: (session: Session, facts: ResumeFacts) => void
   /**
@@ -265,6 +299,7 @@ export class SessionManager {
       this.connectionGeneration(socket) + 1
     )
     this.invalidatePendingResume?.(socket)
+    this.invalidateHeldResume?.(socket)
   }
 
   private readonly sessionsById = new Map<string, Session>()

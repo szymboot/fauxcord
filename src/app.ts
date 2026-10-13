@@ -55,7 +55,10 @@ import { GatewayGuildOutages } from './gateway/guild-outages'
 import { createGatewayGuildOutageRoutes } from './routes/gateway-guild-outages'
 import { createTestRoutes } from './routes/test'
 import { createMockRoutes } from './routes/mock'
-import { createGatewayWebSocketHandler } from './gateway/server'
+import {
+  createGatewayWebSocketHandler,
+  GATEWAY_RESUME_PATH,
+} from './gateway/server'
 import { registerGatewaySubscriptions } from './gateway/subscribe'
 import type { SessionManager } from './gateway/session'
 
@@ -191,10 +194,15 @@ export function buildApp(
     guildOutages.reset(undefined, false)
     unsubscribe()
   }
-  app.get(
-    '/',
-    upgradeWebSocket(() => gatewayHandler.upgrade)
-  )
+  const gatewayUpgrade = upgradeWebSocket(() => gatewayHandler.upgrade)
+  app.get('/', gatewayUpgrade)
+  // READY's per-session `resume_gateway_url` serves the same Gateway; the
+  // trailing-slash form covers clients that append `/?v=10`.
+  for (const suffix of ['', '/'])
+    app.get(
+      `${GATEWAY_RESUME_PATH}/:sessionId{[0-9a-f]{32}}${suffix}`,
+      gatewayUpgrade
+    )
 
   // Routes below require authentication checks
   // Token-based webhook operations (/webhooks/{id}/{token}...) are exempted in auth.ts

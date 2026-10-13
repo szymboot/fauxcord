@@ -3292,21 +3292,27 @@ intervals).
   "bot_id": "111111111111111111",
   "guild_id": "222222222222222222",
   "session_id": "0123456789abcdef0123456789abcdef",
-  "ttl_ms": 180000
+  "ttl_ms": 180000,
+  "hold_reconnect": true,
+  "reconnect_hold_ttl_ms": 180000
 }
 ```
 
-| Field           | Required | Meaning                                                                                                     |
-| --------------- | -------- | ----------------------------------------------------------------------------------------------------------- |
-| `ownership_key` | —        | Optional fresh opaque key `[A-Za-z0-9_-]{1,128}` for idempotent retry, recovery and tombstoning.            |
-| `bot_id`        | ✅       | Registered bot user ID.                                                                                     |
-| `guild_id`      | ✅       | A guild of that bot's setup, proving the session's IDENTIFY token owns it.                                  |
-| `session_id`    | ✅       | Exact Gateway session (32 lowercase hex characters), e.g. from `GET /_test/gateway-event-controls/session`. |
-| `ttl_ms`        | —        | Maximum zombie duration, integer `1`–`300000`, default `180000`.                                            |
+| Field                   | Required | Meaning                                                                                                                                                           |
+| ----------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ownership_key`         | —        | Optional fresh opaque key `[A-Za-z0-9_-]{1,128}` for idempotent retry, recovery and tombstoning.                                                                  |
+| `bot_id`                | ✅       | Registered bot user ID.                                                                                                                                           |
+| `guild_id`              | ✅       | A guild of that bot's setup, proving the session's IDENTIFY token owns it.                                                                                        |
+| `session_id`            | ✅       | Exact Gateway session (32 lowercase hex characters), e.g. from `GET /_test/gateway-event-controls/session`.                                                       |
+| `ttl_ms`                | —        | Maximum zombie duration, integer `1`–`300000`, default `180000`.                                                                                                  |
+| `hold_reconnect`        | —        | Boolean, default `false`. Holds the client's reconnect after the zombie ends until the test releases it; see [Reconnect hold](#reconnect-hold-hold_reconnect). |
+| `reconnect_hold_ttl_ms` | —        | Maximum hold duration, integer `1`–`300000`, default `180000`. Only allowed with `hold_reconnect: true`; the hold auto-releases when it elapses.                   |
 
-Responses: `201` with the record below. A keyed retry with the same owner and
-`ttl_ms` returns the same record. `400` is returned for malformed bodies,
-unknown fields, or invalid IDs, key or TTL, and `413` for bodies over 16 KiB.
+Responses: `201` with the record below. A keyed retry with the same owner,
+`ttl_ms`, `hold_reconnect` and `reconnect_hold_ttl_ms` returns the same record.
+`400` is returned for malformed bodies, unknown fields, invalid IDs, key or
+TTLs, a non-boolean `hold_reconnect`, or `reconnect_hold_ttl_ms` without
+`hold_reconnect: true`, and `413` for bodies over 16 KiB.
 `404` `UNKNOWN_SCOPE` means the session is not registered or not in that
 bot/guild setup. `409` `INVALID_STATE` means its socket is not open (dropped,
 or awaiting RESUME after a disconnect) or is already a zombie. `409`
@@ -3324,9 +3330,10 @@ keep working, and releases are buffered like any other dispatch.
 
 | End                                                        | `ended_by`        | Effect                                                                                                                                                                                                                                                                                                                        |
 | ---------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The client closes the socket                               | `client_close`    | Normal detection. `close.code` is the client's code, `initiated_by: "client"`.                                                                                                                                                                                                                                                |
-| `POST /_test/gateway-zombie-connections/:id/end` with `{}` | `end`             | The server drops the socket with close code `4000` (Unknown error, reconnect allowed). Returns `200` with the record; `409` when the zombie already ended, `404` when unknown, `400` for a nonempty body.                                                                                                                     |
-| `ttl_ms` elapses                                           | `ttl`             | As `end`.                                                                                                                                                                                                                                                                                                                     |
+| The client closes the socket                               | `client_close`    | Normal detection. `close.code` is the client's code, `initiated_by: "client"`. With `hold_reconnect`, the reconnect hold starts.                                                                                                                                                                                              |
+| The client reconnects first (only with `hold_reconnect`)   | `reconnect`       | A new connection on the session's `resume_gateway_url`, or a RESUME on another connection, arrives while the zombie socket is still open. The silenced socket is dropped with `4000` and the hold starts with that connection as its first blocked attempt.                                                                   |
+| `POST /_test/gateway-zombie-connections/:id/end` with `{}` | `end`             | The server drops the socket with close code `4000` (Unknown error, reconnect allowed). Returns `200` with the record; `409` when the zombie already ended, `404` when unknown, `400` for a nonempty body. With `hold_reconnect`, the reconnect hold starts, as for a client close.                                            |
+| `ttl_ms` elapses                                           | `ttl`             | As `end`, but never starts a reconnect hold: `ttl_ms` is the safety bound of the zombie phase, so the client may RESUME at once.                                                                                                                                                                                              |
 | The client RESUMEs on a new socket first                   | `resume`          | The silenced socket is dropped with `4000`.                                                                                                                                                                                                                                                                                   |
 | The session is removed                                     | `session_removed` | The status becomes `session_lost`; nothing is replayed. Examples: a rejected RESUME on another socket, or the heartbeat timeout. A still-open zombie socket is closed with `4009`, so it is not left ACKing for a session that no longer exists. A re-IDENTIFY on the zombie socket itself keeps it open for its new session. |
 | DELETE, `/_test/reset`, setup or guild deletion            | (record retired)  | An active zombie socket is dropped with `4000` first, so the client can still RESUME.                                                                                                                                                                                                                                         |
@@ -3348,6 +3355,139 @@ socket, the session remains resumable until two intervals after the last
 heartbeat the server received. This is at least one interval for a client that detects
 on its next tick. A client that stops heartbeating entirely is reaped by the
 timeout: the record becomes `session_lost` and the RESUME gets op 9 `d: false`.
+A [reconnect hold](#reconnect-hold-hold_reconnect) suspends this timeout while
+it lasts.
+
+### Reconnect hold (`hold_reconnect`)
+
+With `hold_reconnect: true`, Fauxcord keeps the client from completing its
+reconnect after the zombie ends, until the test releases the hold. Use it to
+test what a client does while its Gateway is down after detection, e.g. a bot
+that pauses periodic work until RESUMED: without the hold, the client
+reconnects and RESUMEs within milliseconds.
+
+**Where the client is stopped.** The hold works **before HELLO**, not at
+RESUME. Some clients start heartbeating and consider themselves connected
+right after sending RESUME. Holding the RESUME frame itself, as the event
+controls' `pause_resume` gate does, would be too late for them. Instead:
+
+- READY's `resume_gateway_url` is per session:
+  `ws(s)://<BASE_URL host>/_gateway/resume/<session_id>`. That path (also with
+  a trailing slash) serves the same Gateway as `/`, with any query string such
+  as `?v=10&encoding=json`. Fauxcord uses it only to recognize, before HELLO,
+  which session a new connection wants to RESUME. IDENTIFY on the plain URL is
+  unchanged.
+- While the hold is active, a new connection on that session's resume URL is
+  accepted but gets **no HELLO (op 10)**, and anything it sends is ignored. On
+  release, every waiting connection gets HELLO immediately, so the client
+  RESUMEs at once instead of after its next backoff.
+- A client that ignores `resume_gateway_url` and RESUMEs on the plain URL gets
+  HELLO, but its RESUME is **deferred** until the release and then processed
+  normally. This is weaker: the client has already sent RESUME. Libraries that
+  resume on `/` include serenity 0.12, discordgo v0.29.0 and sleepy-discord.
+- IDENTIFY, other sessions of the same bot, other bots and other setups are
+  never held.
+
+DiscordGo (fork used by szymboot, `wsapi.go`) dials `resume_gateway_url` +
+`?v=10&encoding=json` when it has a session and sequence. It then waits for
+HELLO up to the dialer's `HandshakeTimeout` (45 s by default). Without HELLO it
+closes the socket and retries after 1 s, 2 s, 4 s, … (max 600 s). A long hold
+therefore spans several attempts. Each attempt is counted, and the attempt
+waiting at release time gets HELLO right away.
+
+**Session lifetime.** While held, the client cannot heartbeat, so the session's
+heartbeat timeout is suspended and the session stays resumable. Heartbeats
+still in flight on the dropped zombie socket are ignored. On release the
+session must RESUME within the time it was held plus 1 s plus two heartbeat
+intervals. That grace covers a client released between attempts that is still
+in its backoff: with a backoff that starts at 1 s and doubles (DiscordGo), the
+gap never exceeds the time already held plus 1 s, whatever the HELLO deadline.
+The RESUME re-arms the normal heartbeat timeout. A client that does not RESUME
+within the grace loses the session (`session_lost`). The replay buffer
+keeps the last 100 dispatches. If more are generated during the hold, the
+RESUME gets op 9 `d: false` and `resume_rejected` records it. The status
+stays `awaiting_resume` because the session itself is kept: a RESUME with an
+unavailable cursor never ends a session. The client then re-IDENTIFYs, and
+the old session becomes `session_lost` when its grace ends. Records are
+retained until 120 s after that grace, so the outcome is always observable.
+
+**When the hold starts and ends.**
+
+| Event                                                                | Effect                                                                                                                       |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Zombie ends by `client_close`, `reconnect` or `end`                  | `status: "reconnect_held"`, `reconnect_hold` starts. `ttl`, `resume`, `session_removed` and cancellation never start a hold. |
+| `POST …/:id/release-reconnect` (or by key)                           | `released_by: "release"`, status `awaiting_resume`; waiting connections get HELLO, deferred RESUMEs proceed.                |
+| `reconnect_hold_ttl_ms` elapses                                      | Auto-release, `released_by: "ttl"`.                                                                                          |
+| The session is removed (e.g. a forced invalidation)                  | `released_by: "session_removed"`, status `session_lost`; waiting connections get HELLO and their RESUME answers op 9.       |
+| DELETE, `/_test/reset`, setup deletion, guild deletion, the bot leaving or being removed from the guild, Gateway shutdown | Released (`released_by: "canceled"`), then the record retires. A client is never left blocked.                                  |
+
+State machine with `hold_reconnect: true`:
+
+```text
+zombie ──client_close / reconnect / end──▶ reconnect_held ──release / hold TTL──▶ awaiting_resume ──RESUME──▶ resumed
+   │                                            │                                       │
+   └──ttl──▶ awaiting_resume                    └──session removed──▶ session_lost       └──session removed──▶ session_lost
+```
+
+Without `hold_reconnect` the record never enters `reconnect_held` and
+`reconnect_hold` stays `null`; behavior is unchanged.
+
+### `POST /_test/gateway-zombie-connections/:id/release-reconnect` — Release the hold
+
+Body `{}`. Returns `200` with the record: the hold is released if it is
+active. If the hold already ended (released, auto-released, session removed),
+the release is idempotent and returns the record unchanged; check
+`reconnect_hold.released_by`. `409` `INVALID_STATE` when nothing is or was
+held: the record has no `hold_reconnect`, the zombie has not ended yet, or
+it ended without a hold (`ttl`, `resume`, `session_removed`).
+`404` when unknown or retired, and `400` for a missing or nonempty body.
+
+`POST /_test/gateway-zombie-connections/by-key/:key/release-reconnect?bot_id=…&guild_id=…&session_id=…`
+does the same, addressed by the exact owner (each field exactly once; `400`
+otherwise; `404` for an unknown, retired, tombstoned or wrong-scope key).
+
+### Consumer recipe: hold the reconnect after detection
+
+```typescript
+const key = `zombie-${crypto.randomUUID()}`
+const scope = new URLSearchParams({ bot_id: botId, guild_id: guildId, session_id: sessionId })
+const record = `${base}/_test/gateway-zombie-connections/by-key/${key}`
+await fetch(`${base}/_test/gateway-zombie-connections`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    ownership_key: key,
+    bot_id: botId,
+    guild_id: guildId,
+    session_id: sessionId,
+    hold_reconnect: true,
+    reconnect_hold_ttl_ms: 240_000,
+  }),
+})
+try {
+  // 1. Wait until the client detected the zombie and its reconnect is blocked.
+  let zombie = await (await fetch(`${record}?${scope}`)).json()
+  while ((zombie.reconnect_hold?.attempts ?? 0) < 1) {
+    zombie = await (await fetch(`${record}?${scope}&wait_ms=30000`)).json()
+  }
+  // 2. The client is down (e.g. DiscordGo DataReady == false): do the work,
+  //    e.g. wait for a periodic tick that must be skipped.
+  // 3. Release: the waiting connection gets HELLO and RESUMEs at once.
+  await fetch(`${record}/release-reconnect?${scope}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  zombie = await (await fetch(`${record}?${scope}&wait_ms=30000`)).json()
+  // zombie.status === 'resumed'; zombie.resume.replayed covers every dispatch
+  // buffered during the zombie and the hold, with original sequences.
+} finally {
+  await fetch(`${record}?${scope}`, { method: 'DELETE' }) // releases any hold
+}
+```
+
+Inspect first, then long-poll: a `wait_ms` GET returns on the next change, so a
+condition that already holds is only seen without waiting.
 
 ### Record
 
@@ -3360,6 +3500,8 @@ timeout: the record becomes `session_lost` and the RESUME gets op 9 `d: false`.
   "session_id": "0123456789abcdef0123456789abcdef",
   "status": "resumed",
   "ttl_ms": 180000,
+  "hold_reconnect": true,
+  "reconnect_hold_ttl_ms": 180000,
   "sequence": 12,
   "started_at": 1791936000000,
   "zombie_expires_at": 1791936180000,
@@ -3382,13 +3524,33 @@ timeout: the record becomes `session_lost` and the RESUME gets op 9 `d: false`.
     "replayed": { "count": 2, "first_sequence": 13, "last_sequence": 14 },
     "resumed_sequence": 15
   },
-  "session_removed_at": null
+  "session_removed_at": null,
+  "resume_rejected": null,
+  "reconnect_hold": {
+    "held_since": 1791936082500,
+    "expires_at": 1791936262500,
+    "attempts": 2,
+    "last_attempt_at": 1791936129500,
+    "pending": 0,
+    "released_at": 1791936150000,
+    "released_by": "release"
+  }
 }
 ```
 
 - `status`: `zombie` → `awaiting_resume` → `resumed`, or `session_lost` if
   the session was removed (heartbeat timeout, a rejected RESUME, re-IDENTIFY)
-  before a successful RESUME.
+  before a successful RESUME. With `hold_reconnect`, `reconnect_held` comes
+  between `zombie` and `awaiting_resume` (see the state machine above).
+- `hold_reconnect`, `reconnect_hold_ttl_ms`: the request's options
+  (`reconnect_hold_ttl_ms` is `null` without a hold).
+- `reconnect_hold`: `null` until a hold starts. `held_since`/`expires_at`
+  bound the hold. `attempts` counts what the hold blocked: connections on the
+  resume URL left without HELLO, plus RESUMEs deferred on other connections.
+  `attempts >= 1` proves the client is really waiting. `last_attempt_at` is
+  the latest one. `pending` is how many blocked connections are still open (a
+  release reaches them at once). `released_at`/`released_by` (`release`,
+  `ttl`, `session_removed`, `canceled`) are set when the hold ends.
 - `sequence`: server high-water mark when the zombie started.
 - `last_ack_at`: when the last HEARTBEAT_ACK was written to this session
   before the zombie started (`null` if none). Nothing is ACKed afterwards.
@@ -3404,20 +3566,32 @@ timeout: the record becomes `session_lost` and the RESUME gets op 9 `d: false`.
   `close.at - last_ack_at` is the time since the client's last ACK.
 - `resume`: the successful RESUME's cursor, the replayed sequence range and
   RESUMED's sequence.
+- `resume_rejected`: `{ at, client_sequence }` of the latest RESUME of the
+  session, received after the zombie ended, that was answered with op 9
+  `d: false` because its cursor could not be replayed (e.g. more than 100
+  dispatches were buffered). `null` otherwise. A forced rejection
+  ([`trigger: "resume"`](#failed-resume-trigger-resume)) is recorded by that
+  control instead.
 - `expires_at`: retirement time. Evidence is retained for 120 s after the
-  zombie ended, or 120 s after `zombie_expires_at` while still active.
+  zombie ended, or 120 s after `zombie_expires_at` while still active. While
+  the reconnect is held, it is 120 s after `reconnect_hold.expires_at`. After
+  the release, it is 120 s after the session's RESUME grace ends.
 
 ### Inspect, wait, recover and cancel
 
 - `GET /_test/gateway-zombie-connections/:id[?wait_ms=0..30000]`: with
-  `wait_ms`, holds until `status` is `resumed` or `session_lost`, or the
-  record retires, then returns `200`, or `404` once retired. At most 64
+  `wait_ms`, holds until `status` is `resumed` or `session_lost`, the
+  `reconnect_hold` changes (the hold starts, blocks an attempt, a blocked
+  connection closes, or the hold is released), `resume_rejected` is set, or
+  the record retires. It then
+  returns `200`, or `404` once retired. At most 64
   concurrent waits (`429`). Responses use `Cache-Control: no-store`.
 - `GET /_test/gateway-zombie-connections/by-key/:key?bot_id=…&guild_id=…&session_id=…[&wait_ms=…]`:
   the same, addressed by the exact owner (each field exactly once; `400`
   otherwise).
 - `DELETE /_test/gateway-zombie-connections/:id`: ends an active zombie
-  (drops the socket with `4000`) and retires the record; `204`/`404`.
+  (drops the socket with `4000`) or releases an active reconnect hold (blocked
+  connections get HELLO) and retires the record; `204`/`404`.
 - `DELETE /_test/gateway-zombie-connections/by-key/:key?bot_id=…&guild_id=…&session_id=…`:
   retires the keyed record, or tombstones an unused key in a valid scope so a
   delayed POST returns `409` and silences nothing.
@@ -3427,7 +3601,8 @@ setup token), `DELETE /_test/setup/:token`, deleting the scoped guild and
 Gateway shutdown. A library's real detection delay applies, so allow for it
 in test timeouts (or shorten it with `GATEWAY_HEARTBEAT_INTERVAL_MS`) and use
 `wait_ms` rather than sleeps. Focused real HTTP/WS coverage is in
-`src/gateway/connection-faults.test.ts` and
+`src/gateway/connection-faults.test.ts`,
+`src/gateway/zombie-reconnect-hold.test.ts` and
 `src/gateway/heartbeat-interval.test.ts`.
 
 ---
