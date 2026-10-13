@@ -3404,8 +3404,12 @@ in its backoff: with a backoff that starts at 1 s and doubles (DiscordGo), the
 gap never exceeds the time already held plus 1 s, whatever the HELLO deadline.
 The RESUME re-arms the normal heartbeat timeout. A client that does not RESUME
 within the grace loses the session (`session_lost`). The replay buffer
-keeps the last 100 dispatches; if more are generated during the hold, the
-RESUME gets op 9 `d: false` and the record becomes `session_lost`.
+keeps the last 100 dispatches. If more are generated during the hold, the
+RESUME gets op 9 `d: false` and `resume_rejected` records it. The status
+stays `awaiting_resume` because the session itself is kept: a RESUME with an
+unavailable cursor never ends a session. The client then re-IDENTIFYs, and
+the old session becomes `session_lost` when its grace ends. Records are
+retained until 120 s after that grace, so the outcome is always observable.
 
 **When the hold starts and ends.**
 
@@ -3521,6 +3525,7 @@ condition that already holds is only seen without waiting.
     "resumed_sequence": 15
   },
   "session_removed_at": null,
+  "resume_rejected": null,
   "reconnect_hold": {
     "held_since": 1791936082500,
     "expires_at": 1791936262500,
@@ -3561,17 +3566,24 @@ condition that already holds is only seen without waiting.
   `close.at - last_ack_at` is the time since the client's last ACK.
 - `resume`: the successful RESUME's cursor, the replayed sequence range and
   RESUMED's sequence.
+- `resume_rejected`: `{ at, client_sequence }` of the latest RESUME of the
+  session, received after the zombie ended, that was answered with op 9
+  `d: false` because its cursor could not be replayed (e.g. more than 100
+  dispatches were buffered). `null` otherwise. A forced rejection
+  ([`trigger: "resume"`](#failed-resume-trigger-resume)) is recorded by that
+  control instead.
 - `expires_at`: retirement time. Evidence is retained for 120 s after the
   zombie ended, or 120 s after `zombie_expires_at` while still active. While
-  the reconnect is held, it is 120 s after `reconnect_hold.expires_at`; after
-  the release, 120 s after the release.
+  the reconnect is held, it is 120 s after `reconnect_hold.expires_at`. After
+  the release, it is 120 s after the session's RESUME grace ends.
 
 ### Inspect, wait, recover and cancel
 
 - `GET /_test/gateway-zombie-connections/:id[?wait_ms=0..30000]`: with
   `wait_ms`, holds until `status` is `resumed` or `session_lost`, the
   `reconnect_hold` changes (the hold starts, blocks an attempt, a blocked
-  connection closes, or the hold is released), or the record retires. It then
+  connection closes, or the hold is released), `resume_rejected` is set, or
+  the record retires. It then
   returns `200`, or `404` once retired. At most 64
   concurrent waits (`429`). Responses use `Cache-Control: no-store`.
 - `GET /_test/gateway-zombie-connections/by-key/:key?bot_id=…&guild_id=…&session_id=…[&wait_ms=…]`:

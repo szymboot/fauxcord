@@ -117,11 +117,13 @@ interface ZombieRecord {
     resumed_sequence: number
   } | null
   session_removed_at: number | null
+  /** Latest RESUME of the session answered with op 9 (unreplayable cursor). */
+  resume_rejected: { at: number; client_sequence: number } | null
   reconnect_hold: ReconnectHold | null
   /** Blocked connections, each with its release continuation. */
   held: Map<WebSocket, { release: () => void; onClose: () => void }>
-  /** Bumped on every reconnect hold change, to wake long-poll waiters. */
-  holdVersion: number
+  /** Bumped on every reconnect hold change or rejected RESUME, to wake waiters. */
+  version: number
   timer: NodeJS.Timeout
   onClose: (code: number) => void
 }
@@ -236,7 +238,18 @@ export class GatewayZombieConnections {
         socket.off('close', entry.onClose)
         record.held.delete(socket)
         record.reconnect_hold.pending = record.held.size
-        this.holdChanged(record)
+        this.changed(record)
+      }
+    }
+    manager.observeUnreplayableResume = (session, clientSequence) => {
+      for (const record of this.records.values()) {
+        if (record.session !== session || record.status !== 'awaiting_resume')
+          continue
+        record.resume_rejected = {
+          at: Date.now(),
+          client_sequence: clientSequence,
+        }
+        this.changed(record)
       }
     }
     manager.observeResume = (session, facts) => {
@@ -362,7 +375,7 @@ export class GatewayZombieConnections {
     const onClose = (): void => {
       if (!record.held.delete(socket)) return
       hold.pending = record.held.size
-      this.holdChanged(record)
+      this.changed(record)
     }
     socket.once('close', onClose)
     record.held.set(socket, { release, onClose })
@@ -384,7 +397,7 @@ export class GatewayZombieConnections {
     hold.attempts += 1
     hold.last_attempt_at = now
     hold.pending = record.held.size
-    this.holdChanged(record)
+    this.changed(record)
   }
 
   /**
@@ -392,10 +405,12 @@ export class GatewayZombieConnections {
    * RESUMEs proceed, and the session's heartbeat timeout runs again.
    * @param record - Record with an active hold
    * @param by - Why the hold ended
+   * @returns The grace (ms) the session has to RESUME, 0 when none applies
    */
-  private releaseHold(record: ZombieRecord, by: HoldRelease): void {
+  private releaseHold(record: ZombieRecord, by: HoldRelease): number {
     const hold = record.reconnect_hold
-    if (hold?.released_at !== null) return
+    if (hold?.released_at !== null) return 0
+    let grace = 0
     hold.released_at = Date.now()
     hold.released_by = by
     if (record.status === 'reconnect_held') record.status = 'awaiting_resume'
@@ -410,22 +425,21 @@ export class GatewayZombieConnections {
       // doubling backoff starting at 1 s, that gap never exceeds the time
       // already held plus 1 s, so the grace covers it before the usual
       // heartbeat timeout applies.
-      clearTimeout(session.heartbeatTimer)
-      session.heartbeatTimer = setTimeout(
-        () => {
-          if (session.ws.readyState !== WebSocket.OPEN)
-            this.manager.remove(session.sessionId)
-        },
+      grace =
         hold.released_at -
-          hold.held_since +
-          CLIENT_FIRST_BACKOFF_MS +
-          this.manager.heartbeatTimeoutMs
-      )
+        hold.held_since +
+        CLIENT_FIRST_BACKOFF_MS +
+        this.manager.heartbeatTimeoutMs
+      clearTimeout(session.heartbeatTimer)
+      session.heartbeatTimer = setTimeout(() => {
+        if (session.ws.readyState !== WebSocket.OPEN)
+          this.manager.remove(session.sessionId)
+      }, grace)
     }
     const held = [...record.held]
     record.held.clear()
     hold.pending = 0
-    this.holdChanged(record)
+    this.changed(record)
     for (const [socket, { release, onClose }] of held) {
       socket.off('close', onClose)
       if (socket.readyState !== WebSocket.OPEN) continue
@@ -435,28 +449,33 @@ export class GatewayZombieConnections {
         // The connection closed meanwhile; the client reconnects again.
       }
     }
+    return grace
   }
 
-  /** Records a hold change and wakes waiters. */
-  private holdChanged(record: ZombieRecord): void {
-    record.holdVersion += 1
+  /** Records a hold change or rejected RESUME and wakes waiters. */
+  private changed(record: ZombieRecord): void {
+    record.version += 1
     this.notify(record.id)
   }
 
   /**
-   * Ends a hold and keeps the record as evidence for the retention period.
+   * Ends a hold and keeps the record as evidence for the retention period,
+   * counted from the end of the session's RESUME grace so the outcome
+   * (`resumed` or `session_lost`) is always observable.
    * @param record - Record with an active hold
    * @param by - Why the hold ended
    */
   private settleHold(record: ZombieRecord, by: HoldRelease): void {
-    const now = Date.now()
-    record.expires_at = now + ZOMBIE_RETENTION_MS
     clearTimeout(record.timer)
+    const retention = this.releaseHold(record, by) + ZOMBIE_RETENTION_MS
+    // The release may already have retired the record (e.g. a RESUME it let
+    // through removed the session and a cleanup ran meanwhile).
+    if (!this.records.has(record.id)) return
+    record.expires_at = Date.now() + retention
     record.timer = setTimeout(() => {
       this.retire(record.id)
-    }, ZOMBIE_RETENTION_MS)
+    }, retention)
     record.timer.unref()
-    this.releaseHold(record, by)
   }
 
   /** Whether the bot is the registered owner of the guild's setup. */
@@ -560,9 +579,10 @@ export class GatewayZombieConnections {
       close: null,
       resume: null,
       session_removed_at: null,
+      resume_rejected: null,
       reconnect_hold: null,
       held: new Map(),
-      holdVersion: 0,
+      version: 0,
       timer,
       onClose,
     }
@@ -632,7 +652,7 @@ export class GatewayZombieConnections {
       // until the release re-arms its timeout.
       clearTimeout(session.heartbeatTimer)
       session.heartbeatTimer = undefined
-      record.holdVersion += 1
+      record.version += 1
     }
     record.timer.unref()
     if (closeSocket && record.socket.readyState === WebSocket.OPEN) {
@@ -720,6 +740,7 @@ export class GatewayZombieConnections {
           close: record.close,
           resume: record.resume,
           session_removed_at: record.session_removed_at,
+          resume_rejected: record.resume_rejected,
           reconnect_hold: record.reconnect_hold,
         })
       : undefined
@@ -733,8 +754,8 @@ export class GatewayZombieConnections {
 
   /**
    * Waits (bounded) until the record is settled (`resumed` or
-   * `session_lost`), its reconnect hold changes, or it retires, then
-   * inspects it.
+   * `session_lost`), its reconnect hold changes, a RESUME is rejected, or it
+   * retires, then inspects it.
    * @param id - Record ID
    * @param waitMs - Maximum wait
    * @returns The record, undefined when unknown, or LIMIT
@@ -745,13 +766,11 @@ export class GatewayZombieConnections {
   ): Promise<object | undefined | 'LIMIT'> {
     const record = id ? this.records.get(id) : undefined
     if (!record) return undefined
-    const holdVersion = record.holdVersion
-    /** Whether the record retired, settled or its hold changed. */
+    const version = record.version
+    /** Whether the record retired, settled, or its hold or RESUME changed. */
     const settled = (): boolean => {
       const current = this.records.get(record.id)
-      return (
-        !current || isSettled(current) || current.holdVersion !== holdVersion
-      )
+      return !current || isSettled(current) || current.version !== version
     }
     if (waitMs === 0 || settled()) return this.inspect(record.id)
     if (this.waiterCount >= MAX_WAITERS) return 'LIMIT'

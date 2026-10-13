@@ -195,6 +195,12 @@ export class SessionManager {
     session: Session,
     attempt: ResumeAttempt
   ) => ((status: DispatchTransport) => void) | undefined
+  /**
+   * Observes an authenticated RESUME answered with INVALID_SESSION because
+   * its cursor cannot be replayed (e.g. the replay buffer overflowed); the
+   * session itself is kept.
+   */
+  observeUnreplayableResume?: (session: Session, clientSequence: number) => void
   /** Observes a successful RESUME after its replay and RESUMED were queued. */
   observeResume?: (session: Session, facts: ResumeFacts) => void
   /**

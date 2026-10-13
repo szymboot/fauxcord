@@ -512,8 +512,10 @@ function handleResume(
     return
   const replay = sessionManager.replayFrom(session, data.seq)
   if (!replay) {
-    if (!forceResumeRejection(sessionManager, session, ws, data, replay))
+    if (!forceResumeRejection(sessionManager, session, ws, data, replay)) {
       ws.send(encodePayload({ op: GatewayOp.InvalidSession, d: false }))
+      sessionManager.observeUnreplayableResume?.(session, data.seq)
+    }
     return
   }
   if (

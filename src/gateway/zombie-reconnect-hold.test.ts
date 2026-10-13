@@ -11,6 +11,7 @@ import {
   seedVoiceChannel,
 } from '../test-helpers'
 import type { GatewayPayload } from './protocol'
+import { broadcastToBot } from './dispatch'
 
 /** Real Gateway connection and every frame it received. */
 interface Client {
@@ -46,6 +47,7 @@ interface Zombie {
     replayed: { count: number; first_sequence: number | null }
     resumed_sequence: number
   } | null
+  resume_rejected: { at: number; client_sequence: number } | null
   reconnect_hold: Hold | null
 }
 
@@ -624,6 +626,42 @@ describe('zombie connection reconnect hold', () => {
     expect(await sendResume(retry, received)).toMatchObject({ t: 'RESUMED' })
   })
 
+  it('records an unreplayable RESUME after the replay buffer overflowed during the hold, then loses the session at the end of its grace', async () => {
+    for (const target of clients.splice(0)) target.ws.terminate()
+    await server.close()
+    await start(100)
+    const received = lastSequence(client)
+    const started = await zombie()
+    await detect()
+    for (let index = 0; index < 101; index += 1)
+      broadcastToBot(server.sessionManager, BOT_ID, 'TEST_EVENT', { index })
+    const pending = await dialResume()
+    await until(started.id, (record) => record.reconnect_hold?.pending === 1)
+    const released = await release(started.id)
+    expect(released.resume_rejected).toBeNull()
+    // Retention counts from the end of the RESUME grace.
+    const hold = released.reconnect_hold
+    const grace =
+      (hold?.released_at ?? 0) - (hold?.held_since ?? 0) + 1000 + 200
+    expect(released.expires_at).toBeGreaterThanOrEqual(
+      (hold?.released_at ?? 0) + grace + 120_000
+    )
+    await frame(pending, (entry) => entry.op === 10)
+    const rejection = inspect(started.id, '?wait_ms=5000')
+    await delay(50)
+    expect(await sendResume(pending, received)).toMatchObject({
+      op: 9,
+      d: false,
+    })
+    expect(await rejection).toMatchObject({
+      status: 'awaiting_resume',
+      resume_rejected: { client_sequence: received },
+    })
+    expect(
+      await until(started.id, (record) => record.status === 'session_lost')
+    ).toMatchObject({ resume_rejected: { client_sequence: received } })
+  })
+
   it('forgets a deferred RESUME whose connection IDENTIFYs instead', async () => {
     const started = await zombie()
     await detect()
@@ -799,6 +837,7 @@ describe('zombie connection reconnect hold', () => {
       hold_reconnect: false,
       reconnect_hold_ttl_ms: null,
       reconnect_hold: null,
+      resume_rejected: null,
     })
     await voice({})
     await detect()
