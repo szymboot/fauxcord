@@ -10,6 +10,11 @@ const MAX_LIVE = 32
 const MAX_OWNERS = 4096
 /** Maximum concurrent long-poll waiters per Gateway instance. */
 const MAX_WAITERS = 64
+/**
+ * First reconnect backoff of common clients (DiscordGo waits 1 s, then
+ * doubles), independent of their HELLO deadline.
+ */
+const CLIENT_FIRST_BACKOFF_MS = 1000
 /** Maximum connections one reconnect hold keeps waiting at a time. */
 const MAX_HELD_SOCKETS = 16
 /** Evidence retention after the zombie phase ended (ms). */
@@ -402,15 +407,19 @@ export class GatewayZombieConnections {
     ) {
       // The client must RESUME in time, as after a dropped connection. A
       // client between attempts only retries after its backoff; with a
-      // doubling backoff that gap never exceeds the time already held, so
-      // the grace covers it before the usual heartbeat timeout applies.
+      // doubling backoff starting at 1 s, that gap never exceeds the time
+      // already held plus 1 s, so the grace covers it before the usual
+      // heartbeat timeout applies.
       clearTimeout(session.heartbeatTimer)
       session.heartbeatTimer = setTimeout(
         () => {
           if (session.ws.readyState !== WebSocket.OPEN)
             this.manager.remove(session.sessionId)
         },
-        hold.released_at - hold.held_since + this.manager.heartbeatTimeoutMs
+        hold.released_at -
+          hold.held_since +
+          CLIENT_FIRST_BACKOFF_MS +
+          this.manager.heartbeatTimeoutMs
       )
     }
     const held = [...record.held]

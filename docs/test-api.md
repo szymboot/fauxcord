@@ -3398,9 +3398,10 @@ waiting at release time gets HELLO right away.
 **Session lifetime.** While held, the client cannot heartbeat, so the session's
 heartbeat timeout is suspended and the session stays resumable. Heartbeats
 still in flight on the dropped zombie socket are ignored. On release the
-session must RESUME within the time it was held plus two heartbeat intervals.
-That grace covers a client released between attempts that is still in its
-backoff: with a doubling backoff, the gap never exceeds the time already held.
+session must RESUME within the time it was held plus 1 s plus two heartbeat
+intervals. That grace covers a client released between attempts that is still
+in its backoff: with a backoff that starts at 1 s and doubles (DiscordGo), the
+gap never exceeds the time already held plus 1 s, whatever the HELLO deadline.
 The RESUME re-arms the normal heartbeat timeout. A client that does not RESUME
 within the grace loses the session (`session_lost`). The replay buffer
 keeps the last 100 dispatches; if more are generated during the hold, the

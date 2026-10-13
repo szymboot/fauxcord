@@ -605,6 +605,25 @@ describe('zombie connection reconnect hold', () => {
     ).toBe(received + 1)
   })
 
+  it('keeps the session through the first 1 s backoff after a short hold with a short HELLO deadline', async () => {
+    for (const target of clients.splice(0)) target.ws.terminate()
+    await server.close()
+    await start(100)
+    const received = lastSequence(client)
+    const started = await zombie()
+    await detect()
+    // A 100 ms HELLO deadline expires; DiscordGo still waits 1 s to retry.
+    const attempt = await dialResume()
+    await until(started.id, (record) => record.reconnect_hold?.pending === 1)
+    attempt.ws.terminate()
+    await until(started.id, (record) => record.reconnect_hold?.pending === 0)
+    await release(started.id)
+    await delay(1000)
+    const retry = await dialResume()
+    await frame(retry, (entry) => entry.op === 10)
+    expect(await sendResume(retry, received)).toMatchObject({ t: 'RESUMED' })
+  })
+
   it('forgets a deferred RESUME whose connection IDENTIFYs instead', async () => {
     const started = await zombie()
     await detect()
