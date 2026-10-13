@@ -15,9 +15,23 @@ const ROOT = '/_test/gateway-zombie-connections'
 const SNOWFLAKE = /^[1-9]\d{0,19}$/
 /** Gateway session IDs are 32 lowercase hexadecimal characters. */
 const SESSION_ID = /^[\da-f]{32}$/
-/** Default and maximum zombie duration in milliseconds. */
+/** Default and maximum zombie (and reconnect hold) duration in milliseconds. */
 const DEFAULT_TTL_MS = 180_000
 const MAX_TTL_MS = 300_000
+
+/**
+ * Whether a value is an accepted duration in milliseconds.
+ * @param value - Candidate duration
+ * @returns true for integers from 1 to MAX_TTL_MS
+ */
+function isDuration(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 1 &&
+    value <= MAX_TTL_MS
+  )
+}
 
 /**
  * Validates a zombie request; unknown fields are rejected.
@@ -34,9 +48,17 @@ function validateRequest(value: unknown): ZombieConnectionRequest | undefined {
     'guild_id',
     'session_id',
     'ttl_ms',
+    'hold_reconnect',
+    'reconnect_hold_ttl_ms',
   ])
   if (Object.keys(data).some((key) => !allowed.has(key))) return undefined
   const ttlMs = data.ttl_ms === undefined ? DEFAULT_TTL_MS : data.ttl_ms
+  const hold = data.hold_reconnect === undefined ? false : data.hold_reconnect
+  // The hold TTL only means something with an opted-in hold.
+  const holdMs =
+    hold === true && data.reconnect_hold_ttl_ms === undefined
+      ? DEFAULT_TTL_MS
+      : data.reconnect_hold_ttl_ms
   const {
     ownership_key: key,
     bot_id: botId,
@@ -46,10 +68,9 @@ function validateRequest(value: unknown): ZombieConnectionRequest | undefined {
   return typeof botId === 'string' &&
     typeof guildId === 'string' &&
     typeof sessionId === 'string' &&
-    typeof ttlMs === 'number' &&
-    Number.isSafeInteger(ttlMs) &&
-    ttlMs >= 1 &&
-    ttlMs <= MAX_TTL_MS &&
+    typeof hold === 'boolean' &&
+    isDuration(ttlMs) &&
+    (hold ? isDuration(holdMs) : holdMs === undefined) &&
     SNOWFLAKE.test(botId) &&
     SNOWFLAKE.test(guildId) &&
     SESSION_ID.test(sessionId) &&
@@ -60,6 +81,8 @@ function validateRequest(value: unknown): ZombieConnectionRequest | undefined {
         guild_id: guildId,
         session_id: sessionId,
         ttl_ms: ttlMs,
+        hold_reconnect: hold,
+        reconnect_hold_ttl_ms: hold && isDuration(holdMs) ? holdMs : null,
       }
     : undefined
 }
@@ -144,6 +167,27 @@ export function createGatewayZombieConnectionRoutes(
     return result === 'DELETED'
       ? c.body(null, 204)
       : c.json(failure(result), result === 'LIMIT' ? 429 : 404)
+  })
+  app.post(`${ROOT}/by-key/:key/release-reconnect`, async (c) => {
+    const scope = validateOwnership(
+      c.req.param('key'),
+      new URL(c.req.url).searchParams,
+      false
+    )
+    if (!scope || !isEmptyObject(await c.req.json().catch(() => undefined)))
+      return c.json(failure('400: Bad Request'), 400)
+    const result = zombies.releaseReconnect(zombies.idByKey(scope))
+    return typeof result === 'string'
+      ? c.json(failure(result), statusOf(result))
+      : c.json(result)
+  })
+  app.post(`${ROOT}/:id/release-reconnect`, async (c) => {
+    if (!isEmptyObject(await c.req.json().catch(() => undefined)))
+      return c.json(failure('400: Bad Request'), 400)
+    const result = zombies.releaseReconnect(c.req.param('id'))
+    return typeof result === 'string'
+      ? c.json(failure(result), statusOf(result))
+      : c.json(result)
   })
   app.post(`${ROOT}/:id/end`, async (c) => {
     if (!isEmptyObject(await c.req.json().catch(() => undefined)))

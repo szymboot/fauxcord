@@ -10,6 +10,8 @@ const MAX_LIVE = 32
 const MAX_OWNERS = 4096
 /** Maximum concurrent long-poll waiters per Gateway instance. */
 const MAX_WAITERS = 64
+/** Maximum connections one reconnect hold keeps waiting at a time. */
+const MAX_HELD_SOCKETS = 16
 /** Evidence retention after the zombie phase ended (ms). */
 export const ZOMBIE_RETENTION_MS = 120_000
 
@@ -21,6 +23,10 @@ export interface ZombieConnectionRequest {
   session_id: string
   /** Maximum zombie duration (ms); the server closes the socket after it. */
   ttl_ms: number
+  /** Whether the client's reconnect is held after it drops the zombie. */
+  hold_reconnect: boolean
+  /** Maximum hold duration (ms) when `hold_reconnect` is set, else null. */
+  reconnect_hold_ttl_ms: number | null
 }
 
 /** Exact public owner address known before sending a keyed POST. */
@@ -32,11 +38,34 @@ export interface ZombieConnectionOwnership {
 }
 
 /** Lifecycle of one zombie connection record. */
-type ZombieStatus = 'zombie' | 'awaiting_resume' | 'resumed' | 'session_lost'
+type ZombieStatus =
+  'zombie' | 'reconnect_held' | 'awaiting_resume' | 'resumed' | 'session_lost'
 
 /** Why the zombie phase ended. */
 type ZombieEnd =
-  'client_close' | 'end' | 'ttl' | 'resume' | 'session_removed' | 'canceled'
+  | 'client_close'
+  | 'reconnect'
+  | 'end'
+  | 'ttl'
+  | 'resume'
+  | 'session_removed'
+  | 'canceled'
+
+/** Why a reconnect hold ended. */
+type HoldRelease = 'release' | 'ttl' | 'session_removed' | 'canceled'
+
+/** Public evidence that a reconnect hold is keeping the client away. */
+interface ReconnectHold {
+  held_since: number
+  expires_at: number
+  /** Connections and RESUMEs the hold blocked */
+  attempts: number
+  last_attempt_at: number | null
+  /** Blocked connections still open and waiting for the release */
+  pending: number
+  released_at: number | null
+  released_by: HoldRelease | null
+}
 
 /** First/last sequence of a contiguous set of dispatches. */
 interface SequenceRange {
@@ -53,6 +82,8 @@ interface ZombieRecord {
   guild_id: string
   session_id: string
   ttl_ms: number
+  hold_reconnect: boolean
+  reconnect_hold_ttl_ms: number | null
   /** Normalized setup token of the session (never exposed). */
   token: string
   session: Session
@@ -81,13 +112,18 @@ interface ZombieRecord {
     resumed_sequence: number
   } | null
   session_removed_at: number | null
+  reconnect_hold: ReconnectHold | null
+  /** Blocked connections, each with its release continuation. */
+  held: Map<WebSocket, { release: () => void; onClose: () => void }>
+  /** Bumped on every reconnect hold change, to wake long-poll waiters. */
+  holdVersion: number
   timer: NodeJS.Timeout
   onClose: (code: number) => void
 }
 
 /** Bounded lifetime reservation; a null ID permanently prevents resurrection. */
 interface OwnershipReservation extends ZombieConnectionOwnership {
-  ttl_ms?: number
+  request?: ZombieConnectionRequest
   id: string | null
 }
 
@@ -105,6 +141,18 @@ function sameOwner(
     owner.bot_id === scope.bot_id &&
     owner.guild_id === scope.guild_id &&
     owner.session_id === scope.session_id
+  )
+}
+
+/** Whether a keyed retry asks for exactly the reserved timing and hold. */
+function sameOptions(
+  reserved: ZombieConnectionRequest | undefined,
+  request: ZombieConnectionRequest
+): boolean {
+  return (
+    reserved?.ttl_ms === request.ttl_ms &&
+    reserved.hold_reconnect === request.hold_reconnect &&
+    reserved.reconnect_hold_ttl_ms === request.reconnect_hold_ttl_ms
   )
 }
 
@@ -156,6 +204,26 @@ export class GatewayZombieConnections {
       withheld.last_sequence = payload.s
       this.notify(record.id)
     }
+    manager.holdHello = (sessionId, socket, hello) => {
+      const record = this.holdingRecord(sessionId)
+      if (!record) return false
+      this.block(record, socket, hello)
+      return true
+    }
+    manager.holdResume = (session, socket, retry) => {
+      const record = this.holdingRecord(session.sessionId)
+      if (!record) return false
+      const generation = manager.connectionGeneration(socket)
+      this.block(record, socket, () => {
+        // Skip a RESUME whose socket closed or bound another session.
+        if (
+          socket.readyState === WebSocket.OPEN &&
+          manager.connectionGeneration(socket) === generation
+        )
+          retry()
+      })
+      return true
+    }
     manager.observeResume = (session, facts) => {
       for (const record of this.records.values()) {
         if (record.session !== session || isSettled(record)) continue
@@ -181,6 +249,9 @@ export class GatewayZombieConnections {
           this.endZombie(record, 'session_removed', false)
           this.dropOrphan(record)
         }
+        // Blocked clients get HELLO now; their RESUME answers op 9.
+        else if (record.status === 'reconnect_held')
+          this.settleHold(record, 'session_removed')
         record.status = 'session_lost'
         record.session_removed_at = Date.now()
         this.notify(record.id)
@@ -232,6 +303,137 @@ export class GatewayZombieConnections {
       )
   }
 
+  /**
+   * Returns the record whose reconnect hold covers the session: an active
+   * hold, or an opted-in zombie whose client already reconnects (the new
+   * connection may arrive before the zombie socket's close).
+   * @param sessionId - Session the new connection or RESUME targets
+   */
+  private holdingRecord(sessionId: string): ZombieRecord | undefined {
+    const session = this.manager.get(sessionId)
+    const record = this.records
+      .values()
+      .find(
+        (entry) =>
+          entry.session === session &&
+          (entry.status === 'reconnect_held' ||
+            (entry.status === 'zombie' && entry.hold_reconnect))
+      )
+    // The client abandoned the silenced connection: drop it, start the hold.
+    if (record?.status === 'zombie') this.endZombie(record, 'reconnect')
+    return record?.status === 'reconnect_held' ? record : undefined
+  }
+
+  /**
+   * Keeps one connection (without HELLO) or RESUME waiting for the release.
+   * @param record - Record in the `reconnect_held` state
+   * @param socket - Blocked connection
+   * @param release - Continuation run when the hold ends
+   */
+  private block(
+    record: ZombieRecord,
+    socket: WebSocket,
+    release: () => void
+  ): void {
+    const hold = record.reconnect_hold
+    if (!hold) return
+    const existing = record.held.get(socket)
+    if (existing) {
+      // A repeated RESUME on the same connection replaces the earlier one.
+      existing.release = release
+      return
+    }
+    /** Forgets a blocked connection the client gave up on. */
+    const onClose = (): void => {
+      if (!record.held.delete(socket)) return
+      hold.pending = record.held.size
+      this.holdChanged(record)
+    }
+    socket.once('close', onClose)
+    record.held.set(socket, { release, onClose })
+    // Bounded: the oldest blocked connection is dropped (4000 is
+    // resumable), so the client retries after its backoff.
+    if (record.held.size > MAX_HELD_SOCKETS) {
+      const [oldest, entry] = record.held.entries().next().value ?? []
+      if (oldest && entry) {
+        record.held.delete(oldest)
+        oldest.off('close', entry.onClose)
+        try {
+          oldest.close(GatewayCloseCode.UnknownError, 'Reconnect held')
+        } catch {
+          // Already closing.
+        }
+      }
+    }
+    const now = Date.now()
+    hold.attempts += 1
+    hold.last_attempt_at = now
+    hold.pending = record.held.size
+    this.holdChanged(record)
+  }
+
+  /**
+   * Ends a reconnect hold: blocked connections get HELLO and deferred
+   * RESUMEs proceed, and the session's heartbeat timeout runs again.
+   * @param record - Record with an active hold
+   * @param by - Why the hold ended
+   */
+  private releaseHold(record: ZombieRecord, by: HoldRelease): void {
+    const hold = record.reconnect_hold
+    if (hold?.released_at !== null) return
+    hold.released_at = Date.now()
+    hold.released_by = by
+    if (record.status === 'reconnect_held') record.status = 'awaiting_resume'
+    const { session } = record
+    if (
+      by !== 'session_removed' &&
+      this.manager.get(session.sessionId) === session &&
+      session.ws.readyState !== WebSocket.OPEN
+    ) {
+      // As after a dropped connection: the client must RESUME in time.
+      clearTimeout(session.heartbeatTimer)
+      session.heartbeatTimer = setTimeout(() => {
+        if (session.ws.readyState !== WebSocket.OPEN)
+          this.manager.remove(session.sessionId)
+      }, this.manager.heartbeatTimeoutMs)
+    }
+    const held = [...record.held]
+    record.held.clear()
+    hold.pending = 0
+    this.holdChanged(record)
+    for (const [socket, { release, onClose }] of held) {
+      socket.off('close', onClose)
+      if (socket.readyState !== WebSocket.OPEN) continue
+      try {
+        release()
+      } catch {
+        // The connection closed meanwhile; the client reconnects again.
+      }
+    }
+  }
+
+  /** Records a hold change and wakes waiters. */
+  private holdChanged(record: ZombieRecord): void {
+    record.holdVersion += 1
+    this.notify(record.id)
+  }
+
+  /**
+   * Ends a hold and keeps the record as evidence for the retention period.
+   * @param record - Record with an active hold
+   * @param by - Why the hold ended
+   */
+  private settleHold(record: ZombieRecord, by: HoldRelease): void {
+    const now = Date.now()
+    record.expires_at = now + ZOMBIE_RETENTION_MS
+    clearTimeout(record.timer)
+    record.timer = setTimeout(() => {
+      this.retire(record.id)
+    }, ZOMBIE_RETENTION_MS)
+    record.timer.unref()
+    this.releaseHold(record, by)
+  }
+
   /** Whether the bot is the registered owner of the guild's setup. */
   private botOwnsGuild(
     botId: string,
@@ -274,7 +476,7 @@ export class GatewayZombieConnections {
       const owner = this.owners.get(request.ownership_key)
       if (owner) {
         return sameOwner(owner, request as ZombieConnectionOwnership) &&
-          owner.ttl_ms === request.ttl_ms &&
+          sameOptions(owner.request, request) &&
           owner.id
           ? (this.inspect(owner.id) ?? 'CONFLICT')
           : 'CONFLICT'
@@ -333,6 +535,9 @@ export class GatewayZombieConnections {
       close: null,
       resume: null,
       session_removed_at: null,
+      reconnect_hold: null,
+      held: new Map(),
+      holdVersion: 0,
       timer,
       onClose,
     }
@@ -343,7 +548,7 @@ export class GatewayZombieConnections {
         bot_id: request.bot_id,
         guild_id: request.guild_id,
         session_id: request.session_id,
-        ttl_ms: request.ttl_ms,
+        request,
         id,
       })
     }
@@ -355,7 +560,9 @@ export class GatewayZombieConnections {
   /**
    * Ends the zombie phase. When the connection is still open the server
    * drops it with close code 4000 (Unknown error, reconnect allowed), so the
-   * client RESUMEs and receives the buffered dispatches.
+   * client RESUMEs and receives the buffered dispatches. With
+   * `hold_reconnect`, a client close, reconnect or explicit end starts the
+   * reconnect hold instead of awaiting the RESUME.
    * @param record - Record in the `zombie` state
    * @param reason - Why the phase ended
    * @param closeSocket - Whether to drop a still-open connection
@@ -367,14 +574,41 @@ export class GatewayZombieConnections {
   ): void {
     const now = Date.now()
     this.manager.unsilence(record.socket)
-    record.status = 'awaiting_resume'
+    const { session } = record
+    const holdMs =
+      ['client_close', 'reconnect', 'end'].includes(reason) &&
+      this.manager.get(session.sessionId) === session
+        ? record.reconnect_hold_ttl_ms
+        : null
+    record.status = holdMs === null ? 'awaiting_resume' : 'reconnect_held'
     record.ended_at = now
     record.ended_by = reason
-    record.expires_at = now + ZOMBIE_RETENTION_MS
     clearTimeout(record.timer)
-    record.timer = setTimeout(() => {
-      this.retire(record.id)
-    }, ZOMBIE_RETENTION_MS)
+    if (holdMs === null) {
+      record.expires_at = now + ZOMBIE_RETENTION_MS
+      record.timer = setTimeout(() => {
+        this.retire(record.id)
+      }, ZOMBIE_RETENTION_MS)
+    } else {
+      record.reconnect_hold = {
+        held_since: now,
+        expires_at: now + holdMs,
+        attempts: 0,
+        last_attempt_at: null,
+        pending: 0,
+        released_at: null,
+        released_by: null,
+      }
+      record.expires_at = now + holdMs + ZOMBIE_RETENTION_MS
+      record.timer = setTimeout(() => {
+        this.expire(record.id)
+      }, holdMs)
+      // The client cannot heartbeat while held; keep the session resumable
+      // until the release re-arms its timeout.
+      clearTimeout(session.heartbeatTimer)
+      session.heartbeatTimer = undefined
+      record.holdVersion += 1
+    }
     record.timer.unref()
     if (closeSocket && record.socket.readyState === WebSocket.OPEN) {
       record.close = {
@@ -394,12 +628,28 @@ export class GatewayZombieConnections {
     this.notify(record.id)
   }
 
-  /** TTL: ends an active zombie phase, or retires a finished record. */
+  /** TTL: ends an active zombie phase or hold, or retires a finished record. */
   private expire(id: string): void {
     const record = this.records.get(id)
     if (!record) return
     if (record.status === 'zombie') this.endZombie(record, 'ttl')
+    else if (record.status === 'reconnect_held') this.settleHold(record, 'ttl')
     else this.retire(id)
+  }
+
+  /**
+   * Releases a reconnect hold: a waiting connection gets HELLO at once, so
+   * the client RESUMEs without waiting for its next backoff. Repeating the
+   * release of an ended hold returns the record unchanged.
+   * @param id - Record ID
+   * @returns The public record, or an error code
+   */
+  releaseReconnect(id: string | null): string | object {
+    const record = id ? this.records.get(id) : undefined
+    if (!record) return 'UNKNOWN_SCOPE'
+    if (!record.reconnect_hold) return 'INVALID_STATE'
+    if (record.status === 'reconnect_held') this.settleHold(record, 'release')
+    return this.inspect(record.id) ?? 'UNKNOWN_SCOPE'
   }
 
   /**
@@ -429,6 +679,8 @@ export class GatewayZombieConnections {
           session_id: record.session_id,
           status: record.status,
           ttl_ms: record.ttl_ms,
+          hold_reconnect: record.hold_reconnect,
+          reconnect_hold_ttl_ms: record.reconnect_hold_ttl_ms,
           sequence: record.sequence,
           started_at: record.started_at,
           zombie_expires_at: record.zombie_expires_at,
@@ -443,6 +695,7 @@ export class GatewayZombieConnections {
           close: record.close,
           resume: record.resume,
           session_removed_at: record.session_removed_at,
+          reconnect_hold: record.reconnect_hold,
         })
       : undefined
   }
@@ -455,7 +708,8 @@ export class GatewayZombieConnections {
 
   /**
    * Waits (bounded) until the record is settled (`resumed` or
-   * `session_lost`) or retires, then inspects it.
+   * `session_lost`), its reconnect hold changes, or it retires, then
+   * inspects it.
    * @param id - Record ID
    * @param waitMs - Maximum wait
    * @returns The record, undefined when unknown, or LIMIT
@@ -466,10 +720,13 @@ export class GatewayZombieConnections {
   ): Promise<object | undefined | 'LIMIT'> {
     const record = id ? this.records.get(id) : undefined
     if (!record) return undefined
-    /** Whether the record retired or reached a final status. */
+    const holdVersion = record.holdVersion
+    /** Whether the record retired, settled or its hold changed. */
     const settled = (): boolean => {
       const current = this.records.get(record.id)
-      return !current || isSettled(current)
+      return (
+        !current || isSettled(current) || current.holdVersion !== holdVersion
+      )
     }
     if (waitMs === 0 || settled()) return this.inspect(record.id)
     if (this.waiterCount >= MAX_WAITERS) return 'LIMIT'
@@ -505,8 +762,8 @@ export class GatewayZombieConnections {
   }
 
   /**
-   * Ends an active zombie phase (dropping the connection) and retires the
-   * record.
+   * Ends an active zombie phase (dropping the connection) or reconnect hold
+   * (sending HELLO) and retires the record.
    * @param id - Record ID
    * @returns true when a record was retired
    */
@@ -549,6 +806,8 @@ export class GatewayZombieConnections {
     if (!record) return false
     clearTimeout(record.timer)
     record.socket.off('close', record.onClose)
+    // Never leave a client blocked behind a record that no longer exists.
+    this.releaseHold(record, 'canceled')
     this.records.delete(id)
     if (record.ownership_key !== undefined) {
       const owner = this.owners.get(record.ownership_key)

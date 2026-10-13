@@ -159,6 +159,7 @@ Notes:
 - **Docker healthcheck** uses `127.0.0.1` explicitly (busybox `wget` resolves `localhost` to IPv6 on Alpine).
 - **`@everyone` role**: auto-created at Guild creation with ID = Guild ID.
 - **Gateway auth** happens inside the IDENTIFY payload, not via HTTP headers.
+- **`resume_gateway_url`** in READY is per session (`/_gateway/resume/<session_id>`, also with a trailing slash); that path serves the same Gateway as `/` and lets test controls recognize a reconnecting client before HELLO. RESUME on `/` must keep working: several libraries ignore the resume URL.
 
 ## Spec Drift Tracking
 
