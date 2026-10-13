@@ -6,6 +6,7 @@
 
 import { getRestFaultRuntime, pruneRestFaults } from './rest-faults'
 import { getRestPageHolds } from './rest-page-holds'
+import { pruneClosedDms, resetClosedDms } from './closed-dms'
 import { randomBytes } from 'node:crypto'
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
@@ -584,6 +585,7 @@ export function setupTestEnvironment(
   })
 
   const result = setup()
+  pruneClosedDms(db)
   pruneRestFaults(db)
   // Emit only after the transaction has committed successfully.
   for (const emit of pendingEvents) emit()
@@ -637,6 +639,7 @@ export function deleteTestSetup(db: Database, token: string): boolean {
 export function resetTestData(db: Database, token?: string): void {
   getRestPageHolds(db).reset(token)
   resetRestFaults(db, token)
+  resetClosedDms(db, token)
   resetAuditLogResponses(db, token)
   if (token) {
     db.prepare(

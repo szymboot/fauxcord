@@ -40,6 +40,7 @@ export const DiscordErrorCode = {
   MISSING_ACCESS: 50_001,
   CANNOT_EDIT_OTHER: 50_005,
   EMPTY_MESSAGE: 50_006,
+  CANNOT_SEND_MESSAGES_TO_USER: 50_007,
   MISSING_PERMISSIONS: 50_013,
   INVALID_BULK_DELETE: 50_016,
   WRONG_PIN_CHANNEL: 50_019,
@@ -140,6 +141,8 @@ export const ERROR_MESSAGES = {
   [DiscordErrorCode.CANNOT_EDIT_OTHER]:
     'Cannot edit a message authored by another user',
   [DiscordErrorCode.EMPTY_MESSAGE]: 'Cannot send an empty message',
+  [DiscordErrorCode.CANNOT_SEND_MESSAGES_TO_USER]:
+    'Cannot send messages to this user',
   [DiscordErrorCode.MISSING_PERMISSIONS]:
     'You lack permissions to perform that action',
   [DiscordErrorCode.INVALID_BULK_DELETE]:

@@ -24,6 +24,7 @@ import {
 } from '../validators/message-stickers'
 import { getChannel } from '../services/channels'
 import { getMessageSendError } from '../services/message-permissions'
+import { isDmClosed } from '../services/closed-dms'
 import {
   getMessage,
   getMessages,
@@ -139,6 +140,16 @@ export function createChannelMessageRoutes(
     }
     const authorId = bot?.user_id ?? '000000000000000000'
     const authorToken = bot?.token ?? ''
+
+    if (isDmClosed(db, channelId, authorToken))
+      return c.json(
+        discordError(
+          DiscordErrorCode.CANNOT_SEND_MESSAGES_TO_USER,
+          'Cannot send messages to this user',
+          403
+        ).body,
+        403
+      )
 
     const accessError = getMessageSendError(db, channelId, authorId)
     if (accessError) return c.json(accessError.body, accessError.status)
@@ -261,6 +272,16 @@ export function createChannelMessageRoutes(
       authorToken,
       attachmentFiles,
       (persist) => {
+        // A fixture may be installed while attachment preparation awaits IO.
+        if (isDmClosed(db, channelId, authorToken))
+          return c.json(
+            discordError(
+              DiscordErrorCode.CANNOT_SEND_MESSAGES_TO_USER,
+              'Cannot send messages to this user',
+              403
+            ).body,
+            403
+          )
         // Attachment preparation can await disk writes. Re-read membership,
         // roles and overwrites before the synchronous message transaction.
         const currentError = getMessageSendError(
