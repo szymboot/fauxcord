@@ -224,6 +224,16 @@ export class GatewayZombieConnections {
       })
       return true
     }
+    manager.invalidateHeldResume = (socket) => {
+      for (const record of this.records.values()) {
+        const entry = record.held.get(socket)
+        if (!entry || !record.reconnect_hold) continue
+        socket.off('close', entry.onClose)
+        record.held.delete(socket)
+        record.reconnect_hold.pending = record.held.size
+        this.holdChanged(record)
+      }
+    }
     manager.observeResume = (session, facts) => {
       for (const record of this.records.values()) {
         if (record.session !== session || isSettled(record)) continue
@@ -390,12 +400,18 @@ export class GatewayZombieConnections {
       this.manager.get(session.sessionId) === session &&
       session.ws.readyState !== WebSocket.OPEN
     ) {
-      // As after a dropped connection: the client must RESUME in time.
+      // The client must RESUME in time, as after a dropped connection. A
+      // client between attempts only retries after its backoff; with a
+      // doubling backoff that gap never exceeds the time already held, so
+      // the grace covers it before the usual heartbeat timeout applies.
       clearTimeout(session.heartbeatTimer)
-      session.heartbeatTimer = setTimeout(() => {
-        if (session.ws.readyState !== WebSocket.OPEN)
-          this.manager.remove(session.sessionId)
-      }, this.manager.heartbeatTimeoutMs)
+      session.heartbeatTimer = setTimeout(
+        () => {
+          if (session.ws.readyState !== WebSocket.OPEN)
+            this.manager.remove(session.sessionId)
+        },
+        hold.released_at - hold.held_since + this.manager.heartbeatTimeoutMs
+      )
     }
     const held = [...record.held]
     record.held.clear()

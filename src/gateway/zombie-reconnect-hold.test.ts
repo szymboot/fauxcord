@@ -553,6 +553,88 @@ describe('zombie connection reconnect hold', () => {
     ).toMatchObject({ reconnect_hold: { released_by: 'release' } })
   })
 
+  it('ignores a heartbeat still in flight on the dropped zombie socket', async () => {
+    for (const target of clients.splice(0)) target.ws.terminate()
+    await server.close()
+    await start(100)
+    const received = lastSequence(client)
+    const started = await zombie()
+    // The client has not yet read the server's close frame and still sends.
+    client.ws.pause()
+    await json(`${ZOMBIES}/${started.id}/end`, 200, 'POST', {})
+    client.ws.send(JSON.stringify({ op: 1, d: received }))
+    // Far beyond the 200 ms heartbeat timeout the late heartbeat would arm.
+    await delay(500)
+    expect(server.sessionManager.get(client.sessionId)).toBeDefined()
+    const pending = await dialResume()
+    expect(await helloWithin(pending, 50)).toBe(false)
+    expect(await inspect(started.id)).toMatchObject({
+      status: 'reconnect_held',
+      reconnect_hold: { released_at: null },
+    })
+    client.ws.resume()
+    await release(started.id)
+    await frame(pending, (entry) => entry.op === 10)
+    expect(await sendResume(pending, received)).toMatchObject({
+      t: 'RESUMED',
+    })
+  })
+
+  it('keeps the session through the client backoff when released between attempts', async () => {
+    for (const target of clients.splice(0)) target.ws.terminate()
+    await server.close()
+    await start(100)
+    const received = lastSequence(client)
+    const started = await zombie()
+    await voice({})
+    await detect()
+    const attempt = await dialResume()
+    await until(started.id, (record) => record.reconnect_hold?.pending === 1)
+    // The attempt times out on the client, which then backs off.
+    attempt.ws.terminate()
+    await until(started.id, (record) => record.reconnect_hold?.pending === 0)
+    await delay(400)
+    await release(started.id)
+    // Longer than the 200 ms heartbeat timeout, shorter than the time held.
+    await delay(300)
+    const retry = await dialResume()
+    await frame(retry, (entry) => entry.op === 10)
+    expect(await sendResume(retry, received)).toMatchObject({ t: 'RESUMED' })
+    expect(
+      retry.frames.find((entry) => entry.t === 'VOICE_STATE_UPDATE')?.s
+    ).toBe(received + 1)
+  })
+
+  it('forgets a deferred RESUME whose connection IDENTIFYs instead', async () => {
+    const started = await zombie()
+    await detect()
+    const plain = await dial(server.url)
+    await frame(plain, (entry) => entry.op === 10)
+    plain.sessionId = client.sessionId
+    plain.ws.send(
+      JSON.stringify({
+        op: 6,
+        d: { token: TOKEN, session_id: client.sessionId, seq: 0 },
+      })
+    )
+    await until(started.id, (record) => record.reconnect_hold?.pending === 1)
+    plain.ws.send(
+      JSON.stringify({ op: 2, d: { token: OTHER_TOKEN, intents: INTENTS } })
+    )
+    const ready = await frame(plain, (entry) => entry.t === 'READY')
+    expect(
+      await until(started.id, (record) => record.reconnect_hold?.pending === 0)
+    ).toMatchObject({ reconnect_hold: { attempts: 1 } })
+    await release(started.id)
+    await delay(50)
+    // The release does not resume the client's session on that connection.
+    expect(plain.frames.some((entry) => entry.t === 'RESUMED')).toBe(false)
+    expect(plain.ws.readyState).toBe(WebSocket.OPEN)
+    expect(server.sessionManager.get(String(ready.d?.session_id))?.botId).toBe(
+      OTHER_BOT_ID
+    )
+  })
+
   it('releases blocked connections when the session is removed', async () => {
     const started = await zombie()
     await detect()

@@ -29,6 +29,8 @@ import { hasIntent } from './intents'
  * a new connection intends to RESUME.
  */
 export const GATEWAY_RESUME_PATH = '/_gateway/resume'
+/** `readyState` of an open WebSocket connection. */
+const WS_OPEN = 1
 /** Resume path of one session, with an optional trailing slash. */
 const RESUME_PATH = /^\/_gateway\/resume\/([\da-f]{32})\/?$/
 
@@ -567,6 +569,10 @@ function handleHeartbeat(
   ws: WSContext,
   sequence: unknown
 ): void {
+  // A heartbeat still in flight on a closing connection (e.g. one the server
+  // just dropped) can neither be ACKed nor keep its session alive; otherwise
+  // it would re-arm a timeout a test control deliberately suspended.
+  if (ws.readyState !== WS_OPEN) return
   const sessionId = sessionIdByWs.get(ws)
   const session = sessionId ? sessionManager.get(sessionId) : undefined
   // One receipt time keeps the zombie record and the session in agreement.

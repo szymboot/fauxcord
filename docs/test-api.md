@@ -3396,9 +3396,13 @@ therefore spans several attempts. Each attempt is counted, and the attempt
 waiting at release time gets HELLO right away.
 
 **Session lifetime.** While held, the client cannot heartbeat, so the session's
-heartbeat timeout is suspended and the session stays resumable. On release the
-timeout is re-armed (two heartbeat intervals from the release); a client that
-does not RESUME within it loses the session (`session_lost`). The replay buffer
+heartbeat timeout is suspended and the session stays resumable. Heartbeats
+still in flight on the dropped zombie socket are ignored. On release the
+session must RESUME within the time it was held plus two heartbeat intervals.
+That grace covers a client released between attempts that is still in its
+backoff: with a doubling backoff, the gap never exceeds the time already held.
+The RESUME re-arms the normal heartbeat timeout. A client that does not RESUME
+within the grace loses the session (`session_lost`). The replay buffer
 keeps the last 100 dispatches; if more are generated during the hold, the
 RESUME gets op 9 `d: false` and the record becomes `session_lost`.
 

@@ -143,6 +143,8 @@ export class SessionManager {
 
   /** Clears a socket's deferred resumes when it establishes another session. */
   invalidatePendingResume?: (socket: WebSocket) => void
+  /** Forgets a socket's held RESUME when it establishes another session. */
+  invalidateHeldResume?: (socket: WebSocket) => void
 
   /** Rebinds explicitly reconnecting controls; ordinary replacement invalidates. */
   resumeEventControls?: (session: Session, socket: WebSocket) => void
@@ -291,6 +293,7 @@ export class SessionManager {
       this.connectionGeneration(socket) + 1
     )
     this.invalidatePendingResume?.(socket)
+    this.invalidateHeldResume?.(socket)
   }
 
   private readonly sessionsById = new Map<string, Session>()
