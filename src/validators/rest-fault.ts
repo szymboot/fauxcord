@@ -28,6 +28,11 @@ export interface RestFaultQuery {
   around?: string
 }
 
+/** Identifies exact guild scopes that can be armed before a channel exists. */
+export function isRestFaultGuildChannelCreatePath(path: string): boolean {
+  return /^\/guilds\/\d{1,20}\/channels$/.test(path)
+}
+
 /** Identifies list routes whose faults select a page rather than ignoring queries. */
 export function isRestFaultPagePath(path: string): boolean {
   return (
@@ -180,6 +185,8 @@ export function validateRestFault(
   const userRead =
     body.method === 'GET' && /^\/users\/\d{1,20}$/.test(body.path)
   const dmCreate = body.method === 'POST' && body.path === '/users/@me/channels'
+  const guildChannelCreate =
+    body.method === 'POST' && isRestFaultGuildChannelCreatePath(body.path)
   if (
     body.recipient_id !== undefined &&
     (!dmCreate ||
@@ -207,17 +214,19 @@ export function validateRestFault(
     return undefined
   if (
     ((userRead || dmCreate) && body.guild_id === undefined) ||
-    ((dmCreate || body.method === 'GET') &&
+    ((dmCreate || guildChannelCreate || body.method === 'GET') &&
       body.guild_id !== undefined &&
       (typeof body.guild_id !== 'string' ||
         !/^\d{1,20}$/.test(body.guild_id) ||
-        (guildRead && body.guild_id !== body.path.split('/', 3)[2])))
+        ((guildRead || guildChannelCreate) &&
+          body.guild_id !== body.path.split('/', 3)[2])))
   )
     return undefined
 
   const supported =
     userRead ||
     dmCreate ||
+    guildChannelCreate ||
     guildRead ||
     pageRead ||
     (body.method === 'POST' &&

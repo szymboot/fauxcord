@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
 import {
+  isRestFaultGuildChannelCreatePath,
   isRestFaultPagePath,
   normalizeRestFaultQuery,
   type RestFaultRequest,
@@ -445,7 +446,7 @@ function insertRestFault(
   return result
 }
 
-/** Arms an exact request with guild cleanup and bot-scoped user selectors. */
+/** Arms an exact request with guild cleanup and selector-specific bot scope. */
 export function createRestFault(
   db: Database,
   request: RestFaultRequest
@@ -505,7 +506,7 @@ export function consumeRestFault(
     WHERE id = (
       SELECT f.id FROM test_rest_faults f JOIN guilds g ON g.id = f.guild_id
       WHERE f.method = ? AND f.path = ? AND f.query = ? AND f.remaining > 0
-      AND ((f.method != 'GET' AND f.path != '/users/@me/channels') OR g.bot_token = ?)
+      AND ((f.method != 'GET' AND f.path != '/users/@me/channels' AND ? = 0) OR g.bot_token = ?)
       AND (f.path != '/users/@me/channels'
         OR json_extract(f.options, '$.recipient_id') IS NULL
         OR json_extract(f.options, '$.recipient_id') = ?)
@@ -518,6 +519,7 @@ export function consumeRestFault(
         method,
         path,
         query,
+        method === 'POST' && isRestFaultGuildChannelCreatePath(path) ? 1 : 0,
         botToken ?? null,
         recipientId ?? null,
         botToken ?? null

@@ -888,6 +888,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | -------- | --------------------------------------------------- | --------------------------- |
 | `POST`   | `/channels/{channelId}/messages`                    | Message / edit-log sending  |
 | `POST`   | `/users/@me/channels`                               | DM channel creation         |
+| `POST`   | `/guilds/{guildId}/channels`                        | Guild channel creation      |
 | `DELETE` | `/channels/{channelId}/messages/{messageId}`        | Triggering-message deletion |
 | `PATCH`  | `/channels/{channelId}/messages/{messageId}`        | Exact message edit          |
 | `DELETE` | `/channels/{channelId}`                             | Channel deletion            |
@@ -906,8 +907,57 @@ slash. It selects the exact Channel, Channel/Message, or Guild/User/Role IDs, so
 unrelated requests cannot consume the fault. The Channel must belong to an existing Guild,
 or the Guild must exist (`404` otherwise). The target Message/User/Role does not
 need to exist yet, allowing prearming before message injection. Existing
-Channel/Guild `POST`/`DELETE`/`PUT`/`PATCH` faults apply to any authenticated caller issuing that
+Channel/Guild `POST`/`DELETE`/`PUT`/`PATCH` faults, except Guild channel creation below, apply to any authenticated caller issuing that
 exact request, regardless of token or body.
+
+Guild channel creation faults derive their scope directly from the existing
+Guild in `/guilds/{guildId}/channels`; no Channel or future Channel ID is needed.
+For example, prearm a shop category creation failure before triggering the bot:
+
+```json
+{
+  "method": "POST",
+  "path": "/guilds/222222222222222222/channels",
+  "status": 403,
+  "code": 50013,
+  "message": "Missing Permissions",
+  "times": 1
+}
+```
+
+This selector applies only to the registered Bot owning that Guild
+(`guilds.bot_token`), including when `mode` is omitted. Other Bots, Bearer
+callers, methods, paths, and Guilds use the ordinary native route without
+consuming the control. Native requests may use `/api/v10`, `/api`, or bare
+paths; the control's path must remain bare. IDs are exact 1–20 digit strings,
+without numeric coercion. Optional `guild_id` must exactly equal the path's Guild
+ID (`400` for a foreign/malformed scope); a nonexistent Guild returns `404`.
+`recipient_id` and `query` are unsupported (`400`). Control endpoints retain
+their existing auth-exempt test API contract; the Guild selects the consumer,
+not an authorization requirement for arming the control.
+
+One active control per exact method/path is allowed (`409` for another, including
+across modes); different Guilds can be armed independently. It matches every
+creation body in the selected Guild, including text, voice, and category
+channels, before native body validation. There is no name, type, or parent
+selector. Serialize scenarios sharing a Bot/Guild, or use separate Guilds.
+Every selected failure creates **no Channel and no `CHANNEL_CREATE`**.
+`rate_limit`, `delay`, and real-socket `disconnect` use the existing bounds,
+expiry, counters, and cancellation semantics below. A delay never resumes
+creation, even after expiry/removal/reset. Retries after exhaustion or removal
+reach normal validation and return native `201` on valid input, persisting a
+Channel and dispatching `CHANNEL_CREATE` once per successful creation.
+
+The response reports `guild_id` from the path and `channel_id: null`.
+Consumption evidence remains after failures even though no native state was
+created, until the control is deleted or cleaned up. Guild/setup deletion and
+global or Bot-scoped reset remove active/exhausted controls and their evidence.
+Explicit modes capture ownership and are invalidated on Guild reassignment;
+mode-omitted controls follow the Guild's current owning Bot, as existing scoped
+user/DM controls do. These failures model errors **before** mutation, not an
+ambiguous failure after a successful creation. Coverage is in
+`src/rest-guild-channel-create-faults.test.ts`, using full `buildApp` routes and
+real HTTP/Gateway sockets.
 
 To fail a message edit (including a shop category or item message refresh in
 discord-bot Harness task DSC-1004), arm the exact native PATCH path:
@@ -1189,7 +1239,8 @@ capture the guild's owning Bot token for **every** method. Another Bot or Bearer
 caller cannot consume them; reassigned/deleted ownership invalidates them.
 Moving a Channel into another Guild through `/_test/setup` also cancels its old
 explicit controls and pending waits immediately after setup commits.
-Legacy mode-omitted mutation controls retain their existing cross-token behavior.
+Legacy mode-omitted mutation controls retain their existing cross-token behavior;
+DM and Guild channel creation selectors always use their documented Bot scope.
 Fault selection runs after authentication and before route permission checks or
 mutation. A non-owner Bot with denied send permissions still receives its armed
 failure. Once that control is exhausted, the next attempt uses the current
