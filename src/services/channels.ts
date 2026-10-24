@@ -529,7 +529,12 @@ export function updateChannel(
 }
 
 /**
- * Deletes a channel. Members connected to a deleted voice or stage channel are
+ * Deletes a channel. Deleting a guild category clears its direct children's
+ * parent IDs without deleting them or disconnecting their voice members.
+ * Updated child snapshots and the category deletion are published only after
+ * the transaction succeeds. Child updates precede the category deletion in
+ * Fauxcord; Discord documents the events but does not guarantee their order.
+ * Members connected to a deleted voice or stage channel are
  * disconnected first: their states are retained with `channel_id: null` and
  * one `VOICE_STATE_UPDATE` per member (numeric user ID order) is published
  * before `CHANNEL_DELETE`, so clients can still resolve the old channel from
@@ -551,18 +556,46 @@ export function deleteChannel(
     // Build the response before deleting: the DELETE cascades to
     // channel_overwrites, so overwrites must be read first.
     const channel = toChannelObject(row, getChannelOverwrites(db, row.id))
+    const children: ChannelObject[] = []
+    if (row.type === 4 && row.guild_id !== null) {
+      const childRows = db
+        .prepare(
+          'SELECT * FROM channels WHERE parent_id = ? AND guild_id = ? ORDER BY position, id'
+        )
+        .all(channelId, row.guild_id) as ChannelRow[]
+      db.prepare(
+        'UPDATE channels SET parent_id = NULL WHERE parent_id = ? AND guild_id = ?'
+      ).run(channelId, row.guild_id)
+      const overwrites = getChannelOverwritesForChannels(
+        db,
+        childRows.map((child) => child.id)
+      )
+      for (const child of childRows) {
+        children.push(
+          toChannelObject(
+            { ...child, parent_id: null },
+            overwrites.get(child.id) ?? []
+          )
+        )
+      }
+    }
     // Disconnect before deleting: the FK cascade would otherwise silently
     // drop the voice states referencing this channel.
     const disconnects = disconnectGuildVoiceChannelMembers(db, channelId)
     db.prepare('DELETE FROM channels WHERE id = ?').run(channelId)
-    return { channel, disconnects }
+    return { channel, children, disconnects }
   })
   if (!deleted) return null
-  const { channel: result, disconnects } = deleted
+  const { channel: result, children, disconnects } = deleted
   getRestFaultRuntime(db).prune()
 
   for (const mutation of disconnects)
     publishGuildVoiceStateMutation(db, mutation)
+  for (const child of children) {
+    gatewayBus.emit('channel.update', {
+      channel: child as unknown as Record<string, unknown>,
+    })
+  }
   gatewayBus.emit('channel.delete', {
     channel: result as unknown as Record<string, unknown>,
   })
