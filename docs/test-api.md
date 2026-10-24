@@ -376,7 +376,8 @@ and `request_to_speak_timestamp` are cleared. One native `VOICE_STATE_UPDATE`
 `GuildVoiceStates` intent, Bot/token scoping, sequencing, RESUME replay and
 `VOICE_STATE_UPDATE` capture controls all apply. Members connected to other
 channels, already disconnected states and other guilds are untouched. Text and
-other non-voice channels emit only `CHANNEL_DELETE`.
+other non-voice, non-category channels emit only `CHANNEL_DELETE`; category
+deletion also updates its children as described below.
 
 Ordering is deterministic: the disconnects are sent first, in ascending numeric
 `user_id` order, followed by `CHANNEL_DELETE`. All-digit IDs compare by value
@@ -390,6 +391,38 @@ order when the same code must also run against real Discord.
 
 The deletion and disconnects are committed in one transaction before any event
 is published. `/_test/reset`, setup cleanup and guild deletion remain silent.
+
+### Category deletion preserves child channels
+
+Authenticated `DELETE /channels/:channelId` (also under `/api` and `/api/v10`)
+returns the deleted category object with status `200`. Its surviving direct
+children in the same guild have `parent_id: null` in channel GET, guild channel
+lists and subsequent Gateway `GUILD_CREATE` snapshots. Their IDs, messages,
+permission overwrites and voice/stage connections remain intact. Threads under
+a surviving child keep that child as their parent. Other categories and guilds
+are unaffected. A missing or already deleted category returns `404` (`10003`,
+`Unknown Channel`) without further mutations or events.
+
+One full `CHANNEL_UPDATE` is published for each detached child and one
+`CHANNEL_DELETE` for the category, using the `Guilds` intent. Child snapshots
+are scoped to the guild's registered bot ID, setup token and originating
+database, just like permission-overwrite updates. Other bot identities, other
+tokens sharing the same bot ID, and other app databases receive no child
+snapshots. Delivery follows the guild's registration, not the REST caller's
+token. This follows Discord's explicit
+[Delete/Close Channel contract](https://docs.discord.com/developers/resources/channel#deleteclose-channel).
+Fauxcord commits all parent changes and deletion in one transaction before
+publishing any event. It sends child updates in `position, id` order before the
+category deletion; Discord does not document an ordering guarantee. Category
+deletion emits no voice disconnect events for the surviving children.
+
+No new test control is required: create the hierarchy through native guild
+channel creation with `parent_id`, then delete the category through native REST.
+The voice-state fixture above can prepare connected members. `/_test/reset`
+silently clears voice states and messages while preserving the channel
+hierarchy; guild/setup deletion still removes the entire hierarchy through
+existing cleanup. This fix does not add parent assignment validation or change
+the pre-existing channel create/delete broadcast behavior.
 
 ### Member removal disconnects voice
 
@@ -857,6 +890,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `POST`   | `/users/@me/channels`                               | DM channel creation         |
 | `DELETE` | `/channels/{channelId}/messages/{messageId}`        | Triggering-message deletion |
 | `PATCH`  | `/channels/{channelId}/messages/{messageId}`        | Exact message edit          |
+| `DELETE` | `/channels/{channelId}`                             | Channel deletion            |
 | `PUT`    | `/guilds/{guildId}/bans/{userId}`                   | Ban creation                |
 | `PATCH`  | `/guilds/{guildId}/members/{userId}`                | Member update / mute        |
 | `PUT`    | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role assignment        |
@@ -1083,9 +1117,67 @@ pre-query databases and persistence of page selectors/counters across reopen.
 `src/rest-get-faults.test.ts` and `src/e2e-rest-failures.test.ts` preserve legacy
 GET and mutation contracts.
 
+### Channel deletion failures
+
+For DSC-1003 channel/category removal scenarios, arm `DELETE` with the exact
+bare `/channels/{channelId}` path. The channel must already exist and belong
+to a guild; private channels are unsupported (`404` when arming). The control
+resolves `guild_id` and the owning registered bot from the channel **before**
+deletion. Keep IDs as strings, including 19–20 digit Snowflakes. There are no
+wildcards or ID coercion. Do not add a `query` or `recipient_id` selector.
+
+```json
+{
+  "method": "DELETE",
+  "path": "/channels/1513052391153471489",
+  "mode": "rate_limit",
+  "retry_after": 0.25,
+  "times": 2,
+  "timeout_ms": 30000
+}
+```
+
+The bare, `/api`, and `/api/v10` native request prefixes all consume this same
+selector. `rate_limit`, `delay`, and `disconnect` follow the explicit-mode
+owning-bot scope below. Mode-omitted HTTP failures retain legacy mutation
+behavior across authenticated tokens. Other methods/channels/guilds do not
+consume it; nonowner tokens bypass explicit controls and run the native route,
+including its existing deletion behavior. Active controls for the same
+method/path conflict (`409`), including across modes. Each selected attempt
+consumes one count before any native transaction; native rollback cannot undo
+that evidence. Exhausted controls can be inspected or rearmed while the channel
+exists. Inspection and control removal use the existing REST-fault APIs.
+
+A selected failure leaves the channel, its messages, and connected voice states
+intact. It emits neither `CHANNEL_DELETE` nor voice disconnect events. Delayed
+attempts never enter native deletion, even after cancellation or TTL expiry.
+After exhaustion/removal/expiry, a new request follows native behavior: it
+deletes the channel and messages, retains disconnected voice states with
+`channel_id: null`, and publishes native `VOICE_STATE_UPDATE` disconnects before
+`CHANNEL_DELETE` for occupied voice/stage channels. Category deletion retains
+the existing native behavior; this control adds no new category cascade.
+
+Successful native deletion cascades away **all** controls and retained evidence
+for that channel, including the DELETE control itself (`404` on inspection).
+Assert consumption **before** the successful retry. If a retry deletes the
+channel while a selected delay is still waiting, lifecycle cleanup releases
+that wait with its configured error; it cannot delete or dispatch a second
+time. Reset, guild/setup deletion, ownership invalidation and explicit-mode TTL
+retain the shared cleanup rules below. The control simulates failure before
+mutation, not a lost response after successful deletion. A `disconnect` scenario
+requires a real Node HTTP server, as described below.
+
+`src/rest-channel-delete-faults.test.ts` covers full-`buildApp` routing,
+validation, exact scope, conflicts, retries, rollback-independent counters,
+cleanup, real HTTP transport failures, and ordered Gateway evidence.
+discord-bot must update its Fauxcord pin to a commit containing this capability
+and exercise its own delete/retry handler; those consumer assertions remain
+downstream work.
+
 Controls and counters are isolated per
 database. `/_test/reset` clears them, and environment/Guild deletion cascades
-them; Channel deletion also removes message-send, message-edit, message-delete and message-page controls for
+them; Channel deletion also removes channel-delete, message-send, message-edit,
+message-delete and message-page controls for
 that Channel. Exhausted records remain inspectable until cleared, and a fresh control may then
 be armed for the same selector.
 

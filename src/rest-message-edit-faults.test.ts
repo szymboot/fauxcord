@@ -280,7 +280,34 @@ describe('exact message edit REST fault controls through buildApp', () => {
     expect(await responseStatus(request(path, 'PATCH', edit))).toBe(200)
   })
 
+  it('keeps channel DELETE and exact message PATCH controls independent', async () => {
+    seedEditableMessage(db, channel)
+    const before = storedMessage(db)
+    const patch = await arm()
+    const deletion = await arm({
+      method: 'DELETE',
+      path: `/channels/${channel}`,
+    })
+    expect(await responseStatus(request(path, 'PATCH', edit))).toBe(500)
+    expect(await inspect(patch.id)).toMatchObject({ consumed: 1, remaining: 0 })
+    expect(await inspect(deletion.id)).toMatchObject({
+      consumed: 0,
+      remaining: 1,
+    })
+    expect(
+      await responseStatus(request(`/channels/${channel}`, 'DELETE'))
+    ).toBe(500)
+    expect(await inspect(deletion.id)).toMatchObject({
+      consumed: 1,
+      remaining: 0,
+    })
+    expect(storedMessage(db)).toEqual(before)
+    expect(await responseStatus(request(`/channels/${channel}`))).toBe(200)
+    expect(await responseStatus(request(path, 'PATCH', edit))).toBe(200)
+  })
+
   it.each([
+    '/channels/1',
     '/channels/*/messages/1',
     '/channels/{channelID}/messages/{messageID}',
     '/channels/1/messages',
