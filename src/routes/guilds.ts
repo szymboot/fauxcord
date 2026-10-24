@@ -19,6 +19,7 @@ import {
   getGuildChannels,
   createGuildChannel,
   isVoiceCapableChannelType,
+  isValidCategoryParent,
 } from '../services/channels'
 import { listVoiceRegions } from '../services/catalog'
 import {
@@ -26,8 +27,11 @@ import {
   isStageBitrateTooHigh,
   normalizeVoiceChannelSettings,
   parseChannelType,
+  parseChannelBody,
   pickVoiceChannelSettings,
   validateVoiceChannelSettings,
+  validateChannelParent,
+  supportsCategoryParent,
 } from '../validators/channel'
 import { getGuildWebhooks } from '../services/webhooks'
 import {
@@ -37,7 +41,7 @@ import {
   GUILD_LIMITS,
   type ChannelCreatePayload,
 } from '../validators/guild'
-import { requireEntity, parseJsonBody } from '../lib/route-helpers'
+import { requireEntity } from '../lib/route-helpers'
 import { createGuildRoleRoutes } from './guild-roles'
 import { createGuildMemberRoutes } from './guild-members'
 import { createGuildEmojiRoutes } from './guild-emojis'
@@ -168,7 +172,9 @@ export function createGuildRoutes(
       return c.json(err.body, 400)
     }
 
-    const payload = (await parseJsonBody(c)) as unknown as ChannelCreatePayload
+    const payload = parseChannelBody(
+      await c.req.text()
+    ) as unknown as ChannelCreatePayload
 
     // Parse `type` once so the voice decision, validation and the stored row
     // all use the same integer (numeric strings such as "2" are converted).
@@ -179,6 +185,9 @@ export function createGuildRoutes(
     const errors = {
       ...validateChannelCreate(payload),
       ...parsedType.errors,
+      ...validateChannelParent(payload.parent_id, type, (parentId) =>
+        isValidCategoryParent(db, guildId, parentId)
+      ),
       ...(voice &&
         validateVoiceChannelSettings(
           payload,
@@ -202,7 +211,10 @@ export function createGuildRoutes(
       type,
       topic: payload.topic,
       nsfw: payload.nsfw,
-      parentId: payload.parent_id,
+      parentId:
+        supportsCategoryParent(type) && typeof payload.parent_id === 'string'
+          ? payload.parent_id
+          : null,
       position: payload.position ?? channels.length,
     })
 

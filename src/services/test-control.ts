@@ -19,6 +19,7 @@ import {
   normalizeVoiceChannelSettings,
   pickVoiceChannelSettings,
   validateVoiceChannelSettings,
+  validateStoredChannelParent,
   VOICE_CHANNEL_LIMITS,
   type VoiceChannelSettings,
 } from '../validators/channel'
@@ -302,6 +303,56 @@ function assertStableChannelIdentity(
     throw new Error('VOICE_CHANNEL_GUILD_CHANGE')
 }
 
+/** Stored child and parent fields used to validate an existing relationship. */
+interface StoredChannelParent {
+  id: string
+  guild_id: string | null
+  type: number
+  parent_id: string
+  parent_guild_id: string | null
+  parent_type: number | null
+  category_parent_id: string | null
+}
+
+/**
+ * Snapshots invalid non-null channel parent relationships. Setup compares the
+ * original and final invalid IDs so existing bad state is neither repaired nor
+ * blamed on an unrelated setup change. The joined snapshot covers category
+ * children and originating-channel parents for threads without per-row queries.
+ * @param db - Database
+ * @returns Invalid child IDs and their Discord-shaped field errors
+ */
+function getInvalidStoredChannelParents(
+  db: Database
+): Map<string, ValidationErrors> {
+  const relationships = db
+    .prepare(
+      `SELECT c.id, c.guild_id, c.type, c.parent_id,
+       p.guild_id AS parent_guild_id, p.type AS parent_type,
+       p.parent_id AS category_parent_id
+     FROM channels c LEFT JOIN channels p ON p.id = c.parent_id
+     WHERE c.parent_id IS NOT NULL`
+    )
+    .all() as StoredChannelParent[]
+  const invalid = new Map<string, ValidationErrors>()
+  for (const row of relationships) {
+    const sameGuild =
+      row.guild_id !== null && row.guild_id === row.parent_guild_id
+    const errors = validateStoredChannelParent(
+      row.parent_id,
+      row.type,
+      () =>
+        sameGuild && row.parent_type === 4 && row.category_parent_id === null,
+      () =>
+        sameGuild &&
+        row.parent_type !== null &&
+        [0, 5, 15, 16].includes(row.parent_type)
+    )
+    if (Object.keys(errors).length > 0) invalid.set(row.id, errors)
+  }
+  return invalid
+}
+
 /**
  * Sets up the test environment.
  * @param db - Database
@@ -313,7 +364,8 @@ function assertStableChannelIdentity(
  * missing owners, BOT_OWNER for bots, INVALID_CHANNEL_TYPE for non-integer
  * channel types, INVALID_CHANNEL_TYPE_CHANGE for
  * voice-capable <-> other type changes, or VOICE_CHANNEL_GUILD_CHANGE for
- * cross-guild moves of voice-capable channels
+ * cross-guild moves of voice-capable channels. Throws SetupValidationError
+ * with INVALID_CHANNEL_PARENT for newly invalid category/thread relationships.
  */
 export function setupTestEnvironment(
   db: Database,
@@ -340,6 +392,7 @@ export function setupTestEnvironment(
   // (e.g. only the Bot registered) is not left behind if an error occurs midway
   const setup = db.transaction((): SetupResponse => {
     const guildRequests = request.guilds ?? []
+    const originalInvalidParents = getInvalidStoredChannelParents(db)
     // Validate before registering the bot so a human owner cannot be promoted
     // to a bot when its ID is also used as the setup account.
     for (const guildReq of guildRequests) {
@@ -575,6 +628,11 @@ export function setupTestEnvironment(
         name: guildReq.name,
         channels: channelsResponse,
       })
+    }
+
+    for (const [channelId, errors] of getInvalidStoredChannelParents(db)) {
+      if (!originalInvalidParents.has(channelId))
+        throw new SetupValidationError('INVALID_CHANNEL_PARENT', errors)
     }
 
     return {

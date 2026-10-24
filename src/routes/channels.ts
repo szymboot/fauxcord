@@ -13,6 +13,7 @@ import {
   updateChannel,
   deleteChannel,
   isVoiceCapableChannelType,
+  isValidCategoryParent,
   type ChannelUpdatePayload as ValidatedChannelUpdate,
 } from '../services/channels'
 import { listVoiceRegions } from '../services/catalog'
@@ -22,14 +23,16 @@ import {
   isStageBitrateTooHigh,
   normalizeVoiceChannelSettings,
   parseChannelType,
+  parseChannelBody,
   pickVoiceChannelSettings,
   validateChannelTypeChange,
   validateChannelUpdate,
+  validateChannelParent,
   validateVoiceChannelSettings,
   type ChannelUpdatePayload,
 } from '../validators/channel'
 import type { AppEnv } from '../middleware/auth'
-import { requireEntity, parseJsonBody } from '../lib/route-helpers'
+import { requireEntity } from '../lib/route-helpers'
 import { createChannelPinRoutes } from './channel-pins'
 import { createChannelMessageRoutes } from './channel-messages'
 import { createChannelReactionRoutes } from './channel-reactions'
@@ -76,7 +79,7 @@ export function createChannelRoutes(
   // PATCH /channels/:channelId — Update channel information
   app.patch('/channels/:channelId', async (c) => {
     const { channelId } = c.req.param()
-    const payload = (await parseJsonBody(c)) as ChannelUpdatePayload
+    const payload = parseChannelBody(await c.req.text()) as ChannelUpdatePayload
 
     const current = getChannel(db, channelId)
     // Discord applies voice settings to voice and stage channels only.
@@ -86,11 +89,17 @@ export function createChannelRoutes(
           .prepare('SELECT premium_tier FROM guilds WHERE id = ?')
           .get(current.guild_id) as { premium_tier: number } | undefined)
       : undefined
+    const currentGuildId = current?.guild_id
     const parsedType = parseChannelType(payload.type)
     const errors = {
       ...validateChannelUpdate(payload),
       ...parsedType.errors,
       ...(current && validateChannelTypeChange(current.type, parsedType.type)),
+      ...(current &&
+        currentGuildId &&
+        validateChannelParent(payload.parent_id, current.type, (parentId) =>
+          isValidCategoryParent(db, currentGuildId, parentId)
+        )),
       ...(voice &&
         validateVoiceChannelSettings(
           payload,

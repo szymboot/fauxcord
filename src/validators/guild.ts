@@ -76,7 +76,7 @@ export interface ChannelCreatePayload {
   type?: number
   topic?: string | null
   nsfw?: boolean
-  parent_id?: string | null
+  parent_id?: unknown
   position?: number | null
   /** Voice/stage settings; validated by validateVoiceChannelSettings. */
   bitrate?: unknown
