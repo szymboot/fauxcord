@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
 import {
+  isRestFaultChannelEdit,
   isRestFaultGuildChannelCreatePath,
   isRestFaultPagePath,
   normalizeRestFaultQuery,
@@ -286,7 +287,8 @@ export class RestFaultRuntime {
     if (disarm && this.db.open)
       this.db
         .prepare(
-          'UPDATE test_rest_faults SET remaining = 0 WHERE owner_token IS NOT NULL'
+          `UPDATE test_rest_faults SET remaining = 0
+          WHERE json_extract(options, '$.mode') IS NOT NULL`
         )
         .run()
     for (const attempt of this.pending) attempt.finish('cancelled')
@@ -373,13 +375,17 @@ function insertRestFault(
   const query = request.query ? JSON.stringify(request.query) : ''
   const parts = request.path.split('/')
   const channelId = parts[1] === 'channels' ? parts[2] : null
+  const channelEdit = isRestFaultChannelEdit(request.method, request.path)
   const guild = channelId
     ? (db
         .prepare(
           `SELECT g.id, g.bot_token FROM channels c
-          JOIN guilds g ON g.id = c.guild_id WHERE c.id = ?`
+          JOIN guilds g ON g.id = c.guild_id WHERE c.id = ?
+          AND (? = 0 OR (c.type NOT IN (1, 3, 10, 11, 12)
+            AND EXISTS (SELECT 1 FROM bots b WHERE b.token = g.bot_token)))`
         )
-        .get(channelId) as { id: string; bot_token: string } | undefined)
+        .get(channelId, Number(channelEdit)) as
+        { id: string; bot_token: string } | undefined)
     : (db
         .prepare('SELECT id, bot_token FROM guilds WHERE id = ?')
         .get(parts[1] === 'users' ? request.guild_id : parts[2]) as
@@ -435,7 +441,7 @@ function insertRestFault(
       }),
     }),
     request.mode ? Date.now() + (request.timeout_ms ?? 30_000) : 0,
-    request.mode ? guild.bot_token : null
+    channelEdit || request.mode ? guild.bot_token : null
   )
   const result = deserializeFault(
     db

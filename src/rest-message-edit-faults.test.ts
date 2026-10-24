@@ -307,7 +307,7 @@ describe('exact message edit REST fault controls through buildApp', () => {
   })
 
   it.each([
-    '/channels/1',
+    '/channels/1/permissions/2',
     '/channels/*/messages/1',
     '/channels/{channelID}/messages/{messageID}',
     '/channels/1/messages',

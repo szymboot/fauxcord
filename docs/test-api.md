@@ -888,6 +888,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | -------- | --------------------------------------------------- | --------------------------- |
 | `POST`   | `/channels/{channelId}/messages`                    | Message / edit-log sending  |
 | `POST`   | `/users/@me/channels`                               | DM channel creation         |
+| `PATCH`  | `/channels/{channelId}`                             | Guild channel edit          |
 | `POST`   | `/guilds/{guildId}/channels`                        | Guild channel creation      |
 | `DELETE` | `/channels/{channelId}/messages/{messageId}`        | Triggering-message deletion |
 | `PATCH`  | `/channels/{channelId}/messages/{messageId}`        | Exact message edit          |
@@ -907,8 +908,62 @@ slash. It selects the exact Channel, Channel/Message, or Guild/User/Role IDs, so
 unrelated requests cannot consume the fault. The Channel must belong to an existing Guild,
 or the Guild must exist (`404` otherwise). The target Message/User/Role does not
 need to exist yet, allowing prearming before message injection. Existing
-Channel/Guild `POST`/`DELETE`/`PUT`/`PATCH` faults, except Guild channel creation below, apply to any authenticated caller issuing that
-exact request, regardless of token or body.
+Channel/Guild `POST`/`DELETE`/`PUT`/`PATCH` faults, except Guild channel creation
+and Channel editing below, apply to any authenticated caller issuing that exact
+request, regardless of token or body.
+
+Channel editing (`PATCH /channels/{channelId}`) derives its Guild and registered
+owning Bot from the **existing Channel**. Do not supply `guild_id`, `query`, or
+`recipient_id`; these fields return `400`. The selector requires a concrete
+numeric Channel ID of 1–20 digits, kept as an exact string without rounding or
+normalizing leading zeros. Unknown Channels, DMs/group DMs (types 1/3), and
+threads (types 10/11/12) return `404` when arming. Only existing non-thread Guild
+Channels are supported, including shop text and category channels. There is no
+global/private-channel scope for this selector.
+
+For example, the DSC-1002 consumer Harness can arm a shop edit failure before
+triggering its command:
+
+```json
+{
+  "method": "PATCH",
+  "path": "/channels/1513052391153471489",
+  "status": 403,
+  "code": 50013,
+  "message": "Missing Permissions",
+  "times": 1
+}
+```
+
+Only that Guild's owning Bot token consumes the control. Other registered Bots,
+Bearer callers, other Channels/Guilds, and other methods run their ordinary
+routes without consuming it. Unregistered callers retain native `401` behavior.
+The request body is not a selector: a selected attempt fails before body
+validation, any channel mutation, or `CHANNEL_UPDATE`. The previous name,
+parent, topic, position, permissions and voice/channel settings stay intact.
+Every retry consumes one attempt, across `/api/v10`, `/api`, and bare prefixes;
+request query parameters are ignored. An active control for the same exact
+method/path returns `409`, including when switching failure modes. Exhaustion
+allows rearming and retains the old control's `remaining`/`consumed` evidence
+independently of the failed native operation. Cancellation removes that history.
+
+All explicit modes (`rate_limit`, `delay`, `disconnect`) use the existing bounds,
+TTL and outcome counters below. Expiry or cancellation of a delayed attempt
+never resumes the native edit. Channel/Guild deletion, setup deletion, and
+global or owning-token reset remove both active and exhausted controls. Moving
+the Channel to another Guild or reassigning its Guild's owning token invalidates
+the old control. Legacy faults on this new selector also bind the original
+owner; older selectors keep their existing behavior.
+Mode-omitted controls retain their remaining attempts across graceful shutdown
+and restart with a persistent database; shutdown disarms only explicit modes.
+
+After exhaustion/removal/expiry, the native route and validation run unchanged.
+Native PATCH currently updates supported name/topic/NSFW/position/slowmode and
+voice fields; it ignores `parent_id` and permission-overwrite edits. This fault
+selector does not implement reparenting or additional native channel settings.
+Use ordinary native calls for success-path assertions and inspect the retained
+control before reset/deletion clears its evidence. `src/rest-channel-edit-faults.test.ts`
+covers assembled routes plus real HTTP disconnects and Gateway dispatch barriers.
 
 Guild channel creation faults derive their scope directly from the existing
 Guild in `/guilds/{guildId}/channels`; no Channel or future Channel ID is needed.

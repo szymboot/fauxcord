@@ -28,6 +28,11 @@ export interface RestFaultQuery {
   around?: string
 }
 
+/** Identifies the owner-scoped selector for an existing guild channel edit. */
+export function isRestFaultChannelEdit(method: unknown, path: string): boolean {
+  return method === 'PATCH' && /^\/channels\/\d{1,20}$/.test(path)
+}
+
 /** Identifies exact guild scopes that can be armed before a channel exists. */
 export function isRestFaultGuildChannelCreatePath(path: string): boolean {
   return /^\/guilds\/\d{1,20}\/channels$/.test(path)
@@ -185,6 +190,8 @@ export function validateRestFault(
   const userRead =
     body.method === 'GET' && /^\/users\/\d{1,20}$/.test(body.path)
   const dmCreate = body.method === 'POST' && body.path === '/users/@me/channels'
+  const channelEdit = isRestFaultChannelEdit(body.method, body.path)
+  if (channelEdit && body.guild_id !== undefined) return undefined
   const guildChannelCreate =
     body.method === 'POST' && isRestFaultGuildChannelCreatePath(body.path)
   if (
@@ -226,6 +233,7 @@ export function validateRestFault(
   const supported =
     userRead ||
     dmCreate ||
+    channelEdit ||
     guildChannelCreate ||
     guildRead ||
     pageRead ||
