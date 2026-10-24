@@ -5,6 +5,7 @@ import { GatewayIntentBits } from 'discord-api-types/v10'
 import {
   createTestGatewayServer,
   seedBot,
+  seedChannel,
   seedGuild,
   seedMember,
   seedMessage,
@@ -38,6 +39,9 @@ describe('native category deletion', () => {
   let base: string
   let guild: string
   const clients: Client[] = []
+  const additionalServers: Awaited<
+    ReturnType<typeof createTestGatewayServer>
+  >[] = []
 
   /** Makes an authenticated native or fixture request. */
   async function request(
@@ -73,8 +77,12 @@ describe('native category deletion', () => {
   }
 
   /** Records a fresh session and consumes its startup frames. */
-  async function connect(intents = INTENTS): Promise<Client> {
-    const ws = new WebSocket(server.url)
+  async function connect(
+    intents = INTENTS,
+    token = TOKEN,
+    target = server
+  ): Promise<Client> {
+    const ws = new WebSocket(target.url)
     const client: Client = { ws, frames: [] }
     clients.push(client)
     ws.on('message', (raw: Buffer) => {
@@ -82,7 +90,7 @@ describe('native category deletion', () => {
     })
     await once(ws, 'message')
     const ready = once(ws, 'message')
-    ws.send(JSON.stringify({ op: 2, d: { token: TOKEN, intents } }))
+    ws.send(JSON.stringify({ op: 2, d: { token, intents } }))
     await ready
     await fence(client)
     return client
@@ -123,7 +131,118 @@ describe('native category deletion', () => {
   afterEach(async () => {
     for (const client of clients.splice(0)) client.ws.terminate()
     await server.close()
+    for (const extra of additionalServers.splice(0)) await extra.close()
   })
+
+  it.each(['/api/v10', '/api', ''])(
+    'scopes complete child updates to the owning bot, token and database through %s',
+    async (prefix) => {
+      const otherToken = seedBot(
+        server.db,
+        'Bot category-other',
+        '111111111111111112'
+      )
+      const otherGuild = seedGuild(server.db, otherToken, '222222222222222223')
+      const aliasToken = seedBot(
+        server.db,
+        'Bot category-alias',
+        '111111111111111111'
+      )
+      seedGuild(server.db, aliasToken, '222222222222222224')
+      const category = channel(4)
+      const children = [channel(0, category), channel(2, category)]
+      server.db
+        .prepare('UPDATE channels SET topic = ? WHERE id = ?')
+        .run('Private owner topic', children[0])
+      putChannelOverwrite(server.db, children[0], guild, {
+        type: 0,
+        allow: '1024',
+        deny: '2048',
+      })
+      const otherCategory = channel(4, null, otherGuild)
+      const otherChild = channel(0, otherCategory, otherGuild)
+      const otherBefore = getChannel(server.db, otherChild)
+
+      // The second app deliberately reuses all identity and hierarchy IDs.
+      const otherServer = await createTestGatewayServer()
+      additionalServers.push(otherServer)
+      seedGuild(otherServer.db, seedBot(otherServer.db, TOKEN), guild)
+      seedChannel(otherServer.db, guild, category)
+      otherServer.db
+        .prepare('UPDATE channels SET type = 4 WHERE id = ?')
+        .run(category)
+      for (const id of children) {
+        seedChannel(otherServer.db, guild, id)
+        otherServer.db
+          .prepare('UPDATE channels SET parent_id = ? WHERE id = ?')
+          .run(category, id)
+      }
+      const mirrorBefore = children.map((id) => getChannel(otherServer.db, id))
+      const owner = await connect()
+      const secondOwner = await connect(INTENTS, TOKEN.slice(4))
+      const nonowner = await connect(INTENTS, otherToken)
+      const alias = await connect(INTENTS, aliasToken)
+      const otherApp = await connect(INTENTS, TOKEN, otherServer)
+      const expected = children.map((id) => ({
+        ...getChannel(server.db, id),
+        parent_id: null,
+      }))
+
+      // Delivery follows the guild's registered bot, even if another bot makes
+      // the REST call (native REST does not enforce per-guild ownership).
+      const deleted = await request(
+        `${prefix}/channels/${category}`,
+        'DELETE',
+        undefined,
+        otherToken
+      )
+      expect(deleted.status).toBe(200)
+      for (const client of [owner, secondOwner, nonowner, alias, otherApp])
+        await fence(client)
+      for (const client of [owner, secondOwner]) {
+        const updates = events(client).filter(
+          (frame) => frame.t === 'CHANNEL_UPDATE'
+        )
+        expect(updates.map((frame) => frame.d)).toEqual(expected)
+      }
+      for (const client of [nonowner, alias, otherApp]) {
+        // Existing category CHANNEL_DELETE broadcasting is outside this fix.
+        expect(
+          events(client).filter((frame) => frame.t === 'CHANNEL_UPDATE')
+        ).toEqual([])
+      }
+      expect(getChannel(server.db, otherChild)).toEqual(otherBefore)
+      expect(children.map((id) => getChannel(otherServer.db, id))).toEqual(
+        mirrorBefore
+      )
+      expect(getChannel(otherServer.db, category)).not.toBeNull()
+
+      // Reverse the owners to prove scoping follows each deleted category.
+      const deletedOther = await request(
+        `${prefix}/channels/${otherCategory}`,
+        'DELETE'
+      )
+      expect(deletedOther.status).toBe(200)
+      for (const client of [owner, secondOwner, nonowner, alias, otherApp])
+        await fence(client)
+      expect(
+        events(nonowner)
+          .filter((frame) => frame.t === 'CHANNEL_UPDATE')
+          .map((frame) => frame.d)
+      ).toEqual([{ ...otherBefore, parent_id: null }])
+      for (const client of [owner, secondOwner]) {
+        expect(
+          events(client)
+            .filter((frame) => frame.t === 'CHANNEL_UPDATE')
+            .map((frame) => frame.d)
+        ).toEqual(expected)
+      }
+      for (const client of [alias, otherApp])
+        expect(
+          events(client).filter((frame) => frame.t === 'CHANNEL_UPDATE')
+        ).toEqual([])
+    }
+  )
 
   it.each(['/api/v10', '/api', ''])(
     'preserves children, messages and voice connections through %s',

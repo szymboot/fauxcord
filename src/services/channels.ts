@@ -16,7 +16,7 @@ import type {
 } from 'discord-api-types/v10'
 import type { ChannelType } from 'discord-api-types/v10'
 import { generateSnowflake } from '../snowflake'
-import { gatewayBus } from '../gateway/bus'
+import { gatewayBus, type GatewayBusEvents } from '../gateway/bus'
 import {
   defaultUserLimit,
   VOICE_CHANNEL_LIMITS,
@@ -358,20 +358,30 @@ export function getChannel(
   return toChannelObject(row, getChannelOverwrites(db, row.id), recipients)
 }
 
-/** Publishes the persisted guild channel to its registered bot's sessions. */
-function emitOverwriteChannelUpdate(db: Database, channelId: string): void {
-  const channel = getChannel(db, channelId)
-  if (!channel?.guild_id) return
+/** Resolves the exact registered bot and database for guild channel updates. */
+function getGuildChannelUpdateScope(
+  db: Database,
+  guildId: string | null
+): GatewayBusEvents['channel.update']['scope'] {
+  if (guildId === null) return undefined
   const owner = db
     .prepare(
       'SELECT bots.user_id, bots.token FROM guilds JOIN bots ON bots.token = guilds.bot_token WHERE guilds.id = ?'
     )
-    .get(channel.guild_id) as { user_id: string; token: string } | undefined
-  if (!owner) return
+    .get(guildId) as { user_id: string; token: string } | undefined
+  return owner ? { db, botId: owner.user_id, token: owner.token } : undefined
+}
+
+/** Publishes the persisted guild channel to its registered bot's sessions. */
+function emitOverwriteChannelUpdate(db: Database, channelId: string): void {
+  const channel = getChannel(db, channelId)
+  if (!channel) return
+  const scope = getGuildChannelUpdateScope(db, channel.guild_id)
+  if (!scope) return
 
   gatewayBus.emit('channel.update', {
     channel: channel as unknown as Record<string, unknown>,
-    scope: { db, botId: owner.user_id, token: owner.token },
+    scope,
   })
 }
 
@@ -531,7 +541,8 @@ export function updateChannel(
 /**
  * Deletes a channel. Deleting a guild category clears its direct children's
  * parent IDs without deleting them or disconnecting their voice members.
- * Updated child snapshots and the category deletion are published only after
+ * Updated child snapshots are scoped to the guild's registered bot and database.
+ * Child updates and the category deletion are published only after
  * the transaction succeeds. Child updates precede the category deletion in
  * Fauxcord; Discord documents the events but does not guarantee their order.
  * Members connected to a deleted voice or stage channel are
@@ -582,19 +593,26 @@ export function deleteChannel(
     // Disconnect before deleting: the FK cascade would otherwise silently
     // drop the voice states referencing this channel.
     const disconnects = disconnectGuildVoiceChannelMembers(db, channelId)
+    const childScope =
+      children.length > 0
+        ? getGuildChannelUpdateScope(db, row.guild_id)
+        : undefined
     db.prepare('DELETE FROM channels WHERE id = ?').run(channelId)
-    return { channel, children, disconnects }
+    return { channel, children, childScope, disconnects }
   })
   if (!deleted) return null
-  const { channel: result, children, disconnects } = deleted
+  const { channel: result, children, childScope, disconnects } = deleted
   getRestFaultRuntime(db).prune()
 
   for (const mutation of disconnects)
     publishGuildVoiceStateMutation(db, mutation)
-  for (const child of children) {
-    gatewayBus.emit('channel.update', {
-      channel: child as unknown as Record<string, unknown>,
-    })
+  if (childScope) {
+    for (const child of children) {
+      gatewayBus.emit('channel.update', {
+        channel: child as unknown as Record<string, unknown>,
+        scope: childScope,
+      })
+    }
   }
   gatewayBus.emit('channel.delete', {
     channel: result as unknown as Record<string, unknown>,

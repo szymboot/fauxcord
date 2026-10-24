@@ -404,8 +404,12 @@ are unaffected. A missing or already deleted category returns `404` (`10003`,
 `Unknown Channel`) without further mutations or events.
 
 One full `CHANNEL_UPDATE` is published for each detached child and one
-`CHANNEL_DELETE` for the category, using the existing native channel dispatch
-path and `Guilds` intent. This follows Discord's explicit
+`CHANNEL_DELETE` for the category, using the `Guilds` intent. Child snapshots
+are scoped to the guild's registered bot ID, setup token and originating
+database, just like permission-overwrite updates. Other bot identities, other
+tokens sharing the same bot ID, and other app databases receive no child
+snapshots. Delivery follows the guild's registration, not the REST caller's
+token. This follows Discord's explicit
 [Delete/Close Channel contract](https://docs.discord.com/developers/resources/channel#deleteclose-channel).
 Fauxcord commits all parent changes and deletion in one transaction before
 publishing any event. It sends child updates in `position, id` order before the
@@ -418,7 +422,7 @@ The voice-state fixture above can prepare connected members. `/_test/reset`
 silently clears voice states and messages while preserving the channel
 hierarchy; guild/setup deletion still removes the entire hierarchy through
 existing cleanup. This fix does not add parent assignment validation or change
-the existing native channel events' broadcast scope.
+the pre-existing channel create/delete broadcast behavior.
 
 ### Member removal disconnects voice
 
