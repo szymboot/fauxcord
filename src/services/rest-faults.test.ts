@@ -13,6 +13,91 @@ import {
 } from './rest-faults'
 
 describe('REST fault selector index migration', () => {
+  it('preserves mode-omitted channel-edit faults across shutdown and restart', () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'rest-edit-restart-'))
+    const dbPath = path.join(directory, 'faults.db')
+    let db = initializeDatabase(dbPath)
+    try {
+      const token = 'Bot edit-restart'
+      seedBot(db, token)
+      const guild = seedGuild(db, token)
+      const channel = seedChannel(db, guild)
+      const configuration = {
+        times: 2,
+        status: 503,
+        code: 0,
+        message: 'Unavailable',
+      }
+      const legacy = [
+        createRestFault(db, {
+          ...configuration,
+          method: 'PATCH',
+          path: `/channels/${channel}`,
+        }),
+        createRestFault(db, {
+          ...configuration,
+          method: 'POST',
+          path: `/channels/${channel}/messages`,
+        }),
+      ]
+      const explicit = (['rate_limit', 'delay', 'disconnect'] as const).map(
+        (mode, index) => {
+          const target = seedChannel(
+            db,
+            guild,
+            String(333_333_333_333_333_334n + BigInt(index))
+          )
+          return createRestFault(db, {
+            ...configuration,
+            method: 'PATCH',
+            path: `/channels/${target}`,
+            mode,
+            timeout_ms: 60_000,
+            status: mode === 'rate_limit' ? 429 : 503,
+            ...(mode === 'rate_limit' && { retry_after: 0.01 }),
+            ...(mode === 'delay' && { delay_ms: 1000 }),
+          })
+        }
+      )
+      getRestFaultRuntime(db).shutdown()
+      for (const fault of legacy) {
+        if (typeof fault === 'string') throw new Error(fault)
+        expect(getRestFault(db, fault.id)).toMatchObject({
+          remaining: 2,
+          consumed: 0,
+        })
+      }
+      for (const fault of explicit) {
+        if (typeof fault === 'string') throw new Error(fault)
+        expect(getRestFault(db, fault.id)).toMatchObject({
+          remaining: 0,
+          consumed: 0,
+        })
+      }
+      closeDatabase(db)
+      db = initializeDatabase(dbPath)
+      for (const fault of legacy) {
+        if (typeof fault === 'string') throw new Error(fault)
+        expect(
+          consumeRestFault(db, fault.method, fault.path, token)
+        ).toMatchObject({
+          id: fault.id,
+          remaining: 1,
+          consumed: 1,
+        })
+      }
+      for (const fault of explicit) {
+        if (typeof fault === 'string') throw new Error(fault)
+        expect(
+          consumeRestFault(db, fault.method, fault.path, token)
+        ).toBeUndefined()
+      }
+    } finally {
+      closeDatabase(db)
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it('preserves a live delayed request when another connection opens the same database', async () => {
     const directory = mkdtempSync(path.join(tmpdir(), 'rest-live-connection-'))
     const dbPath = path.join(directory, 'faults.db')
