@@ -223,7 +223,7 @@ export function validateRestFault(
     (body.method === 'POST' &&
       /^\/channels\/\d{1,20}\/messages$/.test(body.path)) ||
     (body.method === 'DELETE' &&
-      /^\/channels\/\d{1,20}\/messages\/\d{1,20}$/.test(body.path)) ||
+      /^\/channels\/\d{1,20}(?:\/messages\/\d{1,20})?$/.test(body.path)) ||
     (body.method === 'PUT' &&
       /^\/guilds\/\d{1,20}\/(?:bans\/\d{1,20}|members\/\d{1,20}\/roles\/\d{1,20})$/.test(
         body.path
