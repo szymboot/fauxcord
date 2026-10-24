@@ -174,6 +174,58 @@ describe('exact guild channel-edit REST faults', () => {
     expect(updates).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps channel edits independent from channel deletion, message edits and guild channel creation', async () => {
+    const selectors = [
+      { method: 'PATCH', path: route },
+      { method: 'DELETE', path: route },
+      { method: 'PATCH', path: `${route}/messages/1513052391153471499` },
+      { method: 'POST', path: `/guilds/${guild}/channels`, guild_id: guild },
+    ]
+    const faults: RestFault[] = []
+    for (const selector of selectors)
+      faults.push(await arm({ ...selector, times: 2 }))
+    const before = snapshot()
+    for (const [index, selector] of selectors.entries()) {
+      expect(await status(selector.path, selector.method, edit)).toBe(403)
+      for (const [faultIndex, fault] of faults.entries())
+        expect(await inspect(fault.id)).toMatchObject({
+          remaining: faultIndex <= index ? 1 : 2,
+          consumed: faultIndex <= index ? 1 : 0,
+        })
+    }
+    expect(snapshot()).toEqual(before)
+    expect(updates).not.toHaveBeenCalled()
+    // Earlier mode-omitted mutation selectors retain their nonowner behavior.
+    for (const selector of selectors.slice(1, 3))
+      expect(
+        await status(selector.path, selector.method, edit, otherToken)
+      ).toBe(403)
+    expect(await status(route, 'PATCH', { name: 'nonowner' }, otherToken)).toBe(
+      200
+    )
+    expect(
+      await status(
+        `/guilds/${guild}/channels`,
+        'POST',
+        { name: 'native' },
+        otherToken
+      )
+    ).toBe(201)
+    for (const [index, fault] of faults.entries())
+      expect(await inspect(fault.id)).toMatchObject({
+        remaining: index === 1 || index === 2 ? 0 : 1,
+        consumed: index === 1 || index === 2 ? 2 : 1,
+      })
+    for (const index of [0, 3]) {
+      const selector = selectors[index]
+      expect(await status(selector.path, selector.method, edit)).toBe(403)
+      expect(await inspect(faults[index].id)).toMatchObject({
+        remaining: 0,
+        consumed: 2,
+      })
+    }
+  })
+
   it.each([0, 2, 4, 13])(
     'supports existing guild channel type %i',
     async (type) => {
@@ -232,7 +284,7 @@ describe('exact guild channel-edit REST faults', () => {
     { path: `${route}?name=shop` },
     { method: 'patch' },
     { method: 'PUT' },
-    { method: 'DELETE' },
+    { method: 'GET' },
     { query: {} },
     { recipient_id: '123' },
     { guild_id: '222222222222222222' },

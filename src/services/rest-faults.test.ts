@@ -39,6 +39,21 @@ describe('REST fault selector index migration', () => {
           method: 'POST',
           path: `/channels/${channel}/messages`,
         }),
+        createRestFault(db, {
+          ...configuration,
+          method: 'DELETE',
+          path: `/channels/${channel}`,
+        }),
+        createRestFault(db, {
+          ...configuration,
+          method: 'PATCH',
+          path: `/channels/${channel}/messages/1513052391153471489`,
+        }),
+        createRestFault(db, {
+          ...configuration,
+          method: 'POST',
+          path: `/guilds/${guild}/channels`,
+        }),
       ]
       const explicit = (['rate_limit', 'delay', 'disconnect'] as const).map(
         (mode, index) => {
