@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto'
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
 import {
+  isRestFaultChannelEdit,
+  isRestFaultGuildChannelCreatePath,
   isRestFaultPagePath,
   normalizeRestFaultQuery,
   type RestFaultRequest,
@@ -285,7 +287,8 @@ export class RestFaultRuntime {
     if (disarm && this.db.open)
       this.db
         .prepare(
-          'UPDATE test_rest_faults SET remaining = 0 WHERE owner_token IS NOT NULL'
+          `UPDATE test_rest_faults SET remaining = 0
+          WHERE json_extract(options, '$.mode') IS NOT NULL`
         )
         .run()
     for (const attempt of this.pending) attempt.finish('cancelled')
@@ -372,13 +375,17 @@ function insertRestFault(
   const query = request.query ? JSON.stringify(request.query) : ''
   const parts = request.path.split('/')
   const channelId = parts[1] === 'channels' ? parts[2] : null
+  const channelEdit = isRestFaultChannelEdit(request.method, request.path)
   const guild = channelId
     ? (db
         .prepare(
           `SELECT g.id, g.bot_token FROM channels c
-          JOIN guilds g ON g.id = c.guild_id WHERE c.id = ?`
+          JOIN guilds g ON g.id = c.guild_id WHERE c.id = ?
+          AND (? = 0 OR (c.type NOT IN (1, 3, 10, 11, 12)
+            AND EXISTS (SELECT 1 FROM bots b WHERE b.token = g.bot_token)))`
         )
-        .get(channelId) as { id: string; bot_token: string } | undefined)
+        .get(channelId, Number(channelEdit)) as
+        { id: string; bot_token: string } | undefined)
     : (db
         .prepare('SELECT id, bot_token FROM guilds WHERE id = ?')
         .get(parts[1] === 'users' ? request.guild_id : parts[2]) as
@@ -434,7 +441,7 @@ function insertRestFault(
       }),
     }),
     request.mode ? Date.now() + (request.timeout_ms ?? 30_000) : 0,
-    request.mode ? guild.bot_token : null
+    channelEdit || request.mode ? guild.bot_token : null
   )
   const result = deserializeFault(
     db
@@ -445,7 +452,7 @@ function insertRestFault(
   return result
 }
 
-/** Arms an exact request with guild cleanup and bot-scoped user selectors. */
+/** Arms an exact request with guild cleanup and selector-specific bot scope. */
 export function createRestFault(
   db: Database,
   request: RestFaultRequest
@@ -505,7 +512,7 @@ export function consumeRestFault(
     WHERE id = (
       SELECT f.id FROM test_rest_faults f JOIN guilds g ON g.id = f.guild_id
       WHERE f.method = ? AND f.path = ? AND f.query = ? AND f.remaining > 0
-      AND ((f.method != 'GET' AND f.path != '/users/@me/channels') OR g.bot_token = ?)
+      AND ((f.method != 'GET' AND f.path != '/users/@me/channels' AND ? = 0) OR g.bot_token = ?)
       AND (f.path != '/users/@me/channels'
         OR json_extract(f.options, '$.recipient_id') IS NULL
         OR json_extract(f.options, '$.recipient_id') = ?)
@@ -518,6 +525,7 @@ export function consumeRestFault(
         method,
         path,
         query,
+        method === 'POST' && isRestFaultGuildChannelCreatePath(path) ? 1 : 0,
         botToken ?? null,
         recipientId ?? null,
         botToken ?? null

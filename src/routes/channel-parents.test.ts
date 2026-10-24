@@ -103,6 +103,150 @@ describe.each(['/api/v10', '/api', ''])('Channel parents at %s', (prefix) => {
     closeDatabase(context.db)
   })
 
+  it.each(['legacy', 'rate_limit', 'delay'])(
+    'preserves parent state before native validation for %s POST/PATCH faults',
+    async (mode) => {
+      const createPath = `/guilds/${guildId}/channels`
+      const updatePath = `/channels/${textId}`
+      expect(
+        await readStatus(api(updatePath, 'PATCH', { parent_id: categoryId }))
+      ).toBe(200)
+      const failureStatus = mode === 'rate_limit' ? 429 : 403
+
+      /** Arms one exact owner-bound selector through the test control API. */
+      async function arm(method: string, path: string, times: number) {
+        const response = await context.app.request('/_test/rest-faults', {
+          method: 'POST',
+          body: JSON.stringify({
+            method,
+            path,
+            times,
+            status: failureStatus,
+            code: 50_013,
+            message: 'Selected parent failure',
+            ...(mode !== 'legacy' && { mode }),
+            ...(mode === 'rate_limit' && { retry_after: 0.01 }),
+            ...(mode === 'delay' && { delay_ms: 1 }),
+          }),
+        })
+        expect(response.status).toBe(201)
+        return response.json() as Promise<{ id: string }>
+      }
+
+      /** Reads retained control counters without making a native request. */
+      async function inspect(id: string) {
+        return readJson(context.app.request(`/_test/rest-faults/${id}`))
+      }
+
+      /** Checks the selected failure contract rather than a native field error. */
+      async function expectSelected(response: Response) {
+        expect(response.status).toBe(failureStatus)
+        expect(await response.json()).toEqual(
+          mode === 'rate_limit'
+            ? {
+                message: 'Selected parent failure',
+                retry_after: 0.01,
+                global: false,
+              }
+            : { message: 'Selected parent failure', code: 50_013 }
+        )
+      }
+
+      const postFault = await arm('POST', createPath, 2)
+      const patchFault = await arm('PATCH', updatePath, 3)
+      const initial = snapshot()
+      const emit = vi.spyOn(gatewayBus, 'emit')
+      const validCreate = `{"name":"fault-parent","parent_id":${categoryId}}`
+      const invalidCreate = `{"name":"fault-parent","parent_id":${missingId}}`
+      for (const body of [invalidCreate, validCreate]) {
+        await expectSelected(await rawApi(createPath, 'POST', body))
+        expect(snapshot()).toEqual(initial)
+        expect(emit).not.toHaveBeenCalled()
+      }
+      expect(await inspect(postFault.id)).toMatchObject({
+        remaining: 0,
+        consumed: 2,
+      })
+      expect(await inspect(patchFault.id)).toMatchObject({
+        remaining: 3,
+        consumed: 0,
+      })
+      const invalidPostRetry = await rawApi(createPath, 'POST', invalidCreate)
+      expect(invalidPostRetry.status).toBe(400)
+      expect(await invalidPostRetry.json()).toMatchObject({
+        code: 50_035,
+        errors: { parent_id: expect.any(Object) },
+      })
+      expect(snapshot()).toEqual(initial)
+      expect(emit).not.toHaveBeenCalled()
+      const postRetry = await rawApi(createPath, 'POST', validCreate)
+      expect(postRetry.status).toBe(201)
+      const created = (await postRetry.json()) as {
+        id: string
+        parent_id: string
+      }
+      expect(created.parent_id).toBe(categoryId)
+      expect(await readJson(api(`/channels/${created.id}`))).toMatchObject({
+        parent_id: categoryId,
+      })
+      expect(emit).toHaveBeenCalledExactlyOnceWith('channel.create', {
+        channel: expect.objectContaining({
+          id: created.id,
+          parent_id: categoryId,
+        }),
+      })
+
+      emit.mockClear()
+      const beforeEdits = snapshot()
+      const move = `{"name":"moved","parent_id":${nextCategoryId}}`
+      const clear = '{"parent_id":null}'
+      const invalidMove = `{"name":"must-not-change","parent_id":${otherCategoryId}}`
+      for (const body of [move, clear, invalidMove]) {
+        await expectSelected(await rawApi(updatePath, 'PATCH', body))
+        expect(snapshot()).toEqual(beforeEdits)
+        expect(emit).not.toHaveBeenCalled()
+      }
+      expect(await inspect(patchFault.id)).toMatchObject({
+        remaining: 0,
+        consumed: 3,
+      })
+      const invalidPatchRetry = await rawApi(updatePath, 'PATCH', invalidMove)
+      expect(invalidPatchRetry.status).toBe(400)
+      expect(await invalidPatchRetry.json()).toMatchObject({
+        code: 50_035,
+        errors: { parent_id: expect.any(Object) },
+      })
+      expect(snapshot()).toEqual(beforeEdits)
+      expect(emit).not.toHaveBeenCalled()
+      for (const [body, parent] of [
+        [move, nextCategoryId],
+        [clear, null],
+        ['{"topic":"omitted parent"}', null],
+      ] as const) {
+        const response = await rawApi(updatePath, 'PATCH', body)
+        expect(response.status).toBe(200)
+        expect(await response.json()).toMatchObject({ parent_id: parent })
+        expect(
+          context.db
+            .prepare('SELECT parent_id FROM channels WHERE id = ?')
+            .get(textId)
+        ).toEqual({ parent_id: parent })
+        expect(emit).toHaveBeenLastCalledWith('channel.update', {
+          channel: expect.objectContaining({ id: textId, parent_id: parent }),
+        })
+      }
+      expect(emit).toHaveBeenCalledTimes(3)
+      expect(await inspect(postFault.id)).toMatchObject({
+        remaining: 0,
+        consumed: 2,
+      })
+      expect(await inspect(patchFault.id)).toMatchObject({
+        remaining: 0,
+        consumed: 3,
+      })
+    }
+  )
+
   it.each([0, 2, 5, 13, 15, 16])(
     'creates and moves type %i with persisted parents and Gateway events',
     async (type) => {
@@ -308,7 +452,7 @@ describe.each(['/api/v10', '/api', ''])('Channel parents at %s', (prefix) => {
     { source: 'deleted-category', type: 5 },
     { source: 'bulk-position-parent', type: 5 },
   ])(
-    'preserves an invalid parent after $source when reusing as type $type',
+    'preserves the stored parent after $source when reusing as type $type',
     async ({ source, type }) => {
       expect(
         await readStatus(
@@ -331,6 +475,9 @@ describe.each(['/api/v10', '/api', ''])('Channel parents at %s', (prefix) => {
       const before = (await readJson(api(`/channels/${textId}`))) as {
         parent_id: string | null
       }
+      expect(before.parent_id).toBe(
+        source === 'deleted-category' ? null : missingId
+      )
       const response = await context.app.request('/_test/setup', {
         method: 'POST',
         body: JSON.stringify({

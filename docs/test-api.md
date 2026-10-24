@@ -105,6 +105,13 @@ Rejected requests change no channel data and emit no Gateway events; successful
 creates/moves/clears include the persisted parent in `CHANNEL_CREATE` or
 `CHANNEL_UPDATE`.
 
+Exact guild-channel POST and channel PATCH REST faults run before this parent
+validation. A selected failure preserves all channel state and emits no native
+mutation event, even for an invalid parent body. After exhaustion/removal, valid
+create/move/clear retries use this parent contract; invalid retries return the
+native field error. Fault counters and owner binding follow the separate REST
+fault selector contract below.
+
 `/_test/setup` does not set `parent_id`; create fixtures there and use the native
 API to arrange them. Reusing channel IDs preserves existing parents and rejects
 retyping or moving a category/child that would invalidate an affected category
@@ -120,8 +127,10 @@ operations below.
 Thread parents keep their separate meaning (the originating channel); this
 change does not make them movable through `PATCH /channels/{channel.id}`.
 Category child-count limits, permission synchronization, bulk position-update
-parent handling, and child detachment on category deletion are outside this
-validation contract.
+parent handling remain outside this validation contract. Category deletion
+already clears direct child parents atomically while preserving the children;
+see [Category deletion preserves child channels](#category-deletion-preserves-child-channels)
+for its scoped snapshots, voice preservation and Gateway contract.
 
 ### Voice channel settings and guild AFK fields
 
@@ -422,7 +431,8 @@ and `request_to_speak_timestamp` are cleared. One native `VOICE_STATE_UPDATE`
 `GuildVoiceStates` intent, Bot/token scoping, sequencing, RESUME replay and
 `VOICE_STATE_UPDATE` capture controls all apply. Members connected to other
 channels, already disconnected states and other guilds are untouched. Text and
-other non-voice channels emit only `CHANNEL_DELETE`.
+other non-voice, non-category channels emit only `CHANNEL_DELETE`; category
+deletion also updates its children as described below.
 
 Ordering is deterministic: the disconnects are sent first, in ascending numeric
 `user_id` order, followed by `CHANNEL_DELETE`. All-digit IDs compare by value
@@ -436,6 +446,39 @@ order when the same code must also run against real Discord.
 
 The deletion and disconnects are committed in one transaction before any event
 is published. `/_test/reset`, setup cleanup and guild deletion remain silent.
+
+### Category deletion preserves child channels
+
+Authenticated `DELETE /channels/:channelId` (also under `/api` and `/api/v10`)
+returns the deleted category object with status `200`. Its surviving direct
+children in the same guild have `parent_id: null` in channel GET, guild channel
+lists and subsequent Gateway `GUILD_CREATE` snapshots. Their IDs, messages,
+permission overwrites and voice/stage connections remain intact. Threads under
+a surviving child keep that child as their parent. Other categories and guilds
+are unaffected. A missing or already deleted category returns `404` (`10003`,
+`Unknown Channel`) without further mutations or events.
+
+One full `CHANNEL_UPDATE` is published for each detached child and one
+`CHANNEL_DELETE` for the category, using the `Guilds` intent. Child snapshots
+are scoped to the guild's registered bot ID, setup token and originating
+database, just like permission-overwrite updates. Other bot identities, other
+tokens sharing the same bot ID, and other app databases receive no child
+snapshots. Delivery follows the guild's registration, not the REST caller's
+token. This follows Discord's explicit
+[Delete/Close Channel contract](https://docs.discord.com/developers/resources/channel#deleteclose-channel).
+Fauxcord commits all parent changes and deletion in one transaction before
+publishing any event. It sends child updates in `position, id` order before the
+category deletion; Discord does not document an ordering guarantee. Category
+deletion emits no voice disconnect events for the surviving children.
+
+No new test control is required: create the hierarchy through native guild
+channel creation with `parent_id`, then delete the category through native REST.
+The voice-state fixture above can prepare connected members. `/_test/reset`
+silently clears voice states and messages while preserving the channel
+hierarchy; guild/setup deletion still removes the entire hierarchy through
+existing cleanup. Parent assignment follows the
+[native category parent contract](#native-category-parents). Channel
+create/delete broadcasts retain their existing behavior.
 
 ### Member removal disconnects voice
 
@@ -901,7 +944,11 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | -------- | --------------------------------------------------- | --------------------------- |
 | `POST`   | `/channels/{channelId}/messages`                    | Message / edit-log sending  |
 | `POST`   | `/users/@me/channels`                               | DM channel creation         |
+| `PATCH`  | `/channels/{channelId}`                             | Guild channel edit          |
+| `POST`   | `/guilds/{guildId}/channels`                        | Guild channel creation      |
 | `DELETE` | `/channels/{channelId}/messages/{messageId}`        | Triggering-message deletion |
+| `PATCH`  | `/channels/{channelId}/messages/{messageId}`        | Exact message edit          |
+| `DELETE` | `/channels/{channelId}`                             | Channel deletion            |
 | `PUT`    | `/guilds/{guildId}/bans/{userId}`                   | Ban creation                |
 | `PATCH`  | `/guilds/{guildId}/members/{userId}`                | Member update / mute        |
 | `PUT`    | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role assignment        |
@@ -917,8 +964,166 @@ slash. It selects the exact Channel, Channel/Message, or Guild/User/Role IDs, so
 unrelated requests cannot consume the fault. The Channel must belong to an existing Guild,
 or the Guild must exist (`404` otherwise). The target Message/User/Role does not
 need to exist yet, allowing prearming before message injection. Existing
-Channel/Guild `POST`/`DELETE`/`PUT`/`PATCH` faults apply to any authenticated caller issuing that
-exact request, regardless of token or body.
+Channel/Guild `POST`/`DELETE`/`PUT`/`PATCH` faults, except Guild channel creation
+and Channel editing below, apply to any authenticated caller issuing that exact
+request, regardless of token or body.
+
+Channel editing (`PATCH /channels/{channelId}`) derives its Guild and registered
+owning Bot from the **existing Channel**. Do not supply `guild_id`, `query`, or
+`recipient_id`; these fields return `400`. The selector requires a concrete
+numeric Channel ID of 1–20 digits, kept as an exact string without rounding or
+normalizing leading zeros. Unknown Channels, DMs/group DMs (types 1/3), and
+threads (types 10/11/12) return `404` when arming. Only existing non-thread Guild
+Channels are supported, including shop text and category channels. There is no
+global/private-channel scope for this selector.
+
+For example, the DSC-1002 consumer Harness can arm a shop edit failure before
+triggering its command:
+
+```json
+{
+  "method": "PATCH",
+  "path": "/channels/1513052391153471489",
+  "status": 403,
+  "code": 50013,
+  "message": "Missing Permissions",
+  "times": 1
+}
+```
+
+Only that Guild's owning Bot token consumes the control. Other registered Bots,
+Bearer callers, other Channels/Guilds, and other methods run their ordinary
+routes without consuming it. Unregistered callers retain native `401` behavior.
+The request body is not a selector: a selected attempt fails before body
+validation, any channel mutation, or `CHANNEL_UPDATE`. The previous name,
+parent, topic, position, permissions and voice/channel settings stay intact.
+Every retry consumes one attempt, across `/api/v10`, `/api`, and bare prefixes;
+request query parameters are ignored. An active control for the same exact
+method/path returns `409`, including when switching failure modes. Exhaustion
+allows rearming and retains the old control's `remaining`/`consumed` evidence
+independently of the failed native operation. Cancellation removes that history.
+
+All explicit modes (`rate_limit`, `delay`, `disconnect`) use the existing bounds,
+TTL and outcome counters below. Expiry or cancellation of a delayed attempt
+never resumes the native edit. Channel/Guild deletion, setup deletion, and
+global or owning-token reset remove both active and exhausted controls. Moving
+the Channel to another Guild or reassigning its Guild's owning token invalidates
+the old control. Legacy faults on this new selector also bind the original
+owner; older selectors keep their existing behavior.
+Mode-omitted controls retain their remaining attempts across graceful shutdown
+and restart with a persistent database; shutdown disarms only explicit modes.
+
+After exhaustion/removal/expiry, the native route and validation run normally.
+Native PATCH updates supported name/topic/NSFW/position/slowmode and voice
+fields, plus validated category parents under the
+[native parent contract](#native-category-parents). Omitted parents are preserved,
+`null` clears them, and valid same-guild category moves persist. Invalid parents
+return native `400/50035` without mutation or dispatch. Selected faults run
+before this validation, including for invalid parent bodies; after exhaustion,
+the same invalid request receives its native field error. Permission-overwrite
+edits remain unsupported on PATCH and use the separate overwrite endpoints.
+Use ordinary native calls for success-path assertions and inspect the retained
+control before reset/deletion clears its evidence. `src/rest-channel-edit-faults.test.ts`
+covers assembled routes plus real HTTP disconnects and Gateway dispatch barriers.
+
+Guild channel creation faults derive their scope directly from the existing
+Guild in `/guilds/{guildId}/channels`; no Channel or future Channel ID is needed.
+For example, prearm a shop category creation failure before triggering the bot:
+
+```json
+{
+  "method": "POST",
+  "path": "/guilds/222222222222222222/channels",
+  "status": 403,
+  "code": 50013,
+  "message": "Missing Permissions",
+  "times": 1
+}
+```
+
+This selector applies only to the registered Bot owning that Guild
+(`guilds.bot_token`), including when `mode` is omitted. Other Bots, Bearer
+callers, methods, paths, and Guilds use the ordinary native route without
+consuming the control. Native requests may use `/api/v10`, `/api`, or bare
+paths; the control's path must remain bare. IDs are exact 1–20 digit strings,
+without numeric coercion. Optional `guild_id` must exactly equal the path's Guild
+ID (`400` for a foreign/malformed scope); a nonexistent Guild returns `404`.
+`recipient_id` and `query` are unsupported (`400`). Control endpoints retain
+their existing auth-exempt test API contract; the Guild selects the consumer,
+not an authorization requirement for arming the control.
+
+One active control per exact method/path is allowed (`409` for another, including
+across modes); different Guilds can be armed independently. It matches every
+creation body in the selected Guild, including text, voice, and category
+channels, before native body validation. There is no name, type, or parent
+selector. Serialize scenarios sharing a Bot/Guild, or use separate Guilds.
+Every selected failure creates **no Channel and no `CHANNEL_CREATE`**.
+`rate_limit`, `delay`, and real-socket `disconnect` use the existing bounds,
+expiry, counters, and cancellation semantics below. A delay never resumes
+creation, even after expiry/removal/reset. Retries after exhaustion or removal
+reach normal validation and return native `201` on valid input, persisting a
+Channel and dispatching `CHANNEL_CREATE` once per successful creation.
+
+The response reports `guild_id` from the path and `channel_id: null`.
+Consumption evidence remains after failures even though no native state was
+created, until the control is deleted or cleaned up. Guild/setup deletion and
+global or Bot-scoped reset remove active/exhausted controls and their evidence.
+Explicit modes capture ownership and are invalidated on Guild reassignment;
+mode-omitted controls follow the Guild's current owning Bot, as existing scoped
+user/DM controls do. These failures model errors **before** mutation, not an
+ambiguous failure after a successful creation. Coverage is in
+`src/rest-guild-channel-create-faults.test.ts`, using full `buildApp` routes and
+real HTTP/Gateway sockets.
+
+To fail a message edit (including a shop category or item message refresh in
+discord-bot Harness task DSC-1004), arm the exact native PATCH path:
+
+```json
+{
+  "method": "PATCH",
+  "path": "/channels/333333333333333333/messages/1513052391153471489",
+  "status": 500,
+  "code": 0,
+  "message": "Internal Server Error",
+  "times": 2
+}
+```
+
+The Channel's owning Guild is the cleanup scope; an optional `guild_id` cannot
+override it, consistently with message DELETE controls. The Message need not
+exist when the control is armed. IDs are matched as exact strings without
+numeric conversion. Both retries above fail before native message lookup,
+authorship checks, payload validation, stored content/embed changes, or
+`MESSAGE_UPDATE` dispatch. Wrong Message IDs, Channels (including another
+Guild's Channels), and methods do not consume the control. Request query
+parameters are ignored, and `/api/v10`, `/api`, and bare requests share its
+counter. Configure only the bare path; wildcards, placeholders, query strings,
+trailing slashes, nonnumeric IDs, and IDs longer than 20 digits are rejected.
+Unknown Channels and Channels without a Guild return `404` at arming.
+
+Message edits support the existing explicit `rate_limit`, `delay`, and
+`disconnect` modes with the same bounds, TTL, evidence, conflicts, and cleanup
+described below. Explicit modes select only the registered Bot owning the
+Channel's Guild; other tokens do not consume them. Legacy edits with `mode`
+omitted retain mutation-fault behavior for any authenticated caller. Use
+explicit modes when token isolation is required. An active PATCH control for
+the same exact path returns `409`, including across modes; DELETE and PATCH
+controls for that path are independent. Each matching attempt increments
+`consumed` even though the native edit never runs. Inspect counters through
+`GET /_test/rest-faults/:id`, independently of the consumer's rollback.
+
+After exhaustion, cancellation, or expiry, PATCH uses its existing native
+behavior: editing another user's message returns `403` / code `50005`, an
+absent or mismatched Channel/Message returns `404`, and invalid edit payloads
+return validation errors. Successful edits update content/embeds and emit
+`MESSAGE_UPDATE`. Native message components currently always return `[]` and
+nonempty components are not stored or edited; the fault preserves that existing
+limitation. A cancelled or expired in-flight delay still returns its configured
+error and never resumes the edit. Control removal, scoped/global reset, setup
+deletion, Guild deletion, and Channel deletion remove edit controls and their
+retained history. `src/rest-message-edit-faults.test.ts` covers the full
+`buildApp` contract and real HTTP/Gateway behavior, including socket destruction
+for disconnect mode and successful edits after failures.
 
 `GET` faults apply only to the registered Bot that owns the scope's Guild
 (`guilds.bot_token`). Nonowner Bots and Bearer callers run the ordinary route
@@ -1000,7 +1205,7 @@ integer from `1` through `100`, defaulting to `1`. Invalid/malformed input retur
 On a matching authenticated request, Fauxcord atomically decrements `remaining`
 and increments `consumed`, then returns the chosen status with exactly
 `{"message":"...","code":...}`. The ordinary route does not run: no message
-creation (including attachments and polls), DM channel creation, deletion, ban/purge, member update,
+creation (including attachments and polls), editing, DM channel creation, deletion, ban/purge, member update,
 role assignment, or corresponding Gateway mutation event happens. Authentication runs first (`401` attempts do not count);
 the normal latency and rate-limit headers still apply. After exhaustion, requests
 use the ordinary REST behavior, including ordinary validation and 404 responses.
@@ -1078,9 +1283,67 @@ pre-query databases and persistence of page selectors/counters across reopen.
 `src/rest-get-faults.test.ts` and `src/e2e-rest-failures.test.ts` preserve legacy
 GET and mutation contracts.
 
+### Channel deletion failures
+
+For DSC-1003 channel/category removal scenarios, arm `DELETE` with the exact
+bare `/channels/{channelId}` path. The channel must already exist and belong
+to a guild; private channels are unsupported (`404` when arming). The control
+resolves `guild_id` and the owning registered bot from the channel **before**
+deletion. Keep IDs as strings, including 19–20 digit Snowflakes. There are no
+wildcards or ID coercion. Do not add a `query` or `recipient_id` selector.
+
+```json
+{
+  "method": "DELETE",
+  "path": "/channels/1513052391153471489",
+  "mode": "rate_limit",
+  "retry_after": 0.25,
+  "times": 2,
+  "timeout_ms": 30000
+}
+```
+
+The bare, `/api`, and `/api/v10` native request prefixes all consume this same
+selector. `rate_limit`, `delay`, and `disconnect` follow the explicit-mode
+owning-bot scope below. Mode-omitted HTTP failures retain legacy mutation
+behavior across authenticated tokens. Other methods/channels/guilds do not
+consume it; nonowner tokens bypass explicit controls and run the native route,
+including its existing deletion behavior. Active controls for the same
+method/path conflict (`409`), including across modes. Each selected attempt
+consumes one count before any native transaction; native rollback cannot undo
+that evidence. Exhausted controls can be inspected or rearmed while the channel
+exists. Inspection and control removal use the existing REST-fault APIs.
+
+A selected failure leaves the channel, its messages, and connected voice states
+intact. It emits neither `CHANNEL_DELETE` nor voice disconnect events. Delayed
+attempts never enter native deletion, even after cancellation or TTL expiry.
+After exhaustion/removal/expiry, a new request follows native behavior: it
+deletes the channel and messages, retains disconnected voice states with
+`channel_id: null`, and publishes native `VOICE_STATE_UPDATE` disconnects before
+`CHANNEL_DELETE` for occupied voice/stage channels. Category deletion retains
+the existing native behavior; this control adds no new category cascade.
+
+Successful native deletion cascades away **all** controls and retained evidence
+for that channel, including the DELETE control itself (`404` on inspection).
+Assert consumption **before** the successful retry. If a retry deletes the
+channel while a selected delay is still waiting, lifecycle cleanup releases
+that wait with its configured error; it cannot delete or dispatch a second
+time. Reset, guild/setup deletion, ownership invalidation and explicit-mode TTL
+retain the shared cleanup rules below. The control simulates failure before
+mutation, not a lost response after successful deletion. A `disconnect` scenario
+requires a real Node HTTP server, as described below.
+
+`src/rest-channel-delete-faults.test.ts` covers full-`buildApp` routing,
+validation, exact scope, conflicts, retries, rollback-independent counters,
+cleanup, real HTTP transport failures, and ordered Gateway evidence.
+discord-bot must update its Fauxcord pin to a commit containing this capability
+and exercise its own delete/retry handler; those consumer assertions remain
+downstream work.
+
 Controls and counters are isolated per
 database. `/_test/reset` clears them, and environment/Guild deletion cascades
-them; Channel deletion also removes message-send, message-delete and message-page controls for
+them; Channel deletion also removes channel-delete, message-send, message-edit,
+message-delete and message-page controls for
 that Channel. Exhausted records remain inspectable until cleared, and a fresh control may then
 be armed for the same selector.
 
@@ -1092,7 +1355,8 @@ capture the guild's owning Bot token for **every** method. Another Bot or Bearer
 caller cannot consume them; reassigned/deleted ownership invalidates them.
 Moving a Channel into another Guild through `/_test/setup` also cancels its old
 explicit controls and pending waits immediately after setup commits.
-Legacy mode-omitted mutation controls retain their existing cross-token behavior.
+Legacy mode-omitted mutation controls retain their existing cross-token behavior;
+DM and Guild channel creation selectors always use their documented Bot scope.
 Fault selection runs after authentication and before route permission checks or
 mutation. A non-owner Bot with denied send permissions still receives its armed
 failure. Once that control is exhausted, the next attempt uses the current

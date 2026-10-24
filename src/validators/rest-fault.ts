@@ -28,6 +28,16 @@ export interface RestFaultQuery {
   around?: string
 }
 
+/** Identifies the owner-scoped selector for an existing guild channel edit. */
+export function isRestFaultChannelEdit(method: unknown, path: string): boolean {
+  return method === 'PATCH' && /^\/channels\/\d{1,20}$/.test(path)
+}
+
+/** Identifies exact guild scopes that can be armed before a channel exists. */
+export function isRestFaultGuildChannelCreatePath(path: string): boolean {
+  return /^\/guilds\/\d{1,20}\/channels$/.test(path)
+}
+
 /** Identifies list routes whose faults select a page rather than ignoring queries. */
 export function isRestFaultPagePath(path: string): boolean {
   return (
@@ -180,6 +190,10 @@ export function validateRestFault(
   const userRead =
     body.method === 'GET' && /^\/users\/\d{1,20}$/.test(body.path)
   const dmCreate = body.method === 'POST' && body.path === '/users/@me/channels'
+  const channelEdit = isRestFaultChannelEdit(body.method, body.path)
+  if (channelEdit && body.guild_id !== undefined) return undefined
+  const guildChannelCreate =
+    body.method === 'POST' && isRestFaultGuildChannelCreatePath(body.path)
   if (
     body.recipient_id !== undefined &&
     (!dmCreate ||
@@ -207,22 +221,27 @@ export function validateRestFault(
     return undefined
   if (
     ((userRead || dmCreate) && body.guild_id === undefined) ||
-    ((dmCreate || body.method === 'GET') &&
+    ((dmCreate || guildChannelCreate || body.method === 'GET') &&
       body.guild_id !== undefined &&
       (typeof body.guild_id !== 'string' ||
         !/^\d{1,20}$/.test(body.guild_id) ||
-        (guildRead && body.guild_id !== body.path.split('/', 3)[2])))
+        ((guildRead || guildChannelCreate) &&
+          body.guild_id !== body.path.split('/', 3)[2])))
   )
     return undefined
 
   const supported =
     userRead ||
     dmCreate ||
+    channelEdit ||
+    guildChannelCreate ||
     guildRead ||
     pageRead ||
     (body.method === 'POST' &&
       /^\/channels\/\d{1,20}\/messages$/.test(body.path)) ||
     (body.method === 'DELETE' &&
+      /^\/channels\/\d{1,20}(?:\/messages\/\d{1,20})?$/.test(body.path)) ||
+    (body.method === 'PATCH' &&
       /^\/channels\/\d{1,20}\/messages\/\d{1,20}$/.test(body.path)) ||
     (body.method === 'PUT' &&
       /^\/guilds\/\d{1,20}\/(?:bans\/\d{1,20}|members\/\d{1,20}\/roles\/\d{1,20})$/.test(
