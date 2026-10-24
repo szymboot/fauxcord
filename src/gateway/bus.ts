@@ -94,7 +94,7 @@ export interface GatewayBusEvents {
   'channel.create': { channel: Record<string, unknown> }
   'channel.update': {
     channel: Record<string, unknown>
-    /** Optional delivery scope for permission overwrite mutations. */
+    /** Optional delivery scope for guild channel mutations. */
     scope?: { db: Database; botId: string; token: string }
   }
   'channel.delete': { channel: Record<string, unknown> }

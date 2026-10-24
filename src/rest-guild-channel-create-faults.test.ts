@@ -8,10 +8,12 @@ import { GatewayOp } from './gateway/opcodes'
 import {
   createRealServer,
   seedBot,
+  seedChannel,
   seedGuild,
   type RealServerContext,
 } from './test-helpers'
 import type { RestFault } from './services/rest-faults'
+import { consumeRestFault } from './services/rest-faults'
 
 const token = 'Bot channel-owner'
 const otherToken = 'Bot channel-other'
@@ -207,6 +209,123 @@ describe('guild channel creation REST faults through buildApp', () => {
       }
     }
   )
+
+  it('keeps every previously supported selector scoped with independent counters', async () => {
+    const channel = seedChannel(db, guild)
+    const user = '555555555555555555'
+    const message = '666666666666666666'
+    const role = '777777777777777777'
+    const creation = await arm({ times: 2 })
+    const selectors = [
+      { method: 'POST', path: `/channels/${channel}/messages` },
+      { method: 'DELETE', path: `/channels/${channel}` },
+      { method: 'DELETE', path: `/channels/${channel}/messages/${message}` },
+      { method: 'PATCH', path: `/channels/${channel}/messages/${message}` },
+      { method: 'PUT', path: `/guilds/${guild}/bans/${user}` },
+      { method: 'PATCH', path: `/guilds/${guild}/members/${user}` },
+      { method: 'PUT', path: `/guilds/${guild}/members/${user}/roles/${role}` },
+      { method: 'GET', path: `/guilds/${guild}/audit-logs` },
+      { method: 'GET', path: `/guilds/${guild}/members/${user}` },
+      { method: 'GET', path: `/guilds/${guild}/members` },
+      { method: 'GET', path: `/guilds/${guild}/bans` },
+      { method: 'GET', path: `/channels/${channel}/messages` },
+      { method: 'GET', path: `/users/${user}`, guild_id: guild },
+      { method: 'POST', path: '/users/@me/channels', guild_id: guild },
+    ]
+    const controls: RestFault[] = []
+    for (const selector of selectors)
+      controls.push(
+        await arm({
+          ...selector,
+          mode: 'rate_limit',
+          status: 429,
+          retry_after: 0.01,
+          times: 2,
+        })
+      )
+    for (const [index, selector] of selectors.entries()) {
+      expect(
+        consumeRestFault(db, selector.method, selector.path, otherToken)
+      ).toBeUndefined()
+      expect(await inspect(controls[index].id)).toMatchObject({
+        remaining: 2,
+        consumed: 0,
+      })
+      expect(
+        await status(
+          selector.path,
+          selector.method,
+          selector.method === 'POST' ? { recipient_id: user } : undefined
+        )
+      ).toBe(429)
+      expect(await inspect(creation.id)).toMatchObject({
+        remaining: 2,
+        consumed: 0,
+      })
+    }
+    expect(await status(path, 'POST', payload)).toBe(403)
+    for (const control of controls)
+      expect(await inspect(control.id)).toMatchObject({
+        remaining: 1,
+        consumed: 1,
+      })
+    expect(await inspect(creation.id)).toMatchObject({
+      remaining: 1,
+      consumed: 1,
+    })
+    expect(db.prepare('SELECT id FROM channels').all()).toEqual([
+      { id: channel },
+    ])
+    expect(creations).toBe(0)
+  })
+
+  it('isolates identical Bot and Guild selectors in separate application databases', async () => {
+    const first = await arm({ times: 2 })
+    const secondDb = initializeDatabase(':memory:')
+    const second = buildApp(secondDb, {
+      baseUrl: 'http://localhost',
+      disableAuth: false,
+    })
+    try {
+      seedBot(secondDb, token, '100000000000000001')
+      seedGuild(secondDb, token, guild)
+      const armed = await second.app.request('/_test/rest-faults', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'POST', path, ...failure }),
+      })
+      expect(armed.status).toBe(201)
+      const control = (await armed.json()) as RestFault
+      const failed = await second.app.request(path, {
+        method: 'POST',
+        headers: { Authorization: token, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      expect(failed.status).toBe(403)
+      expect(await inspect(first.id)).toMatchObject({
+        remaining: 2,
+        consumed: 0,
+      })
+      expect(await status(path, 'POST', payload)).toBe(403)
+      expect(await inspect(first.id)).toMatchObject({
+        remaining: 1,
+        consumed: 1,
+      })
+      const observed = await second.app.request(
+        `/_test/rest-faults/${control.id}`
+      )
+      await expect(observed.json()).resolves.toMatchObject({
+        remaining: 0,
+        consumed: 1,
+      })
+      expect(secondDb.prepare('SELECT id FROM channels').all()).toEqual([])
+      expectNoCreation()
+    } finally {
+      second.unsubscribeGateway()
+      second.wss.close()
+      closeDatabase(secondDb)
+    }
+  })
 
   it('preserves a concrete 20-digit scope without numeric coercion', async () => {
     const exact = '01234567890123456789'
