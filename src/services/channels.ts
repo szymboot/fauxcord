@@ -19,6 +19,7 @@ import { generateSnowflake } from '../snowflake'
 import { gatewayBus, type GatewayBusEvents } from '../gateway/bus'
 import {
   defaultUserLimit,
+  supportsCategoryParent,
   VOICE_CHANNEL_LIMITS,
   type VoiceChannelSettings,
 } from '../validators/channel'
@@ -81,6 +82,27 @@ type _OverwriteCompatGuard =
  */
 export function isVoiceCapableChannelType(type: number): boolean {
   return type === 2 || type === 13
+}
+
+/**
+ * Checks a category parent against the child's guild using persisted state.
+ * @param db - Database
+ * @param guildId - Child channel's guild
+ * @param parentId - Requested category ID
+ * @returns true for an existing root category in the same guild
+ */
+export function isValidCategoryParent(
+  db: Database,
+  guildId: string,
+  parentId: string
+): boolean {
+  return Boolean(
+    db
+      .prepare(
+        'SELECT 1 FROM channels WHERE id = ? AND guild_id = ? AND type = 4 AND parent_id IS NULL'
+      )
+      .get(parentId, guildId)
+  )
 }
 
 /** Channel record type retrieved from the DB */
@@ -480,6 +502,8 @@ function voiceSettingColumns(
 export interface ChannelUpdatePayload extends VoiceChannelSettings {
   /** Accepted only when unchanged; see validateChannelTypeChange. */
   type?: number
+  /** Validated category ID; omitted preserves, null clears. */
+  parent_id?: string | null
   name?: string
   topic?: string | null
   nsfw?: boolean
@@ -512,6 +536,9 @@ export function updateChannel(
       rate_limit_per_user: payload.rate_limit_per_user,
     }),
     ...(payload.position !== undefined && { position: payload.position }),
+    ...(current.guild_id !== null &&
+      supportsCategoryParent(current.type) &&
+      payload.parent_id !== undefined && { parent_id: payload.parent_id }),
     ...(isVoiceCapableChannelType(current.type) &&
       voiceSettingColumns(payload)),
   }

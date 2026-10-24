@@ -77,6 +77,61 @@ stage (`2` ↔ `13`) remains a privileged fixture override. The ordinary Discord
 channel and any change into one with `50035` (`BASE_TYPE_CHOICES`); other
 `type` values there are still ignored.
 
+### Native category parents
+
+Use native `POST /guilds/{guild.id}/channels` and
+`PATCH /channels/{channel.id}` to set `parent_id` for text (`0`), voice (`2`),
+announcement (`5`), stage (`13`), forum (`15`) and media (`16`) channels.
+The parent must be an existing category (`4`) in the same guild. Categories
+cannot nest, including self-parenting and category/child cycles. Omission
+preserves an existing parent; explicit `null` clears it. Creation defaults to
+no parent. The contract applies under `/api/v10`, `/api` and bare paths.
+Other types ignore `parent_id` on this creation endpoint; use the native thread
+creation endpoints for threads and their originating-channel parents.
+Both string Snowflakes and unquoted unsigned JSON integer tokens are supported,
+including exact 19-digit IDs sent by
+[discord.py](https://github.com/Rapptz/discord.py/blob/v2.7.1/discord/guild.py#L1290-L1293).
+Integer parent IDs retain every digit before validation and are returned as
+strings. Decimal and exponent notation are rejected for category parents.
+
+Invalid parents return HTTP `400`, code `50035`, `Invalid Form Body`, with
+`errors.parent_id._errors`. Fauxcord uses field code `CHANNEL_TYPE_INVALID`;
+the precise subcode/message is a mock contract, not a verified live Discord
+response. The category semantics and form-error envelope follow Discord's
+[Create Guild Channel](https://docs.discord.com/developers/resources/guild#create-guild-channel),
+[Modify Channel](https://docs.discord.com/developers/resources/channel#modify-channel)
+and [error formatting](https://docs.discord.com/developers/reference#error-messages).
+Rejected requests change no channel data and emit no Gateway events; successful
+creates/moves/clears include the persisted parent in `CHANNEL_CREATE` or
+`CHANNEL_UPDATE`.
+
+Exact guild-channel POST and channel PATCH REST faults run before this parent
+validation. A selected failure preserves all channel state and emits no native
+mutation event, even for an invalid parent body. After exhaustion/removal, valid
+create/move/clear retries use this parent contract; invalid retries return the
+native field error. Fault counters and owner binding follow the separate REST
+fault selector contract below.
+
+`/_test/setup` does not set `parent_id`; create fixtures there and use the native
+API to arrange them. Reusing channel IDs preserves existing parents and rejects
+retyping or moving a category/child that would invalidate an affected category
+relationship, rolling back the entire setup with HTTP `400`, code `0`,
+`Invalid channel parent`, and `errors.parent_id`. Valid fixture renames and
+changes whose final relationships remain valid are allowed. Setup compares
+parent validity before and after the entire request, including originating
+channels for existing threads. Only newly invalid relationships are rejected.
+Pre-existing invalid parents remain unchanged, including during text/announcement
+retypes; setup does not repair or newly reject state left by the out-of-scope
+operations below.
+
+Thread parents keep their separate meaning (the originating channel); this
+change does not make them movable through `PATCH /channels/{channel.id}`.
+Category child-count limits, permission synchronization, bulk position-update
+parent handling remain outside this validation contract. Category deletion
+already clears direct child parents atomically while preserving the children;
+see [Category deletion preserves child channels](#category-deletion-preserves-child-channels)
+for its scoped snapshots, voice preservation and Gateway contract.
+
 ### Voice channel settings and guild AFK fields
 
 Voice (`2`) and stage (`13`) channels always carry `bitrate`, `user_limit` and
@@ -421,8 +476,9 @@ channel creation with `parent_id`, then delete the category through native REST.
 The voice-state fixture above can prepare connected members. `/_test/reset`
 silently clears voice states and messages while preserving the channel
 hierarchy; guild/setup deletion still removes the entire hierarchy through
-existing cleanup. This fix does not add parent assignment validation or change
-the pre-existing channel create/delete broadcast behavior.
+existing cleanup. Parent assignment follows the
+[native category parent contract](#native-category-parents). Channel
+create/delete broadcasts retain their existing behavior.
 
 ### Member removal disconnects voice
 
@@ -957,10 +1013,15 @@ owner; older selectors keep their existing behavior.
 Mode-omitted controls retain their remaining attempts across graceful shutdown
 and restart with a persistent database; shutdown disarms only explicit modes.
 
-After exhaustion/removal/expiry, the native route and validation run unchanged.
-Native PATCH currently updates supported name/topic/NSFW/position/slowmode and
-voice fields; it ignores `parent_id` and permission-overwrite edits. This fault
-selector does not implement reparenting or additional native channel settings.
+After exhaustion/removal/expiry, the native route and validation run normally.
+Native PATCH updates supported name/topic/NSFW/position/slowmode and voice
+fields, plus validated category parents under the
+[native parent contract](#native-category-parents). Omitted parents are preserved,
+`null` clears them, and valid same-guild category moves persist. Invalid parents
+return native `400/50035` without mutation or dispatch. Selected faults run
+before this validation, including for invalid parent bodies; after exhaustion,
+the same invalid request receives its native field error. Permission-overwrite
+edits remain unsupported on PATCH and use the separate overwrite endpoints.
 Use ordinary native calls for success-path assertions and inspect the retained
 control before reset/deletion clears its evidence. `src/rest-channel-edit-faults.test.ts`
 covers assembled routes plus real HTTP disconnects and Gateway dispatch barriers.

@@ -17,6 +17,8 @@ const token = 'Bot channel-owner'
 const otherToken = 'Bot channel-other'
 const channel = '1513052391153471489'
 const route = `/channels/${channel}`
+const originalParent = '333333333333333338'
+const foreignParent = '333333333333333337'
 const failure = { status: 403, code: 50_013, message: 'Missing Permissions' }
 const edit = {
   name: 'updated-shop',
@@ -89,10 +91,13 @@ describe('exact guild channel-edit REST faults', () => {
     otherGuild = seedGuild(db, otherToken, '222222222222222223')
     seedChannel(db, guild, channel)
     seedChannel(db, guild, edit.parent_id)
-    db.prepare('UPDATE channels SET type = 4 WHERE id = ?').run(edit.parent_id)
+    seedChannel(db, guild, originalParent)
+    seedChannel(db, otherGuild, foreignParent)
+    for (const id of [edit.parent_id, originalParent, foreignParent])
+      db.prepare('UPDATE channels SET type = 4 WHERE id = ?').run(id)
     db.prepare(
       'UPDATE channels SET topic = ?, parent_id = ?, position = 2, rate_limit_per_user = 3 WHERE id = ?'
-    ).run('original topic', '333333333333333338', channel)
+    ).run('original topic', originalParent, channel)
     updates.mockClear()
     gatewayBus.on('channel.update', updates)
   })
@@ -136,10 +141,9 @@ describe('exact guild channel-edit REST faults', () => {
         consumed: 3,
       })
       expect(await status(route, 'PATCH', edit)).toBe(200)
-      const nativeEdit = { ...edit, parent_id: '333333333333333338' }
-      expect(snapshot()).toMatchObject({ ...nativeEdit, nsfw: 1 })
+      expect(snapshot()).toMatchObject({ ...edit, nsfw: 1 })
       expect(updates).toHaveBeenCalledExactlyOnceWith({
-        channel: expect.objectContaining(nativeEdit),
+        channel: expect.objectContaining(edit),
       })
     }
   )
@@ -150,9 +154,22 @@ describe('exact guild channel-edit REST faults', () => {
     const foreign = seedChannel(db, otherGuild, '1513052391153471491')
     expect(await status(route)).toBe(200)
     expect(await status(route, 'POST', edit)).toBe(404)
-    for (const target of [sibling, foreign])
-      expect(await status(`/channels/${target}`, 'PATCH', edit)).toBe(200)
+    for (const [target, parent] of [
+      [sibling, edit.parent_id],
+      [foreign, foreignParent],
+    ]) {
+      expect(
+        await status(`/channels/${target}`, 'PATCH', {
+          ...edit,
+          parent_id: parent,
+        })
+      ).toBe(200)
+      expect(
+        db.prepare('SELECT parent_id FROM channels WHERE id = ?').get(target)
+      ).toEqual({ parent_id: parent })
+    }
     expect(await status(route, 'PATCH', edit, otherToken)).toBe(200)
+    expect(snapshot()).toMatchObject({ parent_id: edit.parent_id })
     expect(await status(route, 'PATCH', edit, 'Bot unregistered')).toBe(401)
     expect(await status(route, 'PATCH', edit, '')).toBe(401)
     expect(await inspect(fault.id)).toMatchObject({ remaining: 2, consumed: 0 })
@@ -229,7 +246,9 @@ describe('exact guild channel-edit REST faults', () => {
   it.each([0, 2, 4, 13])(
     'supports existing guild channel type %i',
     async (type) => {
-      db.prepare('UPDATE channels SET type = ? WHERE id = ?').run(type, channel)
+      db.prepare(
+        'UPDATE channels SET type = ?, parent_id = ? WHERE id = ?'
+      ).run(type, type === 4 ? null : originalParent, channel)
       const before = snapshot()
       await arm()
       expect(await status(route, 'PATCH', edit)).toBe(403)
@@ -312,11 +331,15 @@ describe('exact guild channel-edit REST faults', () => {
   it.each([1, 3, 10, 11, 12])(
     'rejects private/thread channel type %i without affecting native edits',
     async (type) => {
-      db.prepare('UPDATE channels SET type = ?, guild_id = ? WHERE id = ?').run(
-        type,
-        type === 1 || type === 3 ? null : guild,
-        channel
-      )
+      const privateChannel = type === 1 || type === 3
+      const origin = privateChannel
+        ? null
+        : seedChannel(db, guild, '1513052391153471492')
+      if (type === 10)
+        db.prepare('UPDATE channels SET type = 5 WHERE id = ?').run(origin)
+      db.prepare(
+        'UPDATE channels SET type = ?, guild_id = ?, parent_id = ? WHERE id = ?'
+      ).run(type, privateChannel ? null : guild, origin, channel)
       expect(
         await status('/_test/rest-faults', 'POST', {
           method: 'PATCH',
@@ -383,11 +406,20 @@ describe('exact guild channel-edit REST faults', () => {
         otherGuild,
         channel
       )
-      expect(await status(route, 'PATCH', edit)).toBe(200)
+      const movedEdit = { ...edit, parent_id: foreignParent }
+      expect(await status(route, 'PATCH', movedEdit)).toBe(200)
+      expect(snapshot()).toMatchObject({
+        parent_id: foreignParent,
+        guild_id: otherGuild,
+      })
       expect(await status(`/_test/rest-faults/${fault.id}`)).toBe(404)
       const replacement = await arm()
       expect(replacement.guild_id).toBe(otherGuild)
-      expect(await status(route, 'PATCH', edit, otherToken)).toBe(403)
+      expect(await status(route, 'PATCH', movedEdit, otherToken)).toBe(403)
+      expect(snapshot()).toMatchObject({
+        parent_id: foreignParent,
+        guild_id: otherGuild,
+      })
     }
   )
 
@@ -557,11 +589,17 @@ describe('real HTTP channel-edit transport faults', () => {
         seedBot(server.db, token)
         const guild = seedGuild(server.db, token)
         seedChannel(server.db, guild, channel)
+        for (const parent of [originalParent, edit.parent_id]) {
+          seedChannel(server.db, guild, parent)
+          server.db
+            .prepare('UPDATE channels SET type = 4 WHERE id = ?')
+            .run(parent)
+        }
         server.db
           .prepare(
             'UPDATE channels SET type = 2, bitrate = 64000, user_limit = 2, rtc_region = ?, video_quality_mode = 1, parent_id = ? WHERE id = ?'
           )
-          .run('us-east', '333333333333333338', channel)
+          .run('us-east', originalParent, channel)
         ws = new WebSocket(server.baseUrl.replace('http:', 'ws:'))
         const next = createReader(ws)
         expect(await next()).toMatchObject({ op: GatewayOp.Hello })
@@ -639,9 +677,13 @@ describe('real HTTP channel-edit transport faults', () => {
         })
         const success = await request(prefix + route, 'PATCH', payload)
         expect(success.status).toBe(200)
+        await expect(success.json()).resolves.toMatchObject(payload)
+        expect(
+          server.db.prepare('SELECT * FROM channels WHERE id = ?').get(channel)
+        ).toMatchObject({ ...payload, nsfw: 1 })
         expect(await next()).toMatchObject({
           t: 'CHANNEL_UPDATE',
-          d: { ...payload, parent_id: '333333333333333338' },
+          d: payload,
         })
       } finally {
         ws?.terminate()

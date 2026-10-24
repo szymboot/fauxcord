@@ -607,6 +607,174 @@ describe('guild channel creation transport faults over real HTTP and Gateway', (
     await server.close()
   })
 
+  it.each(['', '/api', '/api/v10'])(
+    'disconnects POST/PATCH before parent validation under %s, then retries native parent changes',
+    async (prefix) => {
+      const parent = '1300000000000000002'
+      const nextParent = '1300000000000000003'
+      for (const id of [parent, nextParent]) {
+        seedChannel(server.db, guild, id)
+        server.db.prepare('UPDATE channels SET type = 4 WHERE id = ?').run(id)
+      }
+      const frames: {
+        op: number
+        t?: string
+        d?: { id?: string; parent_id?: string | null }
+      }[] = []
+      ws = new WebSocket(server.baseUrl.replace('http:', 'ws:'))
+      ws.on('message', (raw: Buffer) => {
+        frames.push(JSON.parse(raw.toString()) as (typeof frames)[number])
+      })
+      await expect
+        .poll(() => frames.some((frame) => frame.op === GatewayOp.Hello))
+        .toBe(true)
+      ws.send(
+        JSON.stringify({
+          op: GatewayOp.Identify,
+          d: { token, intents: GatewayIntentBits.Guilds },
+        })
+      )
+      await expect
+        .poll(() => frames.some((frame) => frame.t === 'GUILD_CREATE'))
+        .toBe(true)
+
+      /** Issues raw JSON so 19-digit parent integers retain their wire representation. */
+      function request(route: string, method = 'GET', body?: string) {
+        return fetch(server.baseUrl + route, {
+          method,
+          headers: { Authorization: token, 'Content-Type': 'application/json' },
+          body,
+          signal: AbortSignal.timeout(3000),
+        })
+      }
+
+      /** Captures all persisted channel fields, including both category fixtures. */
+      function snapshot() {
+        return server.db.prepare('SELECT * FROM channels ORDER BY id').all()
+      }
+
+      /** Uses an ordered heartbeat ACK to fence preceding mutation dispatches. */
+      async function fence() {
+        const acknowledgements = frames.filter(
+          (frame) => frame.op === GatewayOp.HeartbeatAck
+        ).length
+        ws?.send(JSON.stringify({ op: GatewayOp.Heartbeat, d: null }))
+        await expect
+          .poll(
+            () =>
+              frames.filter((frame) => frame.op === GatewayOp.HeartbeatAck)
+                .length
+          )
+          .toBe(acknowledgements + 1)
+      }
+
+      /** Arms a socket disconnect for an exact native mutation route. */
+      async function arm(method: string, route: string, times: number) {
+        const response = await request(
+          '/_test/rest-faults',
+          'POST',
+          JSON.stringify({ method, path: route, mode: 'disconnect', times })
+        )
+        expect(response.status).toBe(201)
+        return response.json() as Promise<RestFault>
+      }
+
+      const creation = await arm('POST', path, 1)
+      const original = snapshot()
+      const invalidParent =
+        '{"name":"invalid-parent","parent_id":999999999999999999}'
+      await expect(
+        request(prefix + path, 'POST', invalidParent)
+      ).rejects.toThrow()
+      await fence()
+      expect(snapshot()).toEqual(original)
+      expect(frames.filter((frame) => frame.t === 'CHANNEL_CREATE')).toEqual([])
+      const invalidPost = await request(prefix + path, 'POST', invalidParent)
+      expect(invalidPost.status).toBe(400)
+      await expect(invalidPost.json()).resolves.toMatchObject({
+        code: 50_035,
+        errors: { parent_id: expect.any(Object) },
+      })
+      await fence()
+      expect(snapshot()).toEqual(original)
+      expect(frames.filter((frame) => frame.t === 'CHANNEL_CREATE')).toEqual([])
+      const created = await request(
+        prefix + path,
+        'POST',
+        `{"name":"child","parent_id":${parent}}`
+      )
+      expect(created.status).toBe(201)
+      const child = (await created.json()) as { id: string; parent_id: string }
+      expect(child.parent_id).toBe(parent)
+      await fence()
+      expect(
+        frames.filter((frame) => frame.t === 'CHANNEL_CREATE')
+      ).toMatchObject([{ d: { id: child.id, parent_id: parent } }])
+
+      const childPath = `/channels/${child.id}`
+      const editing = await arm('PATCH', childPath, 2)
+      const beforeEdits = snapshot()
+      const move = `{"parent_id":${nextParent}}`
+      const clear = '{"parent_id":null}'
+      for (const body of [move, clear]) {
+        await expect(
+          request(prefix + childPath, 'PATCH', body)
+        ).rejects.toThrow()
+        await fence()
+        expect(snapshot()).toEqual(beforeEdits)
+        expect(frames.filter((frame) => frame.t === 'CHANNEL_UPDATE')).toEqual(
+          []
+        )
+      }
+      const invalidPatch = await request(
+        prefix + childPath,
+        'PATCH',
+        invalidParent
+      )
+      expect(invalidPatch.status).toBe(400)
+      await expect(invalidPatch.json()).resolves.toMatchObject({
+        code: 50_035,
+        errors: { parent_id: expect.any(Object) },
+      })
+      await fence()
+      expect(snapshot()).toEqual(beforeEdits)
+      expect(frames.filter((frame) => frame.t === 'CHANNEL_UPDATE')).toEqual([])
+      for (const [body, expectedParent] of [
+        [move, nextParent],
+        [clear, null],
+      ] as const) {
+        const response = await request(prefix + childPath, 'PATCH', body)
+        expect(response.status).toBe(200)
+        await expect(response.json()).resolves.toMatchObject({
+          parent_id: expectedParent,
+        })
+        expect(
+          server.db
+            .prepare('SELECT parent_id FROM channels WHERE id = ?')
+            .get(child.id)
+        ).toEqual({ parent_id: expectedParent })
+        await fence()
+        expect(
+          frames.findLast((frame) => frame.t === 'CHANNEL_UPDATE')
+        ).toMatchObject({ d: { id: child.id, parent_id: expectedParent } })
+      }
+      expect(
+        frames.filter((frame) => frame.t === 'CHANNEL_UPDATE')
+      ).toHaveLength(2)
+      for (const [fault, consumed] of [
+        [creation, 1],
+        [editing, 2],
+      ] as const) {
+        const evidence = await request(`/_test/rest-faults/${fault.id}`)
+        await expect(evidence.json()).resolves.toMatchObject({
+          remaining: 0,
+          consumed,
+          outcomes: { disconnected: consumed, responded: 0, pending: 0 },
+        })
+      }
+    }
+  )
+
   for (const prefix of ['', '/api', '/api/v10']) {
     it.each(['rate_limit', 'delay', 'disconnect'])(
       `fails %s before mutation/CHANNEL_CREATE under '${prefix}', then retries`,

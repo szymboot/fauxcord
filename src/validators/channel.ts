@@ -96,11 +96,129 @@ export const CHANNEL_LIMITS = {
 /** Channel update (PATCH) payload (unknown fields until validated) */
 export interface ChannelUpdatePayload extends VoiceChannelSettingsPayload {
   type?: unknown
+  parent_id?: unknown
   name?: unknown
   topic?: unknown
   nsfw?: unknown
   rate_limit_per_user?: unknown
   position?: unknown
+}
+
+/**
+ * Parses a channel body while preserving unquoted integer parent Snowflakes.
+ * Node 24's JSON reviver source retains the exact digits, including values
+ * above Number.MAX_SAFE_INTEGER, with JSON's nesting, escaping and last-key
+ * semantics. Other fields keep their normal JSON types. Decimal/exponent
+ * tokens remain numbers and fail category-parent validation.
+ * @param rawBody - Original request body
+ * @returns Parsed field bag, or an empty object for missing/invalid/non-object JSON
+ */
+export function parseChannelBody(rawBody: string): Record<string, unknown> {
+  let payload: unknown
+  try {
+    payload = JSON.parse(
+      rawBody,
+      (key: string, value: unknown, context?: { source: string }) =>
+        key === 'parent_id' &&
+        typeof value === 'number' &&
+        context?.source !== undefined &&
+        /^\d+$/.test(context.source)
+          ? context.source
+          : value
+    ) as unknown
+  } catch {
+    return {}
+  }
+  return typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : {}
+}
+
+/**
+ * Whether a guild channel type supports a category parent. Threads instead
+ * refer to their originating text/announcement/forum/media channel.
+ * @param type - Stored or parsed channel type
+ * @returns true for text, voice, announcement, stage, forum and media
+ */
+export function supportsCategoryParent(type: number): boolean {
+  return [0, 2, 5, 13, 15, 16].includes(type)
+}
+
+/**
+ * Validates an explicitly provided category parent before any mutation.
+ * Categories cannot nest, which also prevents self-parenting and cycles.
+ * Omission preserves the parent and null clears it. Thread and DM parent
+ * semantics are separate and are intentionally not validated here.
+ * @param parentId - Untrusted parent field
+ * @param channelType - Stored or parsed child channel type
+ * @param isValidParent - Whether an ID is a category in the child's guild
+ * @returns Discord-shaped field errors (empty when valid)
+ */
+export function validateChannelParent(
+  parentId: unknown,
+  channelType: number,
+  isValidParent: (id: string) => boolean
+): ValidationErrors {
+  if (
+    parentId === undefined ||
+    parentId === null ||
+    (channelType !== 4 && !supportsCategoryParent(channelType))
+  )
+    return {}
+
+  return channelType === 4 ||
+    typeof parentId !== 'string' ||
+    parentId.length === 0 ||
+    !isValidParent(parentId)
+    ? {
+        parent_id: {
+          _errors: [
+            {
+              code: 'CHANNEL_TYPE_INVALID',
+              message:
+                channelType === 4
+                  ? 'Categories cannot have a parent category.'
+                  : 'Must be a category channel in this guild.',
+            },
+          ],
+        },
+      }
+    : {}
+}
+
+/**
+ * Validates an existing non-null parent relationship for setup's before/after
+ * comparison. Threads require an originating channel, ordinary guild channels
+ * require a category, and other channel types cannot carry a parent.
+ * @param parentId - Stored non-null parent ID
+ * @param channelType - Stored child channel type
+ * @param isValidCategory - Whether the parent is a root category in this guild
+ * @param isValidThreadParent - Whether the parent can hold threads in this guild
+ * @returns Field errors (empty when the relationship is valid)
+ */
+export function validateStoredChannelParent(
+  parentId: string,
+  channelType: number,
+  isValidCategory: (id: string) => boolean,
+  isValidThreadParent: (id: string) => boolean
+): ValidationErrors {
+  if (channelType === 4 || supportsCategoryParent(channelType))
+    return validateChannelParent(parentId, channelType, isValidCategory)
+
+  return [10, 11, 12].includes(channelType) && isValidThreadParent(parentId)
+    ? {}
+    : {
+        parent_id: {
+          _errors: [
+            {
+              code: 'CHANNEL_TYPE_INVALID',
+              message: 'Must have a compatible parent channel in this guild.',
+            },
+          ],
+        },
+      }
 }
 
 /**

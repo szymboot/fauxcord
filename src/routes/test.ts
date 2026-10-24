@@ -291,7 +291,9 @@ export function createTestRoutes(
             message:
               err.message === 'INVALID_GUILD_AFK'
                 ? 'Invalid guild AFK settings'
-                : 'Invalid voice channel settings',
+                : err.message === 'INVALID_CHANNEL_PARENT'
+                  ? 'Invalid channel parent'
+                  : 'Invalid voice channel settings',
             code: 0,
             errors: err.errors,
           },
