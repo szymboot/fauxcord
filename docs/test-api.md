@@ -856,6 +856,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `POST`   | `/channels/{channelId}/messages`                    | Message / edit-log sending  |
 | `POST`   | `/users/@me/channels`                               | DM channel creation         |
 | `DELETE` | `/channels/{channelId}/messages/{messageId}`        | Triggering-message deletion |
+| `PATCH`  | `/channels/{channelId}/messages/{messageId}`        | Exact message edit          |
 | `PUT`    | `/guilds/{guildId}/bans/{userId}`                   | Ban creation                |
 | `PATCH`  | `/guilds/{guildId}/members/{userId}`                | Member update / mute        |
 | `PUT`    | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role assignment        |
@@ -873,6 +874,56 @@ or the Guild must exist (`404` otherwise). The target Message/User/Role does not
 need to exist yet, allowing prearming before message injection. Existing
 Channel/Guild `POST`/`DELETE`/`PUT`/`PATCH` faults apply to any authenticated caller issuing that
 exact request, regardless of token or body.
+
+To fail a message edit (including a shop category or item message refresh in
+discord-bot Harness task DSC-1004), arm the exact native PATCH path:
+
+```json
+{
+  "method": "PATCH",
+  "path": "/channels/333333333333333333/messages/1513052391153471489",
+  "status": 500,
+  "code": 0,
+  "message": "Internal Server Error",
+  "times": 2
+}
+```
+
+The Channel's owning Guild is the cleanup scope; an optional `guild_id` cannot
+override it, consistently with message DELETE controls. The Message need not
+exist when the control is armed. IDs are matched as exact strings without
+numeric conversion. Both retries above fail before native message lookup,
+authorship checks, payload validation, stored content/embed changes, or
+`MESSAGE_UPDATE` dispatch. Wrong Message IDs, Channels (including another
+Guild's Channels), and methods do not consume the control. Request query
+parameters are ignored, and `/api/v10`, `/api`, and bare requests share its
+counter. Configure only the bare path; wildcards, placeholders, query strings,
+trailing slashes, nonnumeric IDs, and IDs longer than 20 digits are rejected.
+Unknown Channels and Channels without a Guild return `404` at arming.
+
+Message edits support the existing explicit `rate_limit`, `delay`, and
+`disconnect` modes with the same bounds, TTL, evidence, conflicts, and cleanup
+described below. Explicit modes select only the registered Bot owning the
+Channel's Guild; other tokens do not consume them. Legacy edits with `mode`
+omitted retain mutation-fault behavior for any authenticated caller. Use
+explicit modes when token isolation is required. An active PATCH control for
+the same exact path returns `409`, including across modes; DELETE and PATCH
+controls for that path are independent. Each matching attempt increments
+`consumed` even though the native edit never runs. Inspect counters through
+`GET /_test/rest-faults/:id`, independently of the consumer's rollback.
+
+After exhaustion, cancellation, or expiry, PATCH uses its existing native
+behavior: editing another user's message returns `403` / code `50005`, an
+absent or mismatched Channel/Message returns `404`, and invalid edit payloads
+return validation errors. Successful edits update content/embeds and emit
+`MESSAGE_UPDATE`. Native message components currently always return `[]` and
+nonempty components are not stored or edited; the fault preserves that existing
+limitation. A cancelled or expired in-flight delay still returns its configured
+error and never resumes the edit. Control removal, scoped/global reset, setup
+deletion, Guild deletion, and Channel deletion remove edit controls and their
+retained history. `src/rest-message-edit-faults.test.ts` covers the full
+`buildApp` contract and real HTTP/Gateway behavior, including socket destruction
+for disconnect mode and successful edits after failures.
 
 `GET` faults apply only to the registered Bot that owns the scope's Guild
 (`guilds.bot_token`). Nonowner Bots and Bearer callers run the ordinary route
@@ -954,7 +1005,7 @@ integer from `1` through `100`, defaulting to `1`. Invalid/malformed input retur
 On a matching authenticated request, Fauxcord atomically decrements `remaining`
 and increments `consumed`, then returns the chosen status with exactly
 `{"message":"...","code":...}`. The ordinary route does not run: no message
-creation (including attachments and polls), DM channel creation, deletion, ban/purge, member update,
+creation (including attachments and polls), editing, DM channel creation, deletion, ban/purge, member update,
 role assignment, or corresponding Gateway mutation event happens. Authentication runs first (`401` attempts do not count);
 the normal latency and rate-limit headers still apply. After exhaustion, requests
 use the ordinary REST behavior, including ordinary validation and 404 responses.
@@ -1034,7 +1085,7 @@ GET and mutation contracts.
 
 Controls and counters are isolated per
 database. `/_test/reset` clears them, and environment/Guild deletion cascades
-them; Channel deletion also removes message-send, message-delete and message-page controls for
+them; Channel deletion also removes message-send, message-edit, message-delete and message-page controls for
 that Channel. Exhausted records remain inspectable until cleared, and a fresh control may then
 be armed for the same selector.
 
