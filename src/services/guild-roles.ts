@@ -156,12 +156,17 @@ function normalizePermissions(value: string | number | undefined): string {
 }
 
 /**
- * Creates a role in a guild.
+ * Persists a role before emitting the serialized snapshot.
  * @param db - Database
  * @param params - Role creation parameters
+ * @param managed - Integration-managed flag controlled only by fixtures
  * @returns Created role object
  */
-export function createRole(db: Database, params: RoleCreateParams): RoleObject {
+function insertRole(
+  db: Database,
+  params: RoleCreateParams,
+  managed: boolean
+): RoleObject {
   const maxPosition = (
     db
       .prepare(
@@ -172,7 +177,7 @@ export function createRole(db: Database, params: RoleCreateParams): RoleObject {
 
   db.prepare(
     `INSERT INTO roles (id, guild_id, name, color, hoist, position, permissions, managed, mentionable)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     params.roleId,
     params.guildId,
@@ -181,6 +186,7 @@ export function createRole(db: Database, params: RoleCreateParams): RoleObject {
     params.hoist ? 1 : 0,
     maxPosition + 1,
     normalizePermissions(params.permissions),
+    managed ? 1 : 0,
     params.mentionable ? 1 : 0
   )
 
@@ -195,6 +201,34 @@ export function createRole(db: Database, params: RoleCreateParams): RoleObject {
   })
 
   return role
+}
+
+/**
+ * Creates an unmanaged role in a guild, as required by native REST.
+ * @param db - Database
+ * @param params - Role creation parameters
+ * @returns Created role object
+ */
+export function createRole(db: Database, params: RoleCreateParams): RoleObject {
+  return insertRole(db, params, false)
+}
+
+/** Test-only role creation parameters; managed is never writable through REST. */
+export interface TestRoleCreateParams extends RoleCreateParams {
+  managed?: boolean
+}
+
+/**
+ * Creates a fixture role, optionally managed by a simulated integration.
+ * @param db - Database
+ * @param params - Fixture parameters
+ * @returns Stored role, also emitted through the usual role-create event
+ */
+export function createTestRole(
+  db: Database,
+  params: TestRoleCreateParams
+): RoleObject {
+  return insertRole(db, params, params.managed === true)
 }
 
 /**

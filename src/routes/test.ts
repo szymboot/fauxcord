@@ -49,11 +49,14 @@ import { getChannelWebhooks } from '../services/webhooks'
 import { getInteractionCallbackObservation } from '../services/interactions'
 import { injectPollVote } from '../services/polls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
-import { validateGuildMemberUpdate } from '../validators/guild'
+import { GUILD_LIMITS, validateGuildMemberUpdate } from '../validators/guild'
 import { validateMemberDateFixture } from '../validators/member-dates'
 import { validateTestUserGlobalName } from '../validators/test-user-global-name'
 import { validateRestFault } from '../validators/rest-fault'
 import { createClosedDmRoutes } from './test-closed-dms'
+import { createTestRole, getGuildRoles } from '../services/guild-roles'
+import { getGuild } from '../services/guilds'
+import { validateTestRole } from '../validators/test-role'
 import {
   validateTestReaction,
   validateTestReactionRemoval,
@@ -142,6 +145,46 @@ export function createTestRoutes(
   app.route('/', createAuditLogResponseRoutes(db))
   app.route('/', createTestVoiceStateRoutes(db))
   app.route('/', createClosedDmRoutes(db))
+
+  app.post('/_test/guilds/:guildId/roles', async (c) => {
+    const guildId = c.req.param('guildId')
+    const parsed: unknown = await c.req.json().catch(() => undefined)
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
+    const payload = parsed as Record<string, unknown>
+    const errors = validateTestRole(payload)
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
+    if (!getGuild(db, guildId)) {
+      return c.json(
+        discordError(DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild', 404).body,
+        404
+      )
+    }
+    if (getGuildRoles(db, guildId).length >= GUILD_LIMITS.ROLES_MAX) {
+      return c.json(
+        discordError(
+          DiscordErrorCode.MAX_ROLES_REACHED,
+          'Maximum number of guild roles reached (250)',
+          400
+        ).body,
+        400
+      )
+    }
+    const role = createTestRole(db, {
+      guildId,
+      roleId: generateSnowflake(),
+      name: payload.name as string,
+      managed: payload.managed === true,
+    })
+    return c.json(role, 201)
+  })
 
   app.post('/_test/guilds/:guildId/audit-logs', async (c) => {
     const guildId = c.req.param('guildId')
