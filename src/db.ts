@@ -13,6 +13,18 @@ import { parseReactionEmoji, reactionEmojiKey } from './services/reaction-emoji'
 import BetterSqlite3 from 'better-sqlite3'
 import type { Database } from 'better-sqlite3'
 
+/** Adds persisted component snapshots to databases created before component support. */
+function migrateMessageComponents(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(messages)').all() as {
+    name: string
+  }[]
+  if (columns.every((column) => column.name !== 'components')) {
+    db.exec(
+      "ALTER TABLE messages ADD COLUMN components TEXT NOT NULL DEFAULT '[]'"
+    )
+  }
+}
+
 /** Thread-related columns added to the `channels` table, with their DDL. */
 const CHANNELS_THREAD_COLUMNS: Record<string, string> = {
   owner_id: 'TEXT',
@@ -561,6 +573,7 @@ export function initializeDatabase(dbPath: string): Database {
       author_id             TEXT NOT NULL,
       author_token          TEXT,
       content               TEXT NOT NULL DEFAULT '',
+      components            TEXT NOT NULL DEFAULT '[]',
       tts                   INTEGER NOT NULL DEFAULT 0,
       mention_everyone      INTEGER NOT NULL DEFAULT 0,
       pinned                INTEGER NOT NULL DEFAULT 0,
@@ -1141,6 +1154,7 @@ export function initializeDatabase(dbPath: string): Database {
     );
   `)
 
+  migrateMessageComponents(db)
   migrateUserGlobalName(db)
   migrateEmojiAnimated(db)
   migrateCustomReactionKeys(db)

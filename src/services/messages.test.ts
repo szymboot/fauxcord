@@ -1,6 +1,19 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { describe, it, expect } from 'vitest'
-import { toMessageObject, type MessageRow, type UserRow } from './messages'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import {
+  toMessageObject,
+  createMessage,
+  getMessage,
+  getMessages,
+  updateMessage,
+  type MessageRow,
+  type UserRow,
+} from './messages'
+import { initializeDatabase, closeDatabase, type Database } from '../db'
+import { seedBot, seedGuild, seedChannel } from '../test-helpers'
+import type { MessageComponents } from '../validators/message-components'
 
 describe('toMessageObject', () => {
   const row: MessageRow = {
@@ -9,6 +22,7 @@ describe('toMessageObject', () => {
     author_id: '3',
     author_token: 'Bot test',
     content: 'hello',
+    components: '[]',
     tts: 0,
     mention_everyone: 0,
     pinned: 0,
@@ -146,5 +160,148 @@ describe('toMessageObject', () => {
       `http://localhost:3000/_mock/attachments/${suffix}`
     )
     expect(message.attachments[0].proxy_url).toBe(message.attachments[0].url)
+  })
+})
+
+describe('persisted message components', () => {
+  let db: Database
+  let channelId: string
+  let authorId: string
+  const baseUrl = 'http://localhost:3000'
+  const components: MessageComponents = [
+    {
+      type: 1,
+      id: 0,
+      components: [
+        {
+          type: 2,
+          id: 0,
+          style: 1,
+          label: 'Buy',
+          custom_id: 'shop_item_buy_1',
+        },
+        {
+          type: 2,
+          id: 0,
+          style: 4,
+          label: 'Return',
+          custom_id: 'shop_item_return_1',
+          disabled: true,
+          emoji: { name: '🐝', animated: false },
+        },
+      ],
+    },
+  ]
+  beforeEach(() => {
+    db = initializeDatabase(':memory:')
+    const token = seedBot(db)
+    authorId = (
+      db.prepare('SELECT user_id FROM bots WHERE token = ?').get(token) as {
+        user_id: string
+      }
+    ).user_id
+    channelId = seedChannel(db, seedGuild(db, token))
+  })
+  afterEach(() => {
+    closeDatabase(db)
+  })
+
+  it('stores independent snapshots and replaces, preserves, and clears them on edits', () => {
+    const created = createMessage(
+      db,
+      {
+        messageId: '1',
+        channelId,
+        authorId,
+        authorToken: 'Bot test',
+        components,
+      },
+      baseUrl
+    )
+    expect(created.components).toEqual(components)
+    expect(getMessage(db, '1', baseUrl)?.components).toEqual(components)
+    expect(getMessages(db, channelId, {}, baseUrl)[0].components).toEqual(
+      components
+    )
+    created.components[0].components.pop()
+    expect(getMessage(db, '1', baseUrl)?.components).toEqual(components)
+    expect(
+      updateMessage(db, '1', { content: 'edited' }, baseUrl)?.components
+    ).toEqual(components)
+    const buyOnly: MessageComponents = [
+      { ...components[0], components: [components[0].components[0]] },
+    ]
+    const edited = updateMessage(db, '1', { components: buyOnly }, baseUrl)
+    expect(edited?.components).toEqual(buyOnly)
+    expect(edited?.edited_timestamp).not.toBeNull()
+    expect(
+      updateMessage(db, '1', { components: [] }, baseUrl)?.components
+    ).toEqual([])
+    expect(updateMessage(db, '1', { components }, baseUrl)?.components).toEqual(
+      components
+    )
+    expect(
+      updateMessage(db, '1', { components: null }, baseUrl)?.components
+    ).toEqual([])
+  })
+
+  it('defaults ordinary fixtures and messages without components to an empty array', () => {
+    expect(
+      createMessage(
+        db,
+        { messageId: '1', channelId, authorId, authorToken: 'Bot test' },
+        baseUrl
+      ).components
+    ).toEqual([])
+  })
+})
+
+describe('message component migration', () => {
+  it('upgrades legacy rows, persists components across reopening, and tolerates reinitialization', () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'fauxcord-components-'))
+    const databasePath = path.join(directory, 'fixtures.db')
+    let db = initializeDatabase(databasePath)
+    try {
+      db.exec('ALTER TABLE messages DROP COLUMN components')
+      const token = seedBot(db)
+      const channel = seedChannel(db, seedGuild(db, token))
+      const author = (
+        db.prepare('SELECT user_id FROM bots WHERE token = ?').get(token) as {
+          user_id: string
+        }
+      ).user_id
+      db.prepare(
+        'INSERT INTO messages (id, channel_id, author_id, content) VALUES (?, ?, ?, ?)'
+      ).run('1', channel, author, 'legacy')
+      closeDatabase(db)
+      db = initializeDatabase(databasePath)
+      expect(getMessage(db, '1', 'http://localhost')?.components).toEqual([])
+      const updated = updateMessage(
+        db,
+        '1',
+        {
+          components: [
+            {
+              type: 1,
+              components: [
+                {
+                  type: 2,
+                  style: 5,
+                  label: 'Link',
+                  url: 'https://example.com',
+                },
+              ],
+            },
+          ],
+        },
+        'http://localhost'
+      )
+      closeDatabase(db)
+      db = initializeDatabase(databasePath)
+      expect(getMessage(db, '1', 'http://localhost')).toEqual(updated)
+    } finally {
+      closeDatabase(db)
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 })

@@ -6,6 +6,10 @@
  */
 
 import type { Database } from '../db'
+import {
+  normalizeMessageComponents,
+  type MessageComponents,
+} from '../validators/message-components'
 import { snowflakeToTimestamp } from '../snowflake'
 import { toDiscordTimestamp } from '../timestamp'
 import { gatewayBus } from '../gateway/bus'
@@ -62,6 +66,7 @@ export interface MessageRow {
   author_id: string
   author_token: string | null
   content: string
+  components: string
   tts: number
   mention_everyone: number
   pinned: number
@@ -171,8 +176,8 @@ export interface MessageObject {
   embeds: unknown[]
   /** Catalog-derived sticker snapshots, omitted when the message has none. */
   sticker_items?: APIStickerItem[]
-  /** Message components (slash command components, always empty in the mock) */
-  components: never[]
+  /** Persisted classic action rows and buttons. */
+  components: MessageComponents
   /** Reaction list (the field itself is omitted when there are no reactions) */
   reactions?: ReactionObject[]
   pinned: boolean
@@ -277,7 +282,7 @@ export function toMessageObject(
     embeds: embeds
       .toSorted((a, b) => a.position - b.position)
       .map((e) => JSON.parse(e.data) as unknown),
-    components: [],
+    components: JSON.parse(row.components) as MessageComponents,
     pinned: row.pinned === 1,
     type: row.type,
     flags: row.flags,
@@ -503,6 +508,7 @@ export interface MessageCreateParams {
   content?: string
   tts?: boolean
   embeds?: unknown[]
+  components?: MessageComponents | null
   /** Validated snapshots resolved from existing sticker catalog identities. */
   stickerItems?: APIStickerItem[]
   messageReference?: { message_id?: string }
@@ -566,8 +572,8 @@ export function createMessage(
 ): MessageObject {
   const msg = db.transaction(() => {
     db.prepare(
-      `INSERT INTO messages (id, channel_id, author_id, author_token, content, tts, flags, referenced_message_id, type)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO messages (id, channel_id, author_id, author_token, content, tts, flags, referenced_message_id, type, components)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       params.messageId,
       params.channelId,
@@ -577,7 +583,8 @@ export function createMessage(
       params.tts ? 1 : 0,
       params.flags ?? 0,
       params.messageReference?.message_id ?? null,
-      params.type ?? 0
+      params.type ?? 0,
+      JSON.stringify(normalizeMessageComponents(params.components))
     )
 
     // Save embeds
@@ -649,7 +656,12 @@ export function createMessage(
 export function updateMessage(
   db: Database,
   messageId: string,
-  payload: { content?: string; embeds?: unknown[] | null; flags?: number },
+  payload: {
+    content?: string
+    embeds?: unknown[] | null
+    components?: MessageComponents | null
+    flags?: number
+  },
   baseUrl: string
 ): MessageObject | null {
   const row = db
@@ -661,6 +673,15 @@ export function updateMessage(
     db.prepare(
       "UPDATE messages SET content = ?, edited_at = datetime('now') WHERE id = ?"
     ).run(payload.content, messageId)
+  }
+
+  if (payload.components !== undefined) {
+    db.prepare(
+      "UPDATE messages SET components = ?, edited_at = datetime('now') WHERE id = ?"
+    ).run(
+      JSON.stringify(normalizeMessageComponents(payload.components)),
+      messageId
+    )
   }
 
   // null is equivalent to an empty array (delete all embeds). undefined means "no change" and is ignored

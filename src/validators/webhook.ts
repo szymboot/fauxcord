@@ -5,6 +5,10 @@
  */
 
 import { maxLengthError, typeError, type ValidationErrors } from './common'
+import {
+  validateMessageComponents,
+  type MessageComponents,
+} from './message-components'
 import { validateMessageEmbeds } from './message'
 
 /** Webhook limit values */
@@ -31,6 +35,8 @@ export interface WebhookExecutePayload {
   avatar_url?: string
   tts?: boolean
   embeds?: unknown[]
+  components?: MessageComponents | null
+  flags?: number
   allowed_mentions?: unknown
 }
 
@@ -128,6 +134,7 @@ export function validateWebhookExecute(
         username: { _errors: [maxLengthError(WEBHOOK_LIMITS.USERNAME_MAX)] },
       }),
     ...validateMessageEmbeds(payload.embeds),
+    ...validateMessageComponents(payload.components, payload.flags),
   }
 
   return errors

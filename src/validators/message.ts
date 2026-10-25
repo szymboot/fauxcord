@@ -5,6 +5,10 @@
  */
 
 import {
+  validateMessageComponents,
+  type MessageComponents,
+} from './message-components'
+import {
   maxLengthError,
   requiredError,
   typeError,
@@ -18,7 +22,7 @@ export interface MessageCreatePayload {
   /** Discord clients may send null (e.g. discordgo). null is treated the same as an empty array */
   embeds?: EmbedPayload[] | null
   message_reference?: { message_id?: string }
-  components?: unknown[]
+  components?: MessageComponents | null
   flags?: number
   attachments?: unknown[]
   sticker_ids?: string[] | null
@@ -58,6 +62,8 @@ export const MESSAGE_LIMITS = {
 interface MessageValidationInput {
   content?: unknown
   embeds?: unknown
+  components?: unknown
+  flags?: unknown
 }
 
 /** Checks a JSON value before accessing its properties. */
@@ -211,6 +217,7 @@ export function validateMessageCreate(
         content: { _errors: [maxLengthError(MESSAGE_LIMITS.CONTENT_MAX)] },
       }),
     ...validateMessageEmbeds(payload.embeds),
+    ...validateMessageComponents(payload.components, payload.flags),
   }
 }
 
@@ -228,7 +235,15 @@ export function isEmptyMessage(
 ): boolean {
   const hasContent = payload.content && payload.content.length > 0
   const hasEmbeds = Array.isArray(payload.embeds) && payload.embeds.length > 0
-  return !hasContent && !hasEmbeds && !hasAttachments && !hasStickers
+  const hasComponents =
+    Array.isArray(payload.components) && payload.components.length > 0
+  return (
+    !hasContent &&
+    !hasEmbeds &&
+    !hasComponents &&
+    !hasAttachments &&
+    !hasStickers
+  )
 }
 
 /** Poll answer payload (a single option in a poll) */

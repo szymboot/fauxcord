@@ -50,7 +50,6 @@ function storedMessage(db: Database) {
     embeds: db
       .prepare('SELECT * FROM embeds WHERE message_id = ?')
       .all(messageId),
-    // Native messages currently expose components as an empty array only.
     components: getMessage(db, messageId, 'http://localhost')?.components,
   }
 }

@@ -4,6 +4,8 @@
  * Provides webhook CRUD operations and execution.
  */
 
+import type { MessageComponents } from '../validators/message-components'
+
 import type { Database } from '../db'
 import type { MessageObject } from './messages'
 import { createMessage } from './messages'
@@ -249,6 +251,7 @@ export interface WebhookExecuteParams {
   username?: string
   tts?: boolean
   embeds?: unknown[]
+  components?: MessageComponents | null
 }
 
 /**
@@ -292,6 +295,7 @@ export function executeWebhook(
       content: params.content,
       tts: params.tts,
       embeds: params.embeds,
+      components: params.components,
     },
     baseUrl
   )

@@ -4,6 +4,8 @@
  * Implements the /webhooks/* endpoints.
  */
 
+import type { MessageComponents } from '../validators/message-components'
+
 import { Hono } from 'hono'
 import type { Database } from '../db'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
@@ -68,6 +70,8 @@ function createFollowupOrWebhookMessage(
           username: payload.username as string | undefined,
           tts: payload.tts as boolean | undefined,
           embeds: payload.embeds as unknown[] | undefined,
+          components: payload.components as
+            MessageComponents | null | undefined,
         },
         baseUrl
       )
@@ -81,6 +85,8 @@ function createFollowupOrWebhookMessage(
           content: payload.content as string | undefined,
           tts: payload.tts as boolean | undefined,
           embeds: payload.embeds as unknown[] | undefined,
+          components: payload.components as
+            MessageComponents | null | undefined,
         },
         baseUrl
       )
@@ -494,6 +500,7 @@ export function createWebhookRoutes(db: Database, baseUrl: string): Hono {
     const payload = rawPayload as {
       content?: string | null
       embeds?: unknown[] | null
+      components?: MessageComponents | null
       flags?: number
     }
     const updated = updateMessage(
@@ -583,6 +590,7 @@ export function createWebhookRoutes(db: Database, baseUrl: string): Hono {
     const payload = await c.req.json<{
       content?: string
       embeds?: unknown[]
+      components?: MessageComponents | null
     }>()
 
     const errors = validateWebhookExecute(payload)
