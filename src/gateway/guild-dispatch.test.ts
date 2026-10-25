@@ -252,6 +252,83 @@ describe('member boost date Gateway fixtures (integration)', () => {
   )
 })
 
+describe('managed role fixtures (integration)', () => {
+  let close: (() => Promise<void>) | undefined
+  let ws: WebSocket | undefined
+
+  afterEach(async () => {
+    ws?.terminate()
+    ws = undefined
+    await close?.()
+    close = undefined
+  })
+
+  it('reports managed in GUILD_CREATE and live role create/update dispatches', async () => {
+    const server = await createTestGatewayServer()
+    close = server.close
+    const httpUrl = server.url.replace('ws://', 'http://')
+    const token = seedBot(server.db)
+    const guildId = seedGuild(server.db, token)
+
+    /** Creates an integration-managed fixture through the test HTTP API. */
+    async function createFixture(
+      name: string
+    ): Promise<Record<string, unknown>> {
+      const response = await fetch(`${httpUrl}/_test/guilds/${guildId}/roles`, {
+        method: 'POST',
+        body: JSON.stringify({ name, managed: true }),
+      })
+      expect(response.status).toBe(201)
+      const role = (await response.json()) as Record<string, unknown>
+      expect(role.managed).toBe(true)
+      return role
+    }
+
+    const initialRole = await createFixture('Initial managed role')
+    ws = new WebSocket(server.url)
+    const nextMessage = createMessageReader(ws)
+    const hello = await nextMessage()
+    expect(hello.op).toBe(GatewayOp.Hello)
+    ws.send(
+      JSON.stringify({
+        op: GatewayOp.Identify,
+        d: { token, intents: GatewayIntentBits.Guilds },
+      })
+    )
+    const ready = await nextMessage()
+    expect(ready.t).toBe('READY')
+    const initial = await nextMessage()
+    expect(initial.t).toBe('GUILD_CREATE')
+    expect((initial.d as { roles: unknown[] }).roles).toContainEqual(
+      initialRole
+    )
+
+    const liveRole = await createFixture('Live managed role')
+    const created = await nextMessage()
+    expect(created).toMatchObject({
+      op: GatewayOp.Dispatch,
+      t: 'GUILD_ROLE_CREATE',
+      d: { guild_id: guildId, role: liveRole },
+    })
+
+    const response = await fetch(
+      `${httpUrl}/guilds/${guildId}/roles/${String(liveRole.id)}`,
+      {
+        method: 'PATCH',
+        headers: { Authorization: token },
+        body: JSON.stringify({ name: 'Renamed', managed: false }),
+      }
+    )
+    expect(response.status).toBe(200)
+    const updatedRole = await response.json()
+    expect(updatedRole).toMatchObject({ managed: true, name: 'Renamed' })
+    expect(await nextMessage()).toMatchObject({
+      t: 'GUILD_ROLE_UPDATE',
+      d: { guild_id: guildId, role: updatedRole },
+    })
+  })
+})
+
 describe('CHANNEL_CREATE dispatch (integration)', () => {
   let close: (() => Promise<void>) | undefined
   afterEach(async () => {

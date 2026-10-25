@@ -665,6 +665,78 @@ regardless of their actor or target author. Voice states in that Bot's Guilds ar
 
 ---
 
+## `POST /_test/guilds/:guildId/roles` — Create a managed role fixture
+
+Creates a role in an existing guild without Bot authentication. Use this when
+testing client-side checks that reject integration-managed roles, such as shop
+role validation. A separate creation endpoint keeps the fixture contract small
+and works with guilds already registered through `/_test/setup` or native REST;
+setup payloads and native role creation do not gain a writable `managed` field.
+
+```bash
+curl -X POST http://localhost:3000/_test/guilds/222222222222222222/roles \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Managed shop role","managed":true}'
+```
+
+| Field | Required | Description |
+| ----- | -------- | ----------- |
+| `name` | Yes | Role name, a string of 1–100 characters |
+| `managed` | No | Boolean; defaults to `false`. Use `true` for an integration-managed fixture |
+
+Returns **`201 Created`** with the complete Discord-shaped role object (no
+wrapper), including an auto-generated string `id`, the supplied `name`, and
+the stored boolean `managed`. Other fields use the ordinary role defaults:
+`permissions: "0"`, `color: 0`, `hoist: false`, `mentionable: false`, and a
+position one above the guild's current maximum. Each request creates a new role;
+there is no fixture update endpoint. Only `name` and `managed` are accepted.
+Caller-supplied IDs, permissions, positions and other fields are rejected.
+
+Malformed/empty JSON, non-object bodies, invalid fields (including `null` or
+string/number substitutes for `managed`) and unsupported fields return **`400`**.
+Malformed JSON/non-object bodies use `{ "message": "400: Bad Request", "code": 0 }`;
+field validation uses code `50035`, `Invalid Form Body`, with `errors.<field>._errors`.
+An unknown guild returns **`404`**, code `10004`, `Unknown Guild`.
+The existing 250-role limit (including `@everyone`) applies: a full guild returns
+**`400`**, code `30005`, `Maximum number of guild roles reached (250)`.
+Rejected requests store nothing and emit no events.
+
+Successful creation emits the usual `GUILD_ROLE_CREATE` through the Gateway for
+subscribed clients with the `GUILDS` intent. Its role snapshot, native
+`GET /guilds/:guildId/roles`, native guild responses, later `GUILD_CREATE`
+snapshots and `GUILD_ROLE_UPDATE` snapshots all report the stored `managed`
+boolean. Native routes work under `/api/v10`, `/api`, and bare paths.
+Creation does not assign the role to a member.
+
+Like ordinary roles, these fixtures survive both global and token-scoped
+`POST /_test/reset`, which retains role registrations. Deleting the guild or
+its setup (`DELETE /_test/setup/:token`) removes its roles through the existing
+cleanup; other guilds' roles remain intact.
+
+### Managed-role fidelity boundaries
+
+Discord's [role structure](https://docs.discord.com/developers/topics/permissions#role-object)
+defines `managed` as integration ownership metadata. Its documented
+[Create Guild Role](https://docs.discord.com/developers/resources/guild#create-guild-role)
+and [Modify Guild Role](https://docs.discord.com/developers/resources/guild#modify-guild-role)
+parameters do not include `managed`. Fauxcord therefore ignores that field on
+native POST/PATCH: POST always creates an unmanaged role, and PATCH preserves
+the existing managed flag.
+
+This fixture represents the flag only: it does not create an integration, bot
+association, role tags (`tags` remains `{}`), or automatic membership/lifecycle.
+The documented [member-role add/remove](https://docs.discord.com/developers/resources/guild#add-guild-member-role),
+role edit and [role delete](https://docs.discord.com/developers/resources/guild#delete-guild-role)
+endpoints specify permissions but do not define managed-specific rejection
+conditions or error responses. Fauxcord deliberately retains its existing
+behavior for these operations, including `PATCH` member role lists:
+managed roles can still be assigned, removed, edited and deleted. It does not
+guess a blanket `403` or managed-role immutability rule. These operations are
+not suitable for testing Discord's integration-role enforcement; use the fixture
+to test applications that inspect `managed` themselves.
+
+---
+
 ## `POST /_test/guilds/:guildId/audit-logs` — Create a deletion audit fixture
 
 Create an audit entry independently of messages and Gateway events. This operation
