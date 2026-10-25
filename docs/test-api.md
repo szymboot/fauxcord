@@ -1113,17 +1113,17 @@ controls for that path are independent. Each matching attempt increments
 `GET /_test/rest-faults/:id`, independently of the consumer's rollback.
 
 After exhaustion, cancellation, or expiry, PATCH uses its existing native
-behavior: editing another user's message returns `403` / code `50005`, an
-absent or mismatched Channel/Message returns `404`, and invalid edit payloads
-return validation errors. Successful edits update content/embeds and emit
-`MESSAGE_UPDATE`. Native message components currently always return `[]` and
-nonempty components are not stored or edited; the fault preserves that existing
-limitation. A cancelled or expired in-flight delay still returns its configured
-error and never resumes the edit. Control removal, scoped/global reset, setup
-deletion, Guild deletion, and Channel deletion remove edit controls and their
-retained history. `src/rest-message-edit-faults.test.ts` covers the full
-`buildApp` contract and real HTTP/Gateway behavior, including socket destruction
-for disconnect mode and successful edits after failures.
+behavior: editing another user's message returns `403` / code `50005`, an absent
+or mismatched Channel/Message returns `404`, and invalid edit payloads return
+validation errors. Successful edits update content/embeds/components and emit
+`MESSAGE_UPDATE`. Components follow the replacement and omission semantics
+described in [Message components](#message-components). A cancelled or expired
+in-flight delay still returns its configured error and never resumes the edit.
+Control removal, scoped/global reset, setup deletion, Guild deletion, and
+Channel deletion remove edit controls and their retained history.
+`src/rest-message-edit-faults.test.ts` covers the full `buildApp` contract and
+real HTTP/Gateway behavior, including socket destruction for disconnect mode and
+successful edits after failures.
 
 `GET` faults apply only to the registered Bot that owns the scope's Guild
 (`guilds.bot_token`). Nonowner Bots and Bearer callers run the ordinary route
@@ -1617,6 +1617,93 @@ cannot share a character budget.
 
 ---
 
+## Message components
+
+Fauxcord persists classic action rows of buttons on messages. For example,
+shop messages can carry Buy and Return controls:
+
+```json
+{
+  "content": "Shop item 42",
+  "components": [
+    {
+      "type": 1,
+      "components": [
+        {
+          "type": 2,
+          "style": 1,
+          "label": "Buy",
+          "custom_id": "shop_item_buy_42"
+        },
+        {
+          "type": 2,
+          "style": 4,
+          "label": "Return",
+          "custom_id": "shop_item_return_42"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`POST /channels/:channelId/messages` stores the components. A `PATCH` containing
+`components` replaces the entire collection; send a row with just Buy to remove
+Return. Omit `components` to keep the stored collection. `components: []` or
+`components: null` clears it. Creation without components defaults to `[]`.
+Components alone can make a nonempty message, and component-only edits update
+`edited_timestamp`.
+
+The create/edit responses, single-message reads, all message history pages
+(`before`, `after`, `around`, and `limit`), both pin APIs, and Gateway
+`MESSAGE_CREATE`/`MESSAGE_UPDATE` contain the same persisted `components` array.
+`GET /_test/messages/:channelId` also includes it on every message. Supported
+button fields retain their values and order; legacy row/button `id` is normalized
+to `0`, optional null fields and unknown fields are omitted. Defaults such as
+`disabled: false` are not inserted when omitted. Custom emoji IDs/names are
+snapshots, independent of the emoji catalog. Existing databases gain an empty
+collection for older messages; message deletion and existing reset operations
+remove components with their message.
+
+Following [Discord's component reference](https://docs.discord.com/developers/components/reference),
+the supported subset validates:
+
+- At most 5 top-level action rows (`type: 1`), each with 1–5 buttons (`type: 2`).
+- Integer styles 1–4 require a nonempty `custom_id` of 1–100 Unicode code points
+  and prohibit `url` and `sku_id`. Each `custom_id` must be unique across the
+  entire message, including disabled buttons and different rows.
+- Link style 5 requires an absolute `http:`, `https:`, or `discord:` URL of at
+  most 512 code points and prohibits `custom_id` and `sku_id`.
+- Every button needs a nonempty label or an emoji. Labels have at most 80 code
+  points; optional `disabled` must be boolean. Optional null button fields count
+  as absent. Identifiers and labels are not trimmed.
+- Emoji must be an object with a nonempty name (at most 32 code points) or a
+  positive Snowflake string `id` (up to 20 digits). `id: null` represents a
+  Unicode emoji; optional `animated` must be boolean. Fauxcord validates shape,
+  without checking Unicode emoji membership or access to live custom emojis.
+
+Malformed collections/entries, invalid fields, duplicate IDs, and unsupported
+components return HTTP `400`, code `50035`, `message: "Invalid Form Body"`, with
+`errors` keyed by affected dotted field paths and `_errors` arrays, matching the
+other Fauxcord validators. Validation runs before message mutation or dispatch.
+
+Deliberate fidelity gaps: select menus (types 3/5/6/7/8), premium buttons
+(style 6), modal/text inputs, components v2/layout/content types, and nonzero
+numeric component IDs are unsupported and return the same `400`/`50035` shape.
+The `IS_COMPONENTS_V2` flag (`32768`) is rejected even with an empty component
+array. There is no v2 ID generation, rendering, emoji availability check, or
+click simulation.
+
+Type-4 interaction responses, interaction followups, webhook execution, and
+webhook message edits (including `@original`) share component storage and
+validation. Deferred callbacks and existing acknowledgement-only callback types
+retain their existing semantics. Human-message injection/edit and startup seed
+fixtures retain their existing content-focused contracts; their components
+start empty and content-only edits preserve any stored components. No new
+interaction semantics or fixture fields are introduced.
+
+---
+
 ## `GET /_test/messages/:channelId` — Inspect a channel's messages
 
 An endpoint for verifying within your tests that messages have actually arrived.
@@ -1641,6 +1728,7 @@ curl http://localhost:3000/_test/messages/333333333333333333
 If `author_token` is `"webhook"`, the message was posted via a Webhook.
 If `author_token` is an empty string, the message was injected via
 `POST /_test/channels/:channelId/messages` (see below) as a non-bot user.
+Every inspected message includes `components` (an empty array when absent).
 Messages with stickers also include `sticker_items`, with the same catalog-derived
 `id`, `name`, and `format_type` as ordinary message reads. The field is omitted
 when there are no stickers.

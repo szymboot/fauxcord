@@ -6,6 +6,8 @@
  * targets, and handles the callback (initial response) endpoint.
  */
 
+import type { MessageComponents } from '../validators/message-components'
+
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
 import { gatewayBus } from '../gateway/bus'
@@ -235,6 +237,7 @@ export interface InteractionCallbackPayload {
   data?: {
     content?: string | null
     embeds?: unknown[] | null
+    components?: MessageComponents | null
     tts?: boolean | null
     flags?: number | null
   }
@@ -332,6 +335,7 @@ export function handleInteractionCallback(
           content: deferred ? undefined : (payload.data?.content ?? undefined),
           tts: deferred ? undefined : (payload.data?.tts ?? undefined),
           embeds: deferred ? undefined : (payload.data?.embeds ?? undefined),
+          components: deferred ? undefined : payload.data?.components,
           flags,
         },
         baseUrl

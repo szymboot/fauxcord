@@ -5,6 +5,7 @@
  */
 
 import { Hono } from 'hono'
+import type { MessageComponents } from '../validators/message-components'
 import type { Database } from '../db'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { generateSnowflake } from '../snowflake'
@@ -302,6 +303,8 @@ export function createChannelMessageRoutes(
                 content: payload.content as string | undefined,
                 tts: payload.tts as boolean | undefined,
                 embeds: payload.embeds as unknown[] | undefined,
+                components: payload.components as
+                  MessageComponents | null | undefined,
                 messageReference: payload.message_reference as
                   { message_id?: string } | undefined,
                 flags: payload.flags as number | undefined,
@@ -369,7 +372,7 @@ export function createChannelMessageRoutes(
 
     const payload = (await parseJsonBody(c)) as Pick<
       MessageCreatePayload,
-      'content' | 'embeds'
+      'content' | 'embeds' | 'components'
     >
 
     const errors = validateMessageCreate(payload)

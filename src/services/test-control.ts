@@ -4,6 +4,8 @@
  * Handles test environment setup and reset.
  */
 
+import type { MessageComponents } from '../validators/message-components'
+
 import { getRestFaultRuntime, pruneRestFaults } from './rest-faults'
 import { getRestPageHolds } from './rest-page-holds'
 import { pruneClosedDms, resetClosedDms } from './closed-dms'
@@ -772,21 +774,27 @@ export function getTestMessages(
   content: string
   author_token: string | null
   created_at: string
+  components: MessageComponents
   sticker_items?: APIStickerItem[]
 }[] {
   const messages = db
     .prepare(
-      'SELECT id, content, author_token, created_at FROM messages WHERE channel_id = ? ORDER BY id'
+      'SELECT id, content, author_token, created_at, components FROM messages WHERE channel_id = ? ORDER BY id'
     )
     .all(channelId) as {
     id: string
     content: string
     author_token: string | null
     created_at: string
+    components: string
   }[]
   return messages.map((message) => {
     const items = getMessageStickerItems(db, message.id)
-    return { ...message, ...(items.length > 0 && { sticker_items: items }) }
+    return {
+      ...message,
+      components: JSON.parse(message.components) as MessageComponents,
+      ...(items.length > 0 && { sticker_items: items }),
+    }
   })
 }
 
