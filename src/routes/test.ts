@@ -54,6 +54,7 @@ import { validateMemberDateFixture } from '../validators/member-dates'
 import { validateTestUserGlobalName } from '../validators/test-user-global-name'
 import { validateRestFault } from '../validators/rest-fault'
 import { createClosedDmRoutes } from './test-closed-dms'
+import { createDmChannelRoutes } from './test-dm-channels'
 import { createTestRole, getGuildRoles } from '../services/guild-roles'
 import { getGuild } from '../services/guilds'
 import { validateTestRole } from '../validators/test-role'
@@ -145,6 +146,7 @@ export function createTestRoutes(
   app.route('/', createAuditLogResponseRoutes(db))
   app.route('/', createTestVoiceStateRoutes(db))
   app.route('/', createClosedDmRoutes(db))
+  app.route('/', createDmChannelRoutes(db))
 
   app.post('/_test/guilds/:guildId/roles', async (c) => {
     const guildId = c.req.param('guildId')
@@ -666,6 +668,12 @@ export function createTestRoutes(
       return c.json({ message: '409: Conflict', code: 0 }, 409)
     if (result === 'INVALID_STICKERS')
       return c.json(validationError(unusableMessageStickersError()).body, 400)
+    if (result === 'NOT_RECIPIENT')
+      return c.json(
+        discordError(DiscordErrorCode.MISSING_ACCESS, 'Missing Access', 403)
+          .body,
+        403
+      )
     return result === 'UNKNOWN_CHANNEL' || result === 'UNKNOWN_USER'
       ? c.json({ message: '404: Not Found', code: 0 }, 404)
       : c.json(result, 201)

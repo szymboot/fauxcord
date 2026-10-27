@@ -732,25 +732,21 @@ export function createGuildChannel(
 }
 
 /**
- * Finds or creates a 1:1 DM channel between the bot and a recipient user.
- * Reuses an existing DM channel with the same recipient (matching real
- * Discord's `POST /users/@me/channels` idempotency), scoping the lookup to
- * channels with exactly the bot and the recipient as recipients — both the
- * calling bot and the target recipient are required, so a DM previously
- * created between the same recipient and a *different* bot is never reused
- * across bots, and a stale group-DM containing the same user is also not
- * confused with a 1:1 DM.
+ * Finds the existing 1:1 DM channel between a bot user and a recipient without
+ * creating anything. The lookup is scoped to channels with exactly the bot and
+ * the recipient as recipients — both are required, so a DM previously created
+ * between the same recipient and a *different* bot is never matched, and a
+ * stale group-DM containing the same user is also not confused with a 1:1 DM.
  * @param db - Database
- * @param botUserId - Bot's own user ID (also stored as a recipient row so
- * `getChannelRecipientUsers` reflects both parties)
+ * @param botUserId - Bot's own user ID
  * @param recipientId - Recipient user ID
- * @returns The existing or newly created DM channel object
+ * @returns The existing DM channel object, or null when none exists
  */
-export function getOrCreateDmChannel(
+export function findDmChannel(
   db: Database,
   botUserId: string,
   recipientId: string
-): ChannelObject {
+): ChannelObject | null {
   const existing = db
     .prepare(
       `SELECT c.id FROM channels c
@@ -770,11 +766,27 @@ export function getOrCreateDmChannel(
          ) = 2`
     )
     .get(recipientId, botUserId) as { id: string } | undefined
+  return existing ? getChannel(db, existing.id) : null
+}
 
-  if (existing) {
-    const channel = getChannel(db, existing.id)
-    if (channel) return channel
-  }
+/**
+ * Finds or creates a 1:1 DM channel between the bot and a recipient user.
+ * Reuses an existing DM channel with the same recipient (matching real
+ * Discord's `POST /users/@me/channels` idempotency); see `findDmChannel` for
+ * how the lookup is scoped.
+ * @param db - Database
+ * @param botUserId - Bot's own user ID (also stored as a recipient row so
+ * `getChannelRecipientUsers` reflects both parties)
+ * @param recipientId - Recipient user ID
+ * @returns The existing or newly created DM channel object
+ */
+export function getOrCreateDmChannel(
+  db: Database,
+  botUserId: string,
+  recipientId: string
+): ChannelObject {
+  const existing = findDmChannel(db, botUserId, recipientId)
+  if (existing) return existing
 
   const channelId = generateSnowflake()
   db.prepare(

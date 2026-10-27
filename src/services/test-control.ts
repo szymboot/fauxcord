@@ -1032,6 +1032,7 @@ export function injectTestMessage(
   | MessageObject
   | 'UNKNOWN_CHANNEL'
   | 'UNKNOWN_USER'
+  | 'NOT_RECIPIENT'
   | 'CONFLICT'
   | 'INVALID_STICKERS' {
   const channel = getChannel(db, channelId)
@@ -1041,6 +1042,14 @@ export function injectTestMessage(
     .prepare('SELECT id FROM users WHERE id = ?')
     .get(request.author.id)
   if (!author) return 'UNKNOWN_USER'
+
+  // Only a DM or group-DM recipient can speak there; guild channels instead
+  // register the author as a member below.
+  if (
+    (channel.type === 1 || channel.type === 3) &&
+    !channel.recipients?.some((recipient) => recipient.id === request.author.id)
+  )
+    return 'NOT_RECIPIENT'
 
   const stickerItems = resolveMessageStickers(
     db,
