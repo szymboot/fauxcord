@@ -468,6 +468,12 @@ describe('native reaction-clear REST and Gateway contract', () => {
     server.db
       .prepare('UPDATE channels SET guild_id = NULL, type = 1 WHERE id = ?')
       .run(channel)
+    // DM clears reach the channel's bot recipients.
+    server.db
+      .prepare(
+        'INSERT INTO channel_recipients (channel_id, user_id) VALUES (?, ?)'
+      )
+      .run(channel, BOT)
     populate()
     const dm = await connect(TOKEN, GatewayIntentBits.DirectMessageReactions)
     const guildOnly = await connect()

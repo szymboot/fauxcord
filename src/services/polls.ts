@@ -287,6 +287,7 @@ export function expirePoll(
     .get(messageId) as { channel_id: string; author_id: string }
   const guildId = getGuildIdForChannel(db, row.channel_id)
   gatewayBus.emit('message.update', {
+    db,
     guildId,
     channelId: row.channel_id,
     message: result,
