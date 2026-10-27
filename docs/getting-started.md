@@ -225,6 +225,31 @@ ws.on('message', (raw) => {
 })
 ```
 
+### Direct messages and group DMs
+
+Message and reaction events from a DM or group-DM channel (a channel without a
+guild) follow Discord's routing instead of the guild broadcast:
+
+- They are delivered only to the bot(s) that are **recipients** of the channel
+  (the bot a DM was created for, plus any bot added as a group-DM recipient) —
+  never to other bots connected to the same Fauxcord. Human recipients have no
+  Gateway session, so a human's DM to the bot reaches only the bot.
+- Sessions need `DIRECT_MESSAGES` (`4096`) for `MESSAGE_CREATE`,
+  `MESSAGE_UPDATE` and `MESSAGE_DELETE`, and `DIRECT_MESSAGE_REACTIONS` (`8192`)
+  for `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
+  `MESSAGE_REACTION_REMOVE_ALL` and `MESSAGE_REACTION_REMOVE_EMOJI`. A session
+  holding only the guild variants (`GUILD_MESSAGES`, `GUILD_MESSAGE_REACTIONS`)
+  receives nothing from a DM, and a guild channel's events are unaffected by the
+  DM intents.
+- Payloads carry no `guild_id` and no `member`. The message `content` is always
+  delivered in a DM (Fauxcord does not model the privileged `MESSAGE_CONTENT`
+  intent, so content is never withheld, as on Discord for DMs).
+- This applies to messages sent by the bot over REST and to human messages
+  injected with `POST /_test/channels/:channelId/messages` on a DM channel. A
+  bot recipient also receives the events of its own actions, as on Discord.
+- Fauxcord does not dispatch `TYPING_START`, so `DIRECT_MESSAGE_TYPING` has no
+  effect.
+
 When the bot leaves a guild (`DELETE /users/@me/guilds/:guildId`), is kicked or
 banned, or the guild is deleted (`DELETE /guilds/:guildId`), its sessions with
 the `GUILDS` intent receive `GUILD_DELETE` (`{ "id": "<guild id>" }`) and the

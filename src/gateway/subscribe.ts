@@ -5,9 +5,53 @@ import type {
   GatewayMessageReactionRemoveAllDispatchData,
   GatewayMessageReactionRemoveEmojiDispatchData,
 } from 'discord-api-types/v10'
+import { getChannelRecipientUsers } from '../services/channels'
 import { gatewayBus } from './bus'
 import { broadcastToAll, broadcastToBot } from './dispatch'
 import type { SessionManager } from './session'
+
+/**
+ * Broadcasts a DM-channel Dispatch event to the bots that are recipients of
+ * the channel, like real Discord: DM events reach only recipient bots holding
+ * the DM intent, never other bots. Group DMs follow the same rule; Fauxcord
+ * only stores bot recipients it was given (the creating bot and any recipient
+ * added through the recipient routes), so unrelated bots never receive them.
+ * Human recipients have no Gateway session and are skipped implicitly.
+ * @param manager - Session manager
+ * @param scopeDb - Database holding the DM channel's recipients
+ * @param channelId - DM or group-DM channel ID
+ * @param eventName - Dispatch event name
+ * @param data - Event data
+ * @param requiredIntent - Direct-message intent bit sessions must hold
+ */
+function broadcastToDmRecipients(
+  manager: SessionManager,
+  scopeDb: Database,
+  channelId: string,
+  eventName: string,
+  data: unknown,
+  requiredIntent: number
+): void {
+  for (const recipient of getChannelRecipientUsers(scopeDb, channelId)) {
+    broadcastToBot(manager, recipient.id, eventName, data, requiredIntent)
+  }
+}
+
+/**
+ * Resolves the database whose recipients route a DM event, dropping events
+ * that originate from a different app than this subscription's.
+ * @param eventDb - Database the event originated from, if known
+ * @param subscriptionDb - Database this subscription is scoped to, if any
+ * @returns The database to resolve recipients in, or undefined to drop
+ */
+function resolveDmDb(
+  eventDb: Database | undefined,
+  subscriptionDb: Database | undefined
+): Database | undefined {
+  return eventDb && subscriptionDb && eventDb !== subscriptionDb
+    ? undefined
+    : (eventDb ?? subscriptionDb)
+}
 
 /**
  * Subscribes to resource-change events on gatewayBus and registers listeners
@@ -38,46 +82,91 @@ export function registerGatewaySubscriptions(
     typeof gatewayBus.on<'message.create'>
   >[1] = (payload) => {
     if (payload.db && payload.db !== db) return
+    // Real Discord's MESSAGE_CREATE dispatch adds `guild_id` and the
+    // author's `member` object on top of the base Message object for
+    // guild channels; libraries (e.g. JDA) rely on both to route the
+    // event and build the message's author Member.
+    const data = {
+      ...payload.message,
+      ...(payload.guildId && { guild_id: payload.guildId }),
+      ...(payload.member && { member: payload.member }),
+    }
+    if (!payload.guildId) {
+      const dmDb = resolveDmDb(payload.db, db)
+      if (dmDb) {
+        broadcastToDmRecipients(
+          manager,
+          dmDb,
+          payload.channelId,
+          'MESSAGE_CREATE',
+          data,
+          GatewayIntentBits.DirectMessages
+        )
+      }
+      return
+    }
     broadcastToAll(
       manager,
       'MESSAGE_CREATE',
-      // Real Discord's MESSAGE_CREATE dispatch adds `guild_id` and the
-      // author's `member` object on top of the base Message object for
-      // guild channels; libraries (e.g. JDA) rely on both to route the
-      // event and build the message's author Member.
-      {
-        ...payload.message,
-        ...(payload.guildId && { guild_id: payload.guildId }),
-        ...(payload.member && { member: payload.member }),
-      },
+      data,
       GatewayIntentBits.GuildMessages
     )
   }
   const onMessageUpdate: Parameters<
     typeof gatewayBus.on<'message.update'>
   >[1] = (payload) => {
+    const data = {
+      ...payload.message,
+      ...(payload.guildId && { guild_id: payload.guildId }),
+      ...(payload.member && { member: payload.member }),
+    }
+    if (!payload.guildId) {
+      const dmDb = resolveDmDb(payload.db, db)
+      if (dmDb) {
+        broadcastToDmRecipients(
+          manager,
+          dmDb,
+          payload.channelId,
+          'MESSAGE_UPDATE',
+          data,
+          GatewayIntentBits.DirectMessages
+        )
+      }
+      return
+    }
     broadcastToAll(
       manager,
       'MESSAGE_UPDATE',
-      {
-        ...payload.message,
-        ...(payload.guildId && { guild_id: payload.guildId }),
-        ...(payload.member && { member: payload.member }),
-      },
+      data,
       GatewayIntentBits.GuildMessages
     )
   }
   const onMessageDelete: Parameters<
     typeof gatewayBus.on<'message.delete'>
   >[1] = (payload) => {
+    const data = {
+      id: payload.messageId,
+      channel_id: payload.channelId,
+      guild_id: payload.guildId,
+    }
+    if (!payload.guildId) {
+      const dmDb = resolveDmDb(payload.db, db)
+      if (dmDb) {
+        broadcastToDmRecipients(
+          manager,
+          dmDb,
+          payload.channelId,
+          'MESSAGE_DELETE',
+          data,
+          GatewayIntentBits.DirectMessages
+        )
+      }
+      return
+    }
     broadcastToAll(
       manager,
       'MESSAGE_DELETE',
-      {
-        id: payload.messageId,
-        channel_id: payload.channelId,
-        guild_id: payload.guildId,
-      },
+      data,
       GatewayIntentBits.GuildMessages
     )
   }
@@ -126,6 +215,20 @@ export function registerGatewaySubscriptions(
       )
       return
     }
+    if (!payload.guildId) {
+      const dmDb = resolveDmDb(payload.db, db)
+      if (dmDb) {
+        broadcastToDmRecipients(
+          manager,
+          dmDb,
+          payload.channelId,
+          'MESSAGE_REACTION_ADD',
+          data,
+          GatewayIntentBits.DirectMessageReactions
+        )
+      }
+      return
+    }
     broadcastToAll(
       manager,
       'MESSAGE_REACTION_ADD',
@@ -157,6 +260,20 @@ export function registerGatewaySubscriptions(
       )
       return
     }
+    if (!payload.guildId) {
+      const dmDb = resolveDmDb(payload.db, db)
+      if (dmDb) {
+        broadcastToDmRecipients(
+          manager,
+          dmDb,
+          payload.channelId,
+          'MESSAGE_REACTION_REMOVE',
+          data,
+          GatewayIntentBits.DirectMessageReactions
+        )
+      }
+      return
+    }
     broadcastToAll(
       manager,
       'MESSAGE_REACTION_REMOVE',
@@ -173,14 +290,23 @@ export function registerGatewaySubscriptions(
       message_id: payload.messageId,
       ...(payload.guildId && { guild_id: payload.guildId }),
     }
+    if (!payload.guildId) {
+      broadcastToDmRecipients(
+        manager,
+        payload.scope.db,
+        payload.channelId,
+        'MESSAGE_REACTION_REMOVE_ALL',
+        data,
+        GatewayIntentBits.DirectMessageReactions
+      )
+      return
+    }
     broadcastToBot(
       manager,
       payload.scope.botId,
       'MESSAGE_REACTION_REMOVE_ALL',
       data,
-      payload.guildId
-        ? GatewayIntentBits.GuildMessageReactions
-        : GatewayIntentBits.DirectMessageReactions,
+      GatewayIntentBits.GuildMessageReactions,
       payload.scope.token
     )
   }
@@ -194,14 +320,23 @@ export function registerGatewaySubscriptions(
       ...(payload.guildId && { guild_id: payload.guildId }),
       emoji: payload.emoji,
     }
+    if (!payload.guildId) {
+      broadcastToDmRecipients(
+        manager,
+        payload.scope.db,
+        payload.channelId,
+        'MESSAGE_REACTION_REMOVE_EMOJI',
+        data,
+        GatewayIntentBits.DirectMessageReactions
+      )
+      return
+    }
     broadcastToBot(
       manager,
       payload.scope.botId,
       'MESSAGE_REACTION_REMOVE_EMOJI',
       data,
-      payload.guildId
-        ? GatewayIntentBits.GuildMessageReactions
-        : GatewayIntentBits.DirectMessageReactions,
+      GatewayIntentBits.GuildMessageReactions,
       payload.scope.token
     )
   }

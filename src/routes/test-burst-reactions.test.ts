@@ -476,6 +476,7 @@ describe('burst (super) reactions over the test control and REST routes', () => 
     expect(result.status).toBe(204)
     expect(removed).toEqual([
       {
+        db,
         guildId: guild,
         channelId: channel,
         messageId: message,

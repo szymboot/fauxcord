@@ -714,6 +714,7 @@ export function updateMessage(
   if (updated && !(updated.flags & MESSAGE_FLAGS.EPHEMERAL)) {
     const guildId = getGuildIdForChannel(db, row.channel_id)
     gatewayBus.emit('message.update', {
+      db,
       guildId,
       channelId: row.channel_id,
       message: updated as unknown as Record<string, unknown>,
@@ -780,6 +781,7 @@ export function deleteMessage(
     /** Emits the deletion only when its enclosing transaction succeeded. */
     const emit = (): void => {
       gatewayBus.emit('message.delete', {
+        db,
         guildId,
         channelId: target.channel_id,
         messageId,

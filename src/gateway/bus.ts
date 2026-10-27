@@ -21,12 +21,16 @@ export interface GatewayBusEvents {
     member: Record<string, unknown> | undefined
   }
   'message.update': {
+    /** Originating database; resolves the recipients of DM channel events. */
+    db?: Database
     guildId: string | undefined
     channelId: string
     message: Record<string, unknown>
     member: Record<string, unknown> | undefined
   }
   'message.delete': {
+    /** Originating database; resolves the recipients of DM channel events. */
+    db?: Database
     guildId: string | undefined
     channelId: string
     messageId: string
@@ -40,6 +44,8 @@ export interface GatewayBusEvents {
     db: Database
   }
   'message.reaction.add': {
+    /** Originating database; resolves the recipients of DM channel events. */
+    db?: Database
     guildId: string | undefined
     channelId: string
     messageId: string
@@ -55,6 +61,8 @@ export interface GatewayBusEvents {
     burstColors?: string[]
   }
   'message.reaction.remove': {
+    /** Originating database; resolves the recipients of DM channel events. */
+    db?: Database
     guildId: string | undefined
     channelId: string
     messageId: string

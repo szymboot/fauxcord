@@ -31,7 +31,10 @@ function getChannelIdForMessage(
   return row?.channel_id
 }
 
-/** Resolves clear-event delivery from the persisted guild setup (or DM author). */
+/**
+ * Resolves clear-event delivery from the persisted guild setup, or from a bot
+ * recipient of the DM channel (the Gateway routes DM clears to all recipients).
+ */
 function getReactionClearDispatch(
   db: Database,
   messageId: string
@@ -42,7 +45,10 @@ function getReactionClearDispatch(
        FROM messages m JOIN channels c ON c.id = m.channel_id
        LEFT JOIN guilds g ON g.id = c.guild_id
        JOIN bots b ON b.token = CASE WHEN c.guild_id IS NULL
-         THEN m.author_token ELSE g.bot_token END
+         THEN (SELECT b2.token FROM bots b2
+               JOIN channel_recipients cr ON cr.user_id = b2.user_id
+               WHERE cr.channel_id = c.id LIMIT 1)
+         ELSE g.bot_token END
        WHERE m.id = ?`
     )
     .get(messageId) as
@@ -134,6 +140,7 @@ export function addReaction(
       const member =
         guildId === undefined ? null : getGuildMember(db, guildId, userId)
       gatewayBus.emit('message.reaction.add', {
+        db,
         guildId,
         channelId: message.channel_id,
         messageId,
@@ -186,6 +193,7 @@ export function removeReaction(
   const channelId = getChannelIdForMessage(db, messageId)
   if (channelId !== undefined) {
     gatewayBus.emit('message.reaction.remove', {
+      db,
       guildId: getGuildIdForChannel(db, channelId),
       channelId,
       messageId,
