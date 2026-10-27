@@ -1624,6 +1624,73 @@ Returns HTTP `204` when removed; unknown/already removed controls return HTTP
 `404` / code `0`, matching REST-fault removal. Delivery resumes immediately
 using the same DM channel unless another restriction still covers the pair.
 
+## `GET /_test/dm-channels` — Look up a bot↔human DM without creating it
+
+Harness use case: a test needs the DM channel between the bot under test and a
+human (`DMChannel(userID)`) to read what the bot sent and to send a DM to the
+bot. Calling `POST /users/@me/channels` with the bot token for this would create
+the channel before the bot does and would consume REST faults armed on that
+path. These controls need no bot token and are exempt from authentication, like
+the other `/_test` endpoints.
+
+```bash
+curl "http://localhost:3000/_test/dm-channels?guild_id=222222222222222222&user_id=444444444444444444"
+```
+
+Both query parameters follow the closed-DM rules: required nonzero Snowflake
+strings (1–20 digits, no leading zeros), no repeated or unknown parameters.
+`guild_id` selects the exact owning bot setup token, and so the bot user, as with
+closed-DM fixtures; guild membership of the human is not required. Responses
+always carry `Cache-Control: no-store`.
+
+| Status | Body                                                                                           |
+| ------ | ---------------------------------------------------------------------------------------------- |
+| `200`  | The existing DM channel object, the same shape `POST /users/@me/channels` returns (`type: 1`). |
+| `404`  | `{"message":"Unknown Channel","code":10003}` — the bot has not opened a DM with this human.    |
+| `404`  | `10004` Unknown Guild / `10013` Unknown User.                                                  |
+| `400`  | `Invalid Form Body` / `50035` for malformed parameters or a bot `user_id`.                     |
+
+The lookup never creates a channel, never consumes or is blocked by a REST fault,
+and emits no Gateway event.
+
+## `POST /_test/dm-channels` — Open the DM as the human
+
+Models a human opening a DM with the bot. Body, as for closed-DM fixtures:
+
+```json
+{
+  "guild_id": "222222222222222222",
+  "user_id": "444444444444444444"
+}
+```
+
+Validation matches `POST /_test/closed-dms`: both fields are required nonzero
+Snowflake strings, extra fields and malformed JSON are rejected with `400` /
+`50035`, bot recipients are rejected with `400` / `50035` on `user_id`, and
+unknown guilds/users return `404` / `10004` / `10013`.
+
+Returns the DM channel object. HTTP `201` when this call created the channel and
+`200` when the 1:1 DM already existed (idempotent). The control shares storage
+and lookup rules with `POST /users/@me/channels`, so a later bot call returns the
+same channel (and a channel the bot opened first is returned here with `200`).
+Like the real endpoint, channels are keyed by bot user ID: two setup tokens that
+share a bot user ID share the DM. Different bot users never do. It does not
+consume REST faults armed on `POST /users/@me/channels`, and emits no Gateway
+event. As with real-path DMs, the channel is not removed by `/_test/reset`.
+
+Typical Harness flow:
+
+1. `POST /_test/dm-channels` (or `GET`, once the bot has replied) to get `id`.
+2. `POST /_test/channels/{id}/messages` with the human as `author` to DM the bot.
+3. `GET /_test/messages/{id}` or the bot's own message endpoints to read replies.
+
+Injecting into a DM or group-DM channel (see
+[`POST /_test/channels/:channelId/messages`](#post-_testchannelschannelidmessages--inject-a-message-from-a-specific-user))
+requires the `author` to be a recipient of that channel. Otherwise the request
+returns HTTP `403` with `{"message":"Missing Access","code":50001}`, stores no
+message or attachment, and emits no event. The recipient's message is stored and
+produces the ordinary `MESSAGE_CREATE`.
+
 ## `GET /_test/rest-faults/:id` — Inspect consumption
 
 Returns the control object, including `remaining` and `consumed`, or `404` for
@@ -2083,6 +2150,10 @@ Returns the created message object (same shape as
 | `author.id`           | ✅       | ID of a user already registered via `POST /_test/users` (or any other existing user). Returns `404` if unregistered.              |
 | `id`                  | —        | Explicit numeric Message ID (1–20 digits), otherwise generated. An existing Message ID returns `409` without mutations or events. |
 | `remove_after_create` | —        | Boolean, default `false`. Atomically remove after capturing its create snapshot; queue create then delete after commit.           |
+
+In a DM or group-DM channel the `author` must be a recipient; otherwise the
+request returns `403` with `{"message":"Missing Access","code":50001}` and
+stores nothing (see [`POST /_test/dm-channels`](#post-_testdm-channels--open-the-dm-as-the-human)).
 
 **File fixtures**
 
