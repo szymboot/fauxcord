@@ -180,12 +180,12 @@ function resumeTargetOf(url: URL | null | undefined): string | undefined {
 /**
  * (Re)arms the Heartbeat timeout timer.
  * @param sessionManager - Session manager
- * @param ws - The connected WebSocket context
+ * @param ws - Bound connection to close, or undefined for a gated RESUME
  * @param sessionId - Session ID
  */
 function armHeartbeatTimeout(
   sessionManager: SessionManager,
-  ws: WSContext,
+  ws: WSContext | undefined,
   sessionId: string
 ): void {
   const session = sessionManager.get(sessionId)
@@ -193,7 +193,7 @@ function armHeartbeatTimeout(
   if (session.heartbeatTimer) clearTimeout(session.heartbeatTimer)
   session.heartbeatTimer = setTimeout(() => {
     try {
-      ws.close(GatewayCloseCode.SessionTimedOut, 'Session timed out')
+      ws?.close(GatewayCloseCode.SessionTimedOut, 'Session timed out')
     } catch {
       // The socket may already be closed (e.g. `onClose` no longer removes
       // the session immediately, see the missing `onClose` handler below),
@@ -576,9 +576,15 @@ function handleHeartbeat(
   // it would re-arm a timeout a test control deliberately suspended.
   if (ws.readyState !== WS_OPEN) return
   const sessionId = sessionIdByWs.get(ws)
-  const session = sessionId ? sessionManager.get(sessionId) : undefined
   // One receipt time keeps the zombie record and the session in agreement.
   const now = Date.now()
+  // A validated gated RESUME stays unbound until release, but its heartbeats
+  // refresh the same session timeout. Silenced sockets keep their own path.
+  const pendingSession = sessionManager.isSilenced(ws.raw as never)
+    ? undefined
+    : sessionManager.observePendingResumeHeartbeat?.(ws.raw as never, now)
+  const session =
+    pendingSession ?? (sessionId ? sessionManager.get(sessionId) : undefined)
   // A silenced (test zombie) connection never gets HEARTBEAT_ACK, but its
   // heartbeats still arrive and keep the session alive below, so the server's
   // own timeout cannot reap the session before the client detects the zombie.
@@ -594,7 +600,13 @@ function handleHeartbeat(
   session.lastHeartbeatAt = now
   if (!sessionManager.isSilenced(ws.raw as never))
     session.lastHeartbeatAckAt = now
-  armHeartbeatTimeout(sessionManager, ws, session.sessionId)
+  // Removing a gated session cancels its pending control with a generation
+  // check. Its timer must not close a socket repurposed by IDENTIFY or RESUME.
+  armHeartbeatTimeout(
+    sessionManager,
+    pendingSession ? undefined : ws,
+    session.sessionId
+  )
 }
 
 /**

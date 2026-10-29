@@ -173,6 +173,11 @@ export class SessionManager {
     socket: WebSocket,
     retry: () => void
   ) => boolean
+  /** Records a held socket's heartbeat and returns its validated pending session. */
+  observePendingResumeHeartbeat?: (
+    socket: WebSocket,
+    at: number
+  ) => Session | undefined
   /** Records transport progress separately from consuming application completion. */
   observeDispatch?: (
     session: Session,
