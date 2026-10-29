@@ -782,7 +782,7 @@ describe('scoped Gateway event controls over real WebSockets', () => {
       { events: ['MESSAGE_CREATE', 'MESSAGE_CREATE'] },
       { events: ['MESSAGE_CREATE', 'MESSAGE_UPDATE'] },
       { limit: 101 },
-      { ttl_ms: 60_001 },
+      { ttl_ms: 180_001 },
       { hold: null },
     ]) {
       const result18 = await request(ROOT, 'POST', { ...policy, ...extra })

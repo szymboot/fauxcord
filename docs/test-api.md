@@ -2999,7 +2999,7 @@ content, author profile and guild member data; release/replay does not look up
 current records or recreate a deleted message.
 
 `limit` is an integer from 1–100 (default 20); `ttl_ms` is an integer from
-1–60000 (default 30000). Each control also has a fixed 256 KiB serialized payload
+1–180000 (default 30000). Each control also has a fixed 256 KiB serialized payload
 budget and a maximum of 100 total release/replay/disconnect operations. Each disconnect
 consumes one operation; releasing several events consumes one per event.
 Transport observation retains at most 200 delivery records per control, including
@@ -3200,7 +3200,14 @@ reaction, member and voice control suites cover legacy capture/release/replay.
 
 Returns `200` with the policy, `expires_at` (epoch milliseconds), `bytes`,
 `skipped`, `operations`, `delivery_observations_skipped`, `awaiting_resume`,
-`pause_resume`, `pending_resume`, and `events_captured` in native observation order:
+`pause_resume`, `pending_resume`, `pending_resume_heartbeats`,
+`pending_resume_last_heartbeat_at`, and `events_captured` in native observation order.
+
+`pending_resume_heartbeats` counts heartbeats received on the current held RESUME
+socket. `pending_resume_last_heartbeat_at` is the receipt time of the last such
+heartbeat in epoch milliseconds. They are `0` and `null` before any heartbeat,
+reset for each new pending RESUME, and return to `0` and `null` when that pending
+RESUME is cleared (including gate opening or socket closure).
 
 ```json
 {
@@ -3428,6 +3435,13 @@ A socket already bound to an existing session also receives INVALID_SESSION
 without admission to the gate, so cancellation/expiry cannot disrupt that
 session or its controls. Use a fresh connection for a gated RESUME.
 A closed pending socket clears the pending slot without opening the gate.
+Heartbeats on the validated pending socket keep being ACKed and refresh the
+session's ordinary heartbeat timeout while the gate stays closed. Inspection's
+`pending_resume_heartbeats` and `pending_resume_last_heartbeat_at` let a harness
+wait for that socket's first heartbeat before continuing a timed hold. When those
+heartbeats stop, the session still expires after two heartbeat intervals; holding
+the gate alone does not keep it alive. The control's fixed TTL still applies:
+set `ttl_ms: 180000` when a hold must span a heartbeat and a one-minute bot tick.
 A successful IDENTIFY or RESUME on that socket clears its deferred attempts
 before binding the new session; opening or canceling the old gate cannot
 restore the old session or close the repurposed connection.

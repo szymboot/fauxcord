@@ -676,7 +676,7 @@ describe('native voice capture controls over HTTP and WebSockets', () => {
       { limit: 0 },
       { limit: 101 },
       { ttl_ms: 0 },
-      { ttl_ms: 60_001 },
+      { ttl_ms: 180_001 },
     ]) {
       expect(await status(ROOT, 'POST', { ...policy, ...extra })).toBe(400)
     }

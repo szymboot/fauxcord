@@ -714,7 +714,7 @@ describe('native member update controls HTTP/WS contract', () => {
       { limit: 0 },
       { limit: 101 },
       { ttl_ms: 0 },
-      { ttl_ms: 60_001 },
+      { ttl_ms: 180_001 },
     ]) {
       const result31 = await request(ROOT, 'POST', { ...policy, ...extra })
       expect(result31.status).toBe(400)

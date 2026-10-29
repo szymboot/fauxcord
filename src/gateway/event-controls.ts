@@ -153,6 +153,8 @@ interface EventControl extends ResolvedEventControlRequest {
     retry: () => void
     onClose: () => void
     generation: number
+    heartbeats: number
+    last_heartbeat_at: number | null
   }
   delivery_observations: number
   delivery_observations_skipped: number
@@ -215,9 +217,28 @@ export class GatewayEventControls {
         retry,
         onClose,
         generation: manager.connectionGeneration(socket),
+        heartbeats: 0,
+        last_heartbeat_at: null,
       }
       socket.once('close', onClose)
       return true
+    }
+    manager.observePendingResumeHeartbeat = (socket, at) => {
+      this.prune()
+      for (const control of this.controls.values()) {
+        const pending = control.pending_resume
+        if (
+          control.awaiting_resume &&
+          control.pause_resume &&
+          pending?.socket === socket &&
+          pending.generation === manager.connectionGeneration(socket)
+        ) {
+          pending.heartbeats += 1
+          pending.last_heartbeat_at = at
+          return control.session
+        }
+      }
+      return undefined
     }
     manager.resumeEventControls = (session, socket) => {
       for (const control of this.controls.values()) {
@@ -486,6 +507,9 @@ export class GatewayEventControls {
           awaiting_resume: control.awaiting_resume,
           pause_resume: control.pause_resume,
           pending_resume: control.pending_resume !== undefined,
+          pending_resume_heartbeats: control.pending_resume?.heartbeats ?? 0,
+          pending_resume_last_heartbeat_at:
+            control.pending_resume?.last_heartbeat_at ?? null,
           delivery_observations_skipped: control.delivery_observations_skipped,
           hold: control.hold,
           allow_original_sequence: control.allow_original_sequence,

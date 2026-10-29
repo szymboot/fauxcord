@@ -82,7 +82,7 @@ function validateControl(value: unknown): EventControlRequest | undefined {
     limit > 100 ||
     !Number.isSafeInteger(ttlMs) ||
     ttlMs < 1 ||
-    ttlMs > 60_000
+    ttlMs > 180_000
     ? undefined
     : {
         ...(data.ownership_key !== undefined && {
