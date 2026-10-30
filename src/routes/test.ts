@@ -23,7 +23,10 @@ import {
   validateAuditLogFixture,
 } from '../validators/audit-log'
 import type { Database } from '../db'
-import { validateInteractionLocale } from '../validators/interaction'
+import {
+  validateModalSubmitRequest,
+  validateTestInteraction,
+} from '../validators/interaction'
 import {
   setupTestEnvironment,
   deleteTestSetup,
@@ -47,6 +50,10 @@ import type {
 } from '../services/test-control'
 import { getChannelWebhooks } from '../services/webhooks'
 import { getInteractionCallbackObservation } from '../services/interactions'
+import {
+  submitTestModal,
+  type ModalSubmitRequest,
+} from '../services/modal-submissions'
 import { injectPollVote } from '../services/polls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { GUILD_LIMITS, validateGuildMemberUpdate } from '../validators/guild'
@@ -822,14 +829,20 @@ export function createTestRoutes(
   // POST /_test/interactions — Simulate an interaction against a registered
   // command, without a real Discord client.
   app.post('/_test/interactions', async (c) => {
-    const body = await c.req.json<TestInteractionRequest>()
-    const errors = validateInteractionLocale(body.locale)
+    const raw: unknown = await c.req.json().catch(() => null)
+    const errors = validateTestInteraction(raw)
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
     }
-    const result = createTestInteraction(db, body)
+    const result = createTestInteraction(db, raw as TestInteractionRequest)
     if (result.ok) return c.json(result.interaction, 201)
     switch (result.reason) {
+      case 'unknown_user': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404).body,
+          404
+        )
+      }
       case 'unknown_guild': {
         return c.json(
           discordError(DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild', 404)
@@ -841,6 +854,68 @@ export function createTestRoutes(
         return c.json(
           discordError(DiscordErrorCode.UNKNOWN_CHANNEL, 'Unknown Channel', 404)
             .body,
+          404
+        )
+      }
+      default: {
+        return c.json({ message: '404: Not Found', code: 0 }, 404)
+      }
+    }
+  })
+
+  // POST /_test/interactions/:interactionId/modal-submit — Submit the modal
+  // the bot showed for an interaction, as a new MODAL_SUBMIT interaction.
+  app.post('/_test/interactions/:interactionId/modal-submit', async (c) => {
+    const token = c.req.header('X-Interaction-Token')
+    const raw: unknown = await c.req.json().catch(() => null)
+    const applicationId =
+      typeof raw === 'object' && raw !== null
+        ? (raw as { application_id?: unknown }).application_id
+        : undefined
+    if (typeof applicationId !== 'string' || !applicationId || !token) {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
+    const errors = validateModalSubmitRequest(raw)
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
+    const result = submitTestModal(
+      db,
+      c.req.param('interactionId'),
+      applicationId,
+      token,
+      raw as ModalSubmitRequest
+    )
+    c.header('Cache-Control', 'no-store')
+    if (result.ok) return c.json(result.interaction, 201)
+    switch (result.reason) {
+      case 'invalid': {
+        return c.json(validationError(result.errors).body, 400)
+      }
+      case 'unknown_guild': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild', 404)
+            .body,
+          404
+        )
+      }
+      case 'unknown_channel': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_CHANNEL, 'Unknown Channel', 404)
+            .body,
+          404
+        )
+      }
+      case 'unknown_member': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member', 404)
+            .body,
+          404
+        )
+      }
+      case 'unknown_user': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404).body,
           404
         )
       }

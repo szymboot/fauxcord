@@ -7,6 +7,7 @@
  */
 
 import type { MessageComponents } from '../validators/message-components'
+import { parseModal, type ModalObject } from '../validators/modal'
 
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
@@ -46,6 +47,7 @@ interface InteractionRow {
   responded: number
   initial_callback_type: number | null
   initial_response_message_id: string | null
+  modal_json: string | null
   created_at: string
 }
 
@@ -194,6 +196,8 @@ export interface InteractionCallbackObservation {
   responded: boolean
   /** Null for pending interactions and acknowledged rows predating recording. */
   initial_callback_type: number | null
+  /** The normalized modal; present only when the accepted callback was type 9. */
+  modal?: ModalObject
 }
 
 /**
@@ -212,13 +216,17 @@ export function getInteractionCallbackObservation(
 ): InteractionCallbackObservation | null {
   const row = db
     .prepare(
-      `SELECT id, application_id, responded, initial_callback_type
+      `SELECT id, application_id, responded, initial_callback_type, modal_json
        FROM interactions WHERE id = ? AND application_id = ? AND token = ?`
     )
     .get(interactionId, applicationId, token) as
     | Pick<
         InteractionRow,
-        'id' | 'application_id' | 'responded' | 'initial_callback_type'
+        | 'id'
+        | 'application_id'
+        | 'responded'
+        | 'initial_callback_type'
+        | 'modal_json'
       >
     | undefined
   return row
@@ -227,6 +235,10 @@ export function getInteractionCallbackObservation(
         application_id: row.application_id,
         responded: row.responded === 1,
         initial_callback_type: row.initial_callback_type,
+        ...(row.initial_callback_type === 9 &&
+          row.modal_json && {
+            modal: JSON.parse(row.modal_json) as ModalObject,
+          }),
       }
     : null
 }
@@ -240,6 +252,9 @@ export interface InteractionCallbackPayload {
     components?: MessageComponents | null
     tts?: boolean | null
     flags?: number | null
+    /** Modal (type 9) fields, validated by `parseModal`. */
+    custom_id?: string
+    title?: string
   }
 }
 
@@ -265,12 +280,15 @@ export type InteractionCallbackResult =
   | { ok: true; response: InteractionCallbackResponse }
   | { ok: false; reason: 'not_found' }
   | { ok: false; reason: 'already_responded' }
+  | { ok: false; reason: 'modal_not_allowed' }
 
 /**
  * Handles POST /interactions/:id/:token/callback. Type 4 (CHANNEL_MESSAGE_
  * WITH_SOURCE) creates the original response. Type 5 creates a loading
  * original that can be completed through the webhook edit endpoint.
- * Types 6/7/9 retain this mock's acknowledgement-only behavior.
+ * Type 9 records the normalized modal for test control to read and submit;
+ * it is refused for interaction types that cannot open a modal. Types 6/7
+ * retain this mock's acknowledgement-only behavior.
  * @param db - Database
  * @param interactionId - `:interactionId` route param
  * @param token - `:interactionToken` route param
@@ -290,6 +308,11 @@ export function handleInteractionCallback(
     .get(interactionId, token) as InteractionRow | undefined
   if (!row) return { ok: false, reason: 'not_found' }
   if (row.responded === 1) return { ok: false, reason: 'already_responded' }
+  // Discord only lets commands and message components open a modal; PING,
+  // autocomplete, and modal submissions cannot.
+  if (payload.type === 9 && row.type !== 2 && row.type !== 3) {
+    return { ok: false, reason: 'modal_not_allowed' }
+  }
 
   const interaction: InteractionCallbackResponse['interaction'] = {
     id: row.id,
@@ -348,9 +371,10 @@ export function handleInteractionCallback(
     )
     if (!deferred) resource = { type: 4, message }
   } else {
+    const { modal } = payload.type === 9 ? parseModal(payload.data) : {}
     db.prepare(
-      'UPDATE interactions SET responded = 1, initial_callback_type = ? WHERE id = ?'
-    ).run(payload.type, row.id)
+      'UPDATE interactions SET responded = 1, initial_callback_type = ?, modal_json = ? WHERE id = ?'
+    ).run(payload.type, modal ? JSON.stringify(modal) : null, row.id)
   }
 
   return {

@@ -48,6 +48,7 @@ import {
 import { addReaction, removeReaction, type ReactionBurst } from './reactions'
 import { findGuildEmoji, parseReactionEmoji } from './reaction-emoji'
 import { createInteraction } from './interactions'
+import { resolveInteractionScope } from './interaction-scope'
 import type { InteractionObject } from './interactions'
 
 /** Test setup request type */
@@ -1264,6 +1265,13 @@ export interface TestInteractionRequest {
   /** Invoking user's Discord locale; defaults to en-US. */
   locale?: string
   command_name: string
+  /**
+   * Registered command kind: 1 CHAT_INPUT (default) or 2 USER. Defaults to 2
+   * when `target_id` is given.
+   */
+  command_type?: 1 | 2
+  /** The user a USER command is invoked on (`data.target_id`). */
+  target_id?: string
   guild_id?: string
   channel_id?: string
   user_id?: string
@@ -1275,7 +1283,8 @@ export type CreateTestInteractionResult =
   | { ok: true; interaction: InteractionObject }
   | {
       ok: false
-      reason: 'unknown_command' | 'unknown_guild' | 'unknown_channel'
+      reason:
+        'unknown_command' | 'unknown_guild' | 'unknown_channel' | 'unknown_user'
     }
 
 /** Minimal row shape needed to resolve a command by name */
@@ -1284,15 +1293,47 @@ interface CommandIdRow {
 }
 
 /**
+ * Builds the `data` a USER command carries beyond the command itself:
+ * `target_id` and `resolved` with the target user and, when the target is a
+ * member of the interaction's guild, the partial member (Discord omits
+ * `user`, `deaf`, and `mute` from resolved members).
+ * @param db - Database
+ * @param targetId - Target user ID
+ * @param guildId - Guild of the interaction, if any
+ * @returns Interaction data fields, or null when the target does not exist
+ */
+function userCommandData(
+  db: Database,
+  targetId: string,
+  guildId: string | undefined
+): Record<string, unknown> | null {
+  const user = getUser(db, targetId)
+  if (!user) return null
+  const member = guildId ? getGuildMember(db, guildId, targetId) : null
+  const partial: Record<string, unknown> = { ...member }
+  for (const key of ['user', 'deaf', 'mute'])
+    Reflect.deleteProperty(partial, key)
+  return {
+    target_id: targetId,
+    resolved: {
+      users: { [targetId]: user },
+      ...(member && { members: { [targetId]: partial } }),
+    },
+  }
+}
+
+/**
  * Simulates an interaction against a registered command, without a real
  * Discord client. Prefers a guild-scoped command match (when `guild_id` is
  * given) and falls back to a global command of the same name; a request
- * with no `guild_id` only ever matches a global command.
+ * with no `guild_id` only ever matches a global command. Only commands of
+ * the requested kind match: CHAT_INPUT by default, USER with `target_id`.
  *
  * A `guild_id` must name an existing guild the application's bot is still in
  * and a `channel_id` an existing channel (of that guild, when given) outside
  * guilds the bot left or lost, so that no interaction is created for them. A
  * request with only a guild `channel_id` is created in that channel's guild.
+ * A USER command's `target_id` must be an existing user.
  * @param db - Database
  * @param request - Test interaction request body
  * @returns The created interaction, or why no interaction was created
@@ -1301,57 +1342,45 @@ export function createTestInteraction(
   db: Database,
   request: TestInteractionRequest
 ): CreateTestInteractionResult {
-  /** Whether the application's bot is still in a guild of its setup. */
-  const botInGuild = (guildId: string): boolean =>
-    db
-      .prepare(
-        'SELECT 1 FROM guilds g JOIN bots b ON b.token = g.bot_token WHERE g.id = ? AND g.bot_present = 1 AND b.user_id = ?'
-      )
-      .get(guildId, request.application_id) !== undefined
-  if (request.guild_id !== undefined && !botInGuild(request.guild_id))
-    return { ok: false, reason: 'unknown_guild' }
-  // A channel-only request still happens in the channel's guild, which the
-  // interaction must carry so removed setups never receive it.
-  let interactionGuildId = request.guild_id
-  if (request.channel_id !== undefined) {
-    const channel = db
-      .prepare(
-        `SELECT c.guild_id FROM channels c
-         LEFT JOIN guilds g ON g.id = c.guild_id
-         WHERE c.id = ? AND COALESCE(g.bot_present, 1) = 1`
-      )
-      .get(request.channel_id) as { guild_id: string | null } | undefined
-    if (
-      !channel ||
-      (request.guild_id !== undefined && channel.guild_id !== request.guild_id)
-    )
-      return { ok: false, reason: 'unknown_channel' }
-    if (channel.guild_id !== null) {
-      if (!botInGuild(channel.guild_id))
-        return { ok: false, reason: 'unknown_channel' }
-      interactionGuildId = channel.guild_id
-    }
-  }
+  const scope = resolveInteractionScope(
+    db,
+    request.application_id,
+    request.guild_id,
+    request.channel_id
+  )
+  if (!scope.ok) return scope
+  const commandType = request.command_type ?? (request.target_id ? 2 : 1)
   const guildCommand = request.guild_id
     ? (db
         .prepare(
-          'SELECT id FROM application_commands WHERE application_id = ? AND guild_id = ? AND name = ?'
+          'SELECT id FROM application_commands WHERE application_id = ? AND guild_id = ? AND type = ? AND name = ?'
         )
-        .get(request.application_id, request.guild_id, request.command_name) as
-        CommandIdRow | undefined)
+        .get(
+          request.application_id,
+          request.guild_id,
+          commandType,
+          request.command_name
+        ) as CommandIdRow | undefined)
     : undefined
 
   const globalCommand = guildCommand
     ? undefined
     : (db
         .prepare(
-          'SELECT id FROM application_commands WHERE application_id = ? AND guild_id IS NULL AND name = ?'
+          'SELECT id FROM application_commands WHERE application_id = ? AND guild_id IS NULL AND type = ? AND name = ?'
         )
-        .get(request.application_id, request.command_name) as
+        .get(request.application_id, commandType, request.command_name) as
         CommandIdRow | undefined)
 
   const command = guildCommand ?? globalCommand
   if (!command) return { ok: false, reason: 'unknown_command' }
+
+  let data: Record<string, unknown> = { options: request.options ?? [] }
+  if (commandType === 2) {
+    const target = userCommandData(db, request.target_id ?? '', scope.guildId)
+    if (!target) return { ok: false, reason: 'unknown_user' }
+    data = target
+  }
 
   const userId = request.user_id ?? generateSnowflake()
   const interactionId = generateSnowflake()
@@ -1366,10 +1395,10 @@ export function createTestInteraction(
     token: interactionToken,
     type: request.type ?? 2,
     locale: request.locale,
-    guildId: interactionGuildId,
+    guildId: scope.guildId,
     channelId: request.channel_id,
     commandId: command.id,
-    data: { options: request.options ?? [] },
+    data,
     userId,
   })
 

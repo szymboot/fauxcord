@@ -182,8 +182,20 @@ func main() {
   Query days must be a single decimal integer from 0 to 7. All supplied deletion
   fields are validated even when another source takes precedence; malformed or
   repeated query days return HTTP 400 with Discord error code 50035.
+- User context commands and modals (`POST /_test/interactions` with `target_id`,
+  `InteractionResponseModal`, `POST /_test/interactions/:id/modal-submit`) were
+  verified manually (not in CI) by decoding Fauxcord's `INTERACTION_CREATE`
+  payloads with discordgo's own types (`Resolved.Users` / `Resolved.Members`,
+  `ModalSubmitData()` with `Label` components carrying `TextInput.Value` and
+  `SelectMenu.Values`). Fauxcord's tests embed discordgo's marshalled modal
+  response as a fixture; it sends zero values such as `tts: false`,
+  `disabled: false` and empty `placeholder`s, which Fauxcord accepts. `Label`
+  components need a discordgo revision newer than the v0.29.0 release the
+  `compat/` harness pins, and that harness does not exercise interactions.
 
-**Supported versions**: verified with discordgo v0.29.0
+**Supported versions**: verified with discordgo v0.29.0 (REST/Gateway harness);
+modal `Label` payloads checked against a post-v0.29.0 revision
+(`v0.29.1-0.20260214123928-f43dd94faaac`)
 
 ---
 

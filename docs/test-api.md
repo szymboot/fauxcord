@@ -2676,7 +2676,9 @@ modify, emoji creation and deletion emit nothing.
 Generates a pseudo-interaction against a registered command (global or
 guild-scoped) and dispatches it to the bot via the Gateway as
 `INTERACTION_CREATE`. Responds `201` immediately with the interaction's
-info; the Gateway dispatch happens asynchronously right after.
+info; the Gateway dispatch happens asynchronously right after. The default
+interaction is a slash command (CHAT_INPUT); pass `target_id` to invoke a
+[user context command](#user-context-commands).
 
 ```bash
 curl -X POST http://localhost:3000/_test/interactions \
@@ -2691,25 +2693,106 @@ curl -X POST http://localhost:3000/_test/interactions \
 
 **Fields**
 
-| Field            | Required | Description                                                                                                 |
-| ---------------- | -------- | ----------------------------------------------------------------------------------------------------------- |
-| `application_id` | ✅       | The bot's application ID (same as its `user.id`)                                                            |
-| `command_name`   | ✅       | Name of a command already registered via the Application Commands API                                       |
-| `type`           | —        | Interaction type (default: `2`, APPLICATION_COMMAND)                                                        |
-| `guild_id`       | —        | Guild ID. When set, prefers a guild-scoped command match, falling back to a global command of the same name |
-| `channel_id`     | —        | Channel ID the interaction is bound to (needed for `type: 4`/`5` original responses and followups)          |
-| `user_id`        | —        | Invoking user ID (auto-generated if omitted)                                                                |
-| `options`        | —        | Command option values, passed through into the interaction's `data.options`                                 |
+| Field            | Required | Description                                                                                                                                                                                 |
+| ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `application_id` | ✅       | The bot's application ID (same as its `user.id`)                                                                                                                                            |
+| `command_name`   | ✅       | Name of a command already registered via the Application Commands API                                                                                                                       |
+| `command_type`   | —        | Kind of command to invoke: `1` CHAT_INPUT (default) or `2` USER (default when `target_id` is set). Only commands of this kind match, so a slash command and a user command may share a name |
+| `target_id`      | —        | USER commands only: ID of the user the command is invoked on (`data.target_id`); must be an existing user                                                                                   |
+| `type`           | —        | Interaction type (default: `2`, APPLICATION_COMMAND)                                                                                                                                        |
+| `guild_id`       | —        | Guild ID. When set, prefers a guild-scoped command match, falling back to a global command of the same name                                                                                 |
+| `channel_id`     | —        | Channel ID the interaction is bound to (needed for `type: 4`/`5` original responses and followups)                                                                                          |
+| `user_id`        | —        | Invoking user ID (auto-generated if omitted)                                                                                                                                                |
+| `options`        | —        | Command option values, passed through into the interaction's `data.options`                                                                                                                 |
 
 **Response**: `201` with the created interaction object (matches the
 Discord `Interaction` shape). `404` (`{"message": "404: Not Found", "code": 0}`)
-when `command_name` does not match any registered command in scope.
+when `command_name` does not match any registered command of the requested
+`command_type` in scope.
 `404` `{"message": "Unknown Guild", "code": 10004}` when `guild_id` is not an
 existing guild the application's bot is still in (for example after the bot
 left or was removed; the surviving guild gets no interaction),
 and `404` `{"message": "Unknown Channel", "code": 10003}` when `channel_id` does
 not exist, belongs to a different guild than `guild_id`, or belongs to a guild
 the bot left or was removed from.
+
+### User context commands
+
+Register a USER command (`type: 2`) and invoke it on a user. `target_id`
+selects the command kind, so `command_type` can be left out:
+
+```bash
+curl -X POST http://localhost:3000/api/v10/applications/111111111111111111/guilds/222222222222222222/commands \
+  -H "Authorization: Bot mytoken" -H "Content-Type: application/json" \
+  -d '{"name": "Mute", "type": 2}'
+
+curl -X POST http://localhost:3000/_test/interactions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "application_id": "111111111111111111",
+    "command_name": "Mute",
+    "target_id": "444444444444444444",
+    "guild_id": "222222222222222222",
+    "channel_id": "333333333333333333",
+    "user_id": "555555555555555555"
+  }'
+```
+
+The interaction (and the Gateway `INTERACTION_CREATE`) carries the Discord
+shape of a user command, with no `options`:
+
+```json
+{
+  "id": "…",
+  "application_id": "111111111111111111",
+  "type": 2,
+  "token": "…",
+  "version": 1,
+  "locale": "en-US",
+  "guild_id": "222222222222222222",
+  "channel_id": "333333333333333333",
+  "member": { "user": { "id": "555555555555555555" }, "roles": [] },
+  "data": {
+    "id": "<command id>",
+    "name": "Mute",
+    "type": 2,
+    "target_id": "444444444444444444",
+    "resolved": {
+      "users": {
+        "444444444444444444": {
+          "id": "444444444444444444",
+          "username": "Target"
+        }
+      },
+      "members": {
+        "444444444444444444": {
+          "roles": [],
+          "nick": null,
+          "joined_at": "…",
+          "pending": false
+        }
+      }
+    }
+  }
+}
+```
+
+`resolved.users` always holds the target. `resolved.members` is present only
+when the interaction happens in a guild and the target is a member of it; as
+in Discord it is a partial member without `user`, `deaf` and `mute`. A target
+who is not a guild member, or any interaction in a DM channel, has only
+`resolved.users`. The target is a snapshot taken when the interaction is
+created. Responses to a user command use message type `23`
+(`CONTEXT_MENU_COMMAND`).
+
+| Status | Body                                                    | Cause                                                                                       |
+| ------ | ------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `400`  | `50035` with `target_id`                                | Missing for a USER command, not a Snowflake string, or given with `command_type: 1`         |
+| `400`  | `50035` with `command_type`                             | Not `1` or `2` (MESSAGE commands, `3`, are not supported)                                   |
+| `400`  | `50035` with `type` / `options`                         | USER commands are APPLICATION_COMMAND (`2`) interactions and take no options                |
+| `404`  | `{"message": "404: Not Found", "code": 0}`              | No command of that kind and name in scope (a slash command of the same name does not match) |
+| `404`  | `Unknown User` (`10013`)                                | `target_id` is not an existing user (create one with `POST /_test/users`)                   |
+| `404`  | `Unknown Guild` (`10004`) / `Unknown Channel` (`10003`) | As for every simulated interaction                                                          |
 
 The optional `locale` field accepts the invoking user's
 [Discord locale](https://docs.discord.com/developers/reference#locales), such
@@ -2741,8 +2824,11 @@ Type-5 callbacks accept only the `EPHEMERAL` flag (`64`, or `0` for public).
 Ephemeral responses retain that visibility when edited, are available through
 the interaction token, and are excluded from channel message retrieval and
 Gateway message events. Other callback types retain the mock's existing scope;
-types 6/7/9 acknowledge without creating an original response. Token expiry,
-component rendering, and uploaded response attachments are not modeled here.
+types 6/7 acknowledge without creating an original response. Type 9 (`MODAL`)
+records the modal so a test can read and
+[submit it](#post-_testinteractionsinteractionidmodal-submit--submit-a-shown-modal).
+Token expiry, component rendering, and uploaded response attachments are not
+modeled here.
 
 ---
 
@@ -2771,19 +2857,75 @@ A known matching interaction returns `200`, with `Cache-Control: no-store`:
 }
 ```
 
-| State                                                    | `responded` | `initial_callback_type`          |
-| -------------------------------------------------------- | ----------- | -------------------------------- |
-| Pending: no callback accepted yet                        | `false`     | `null`                           |
-| Direct `CHANNEL_MESSAGE_WITH_SOURCE` accepted            | `true`      | `4`                              |
-| Deferred `DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE` accepted | `true`      | `5`                              |
-| Other accepted callback                                  | `true`      | Accepted callback type number    |
-| Acknowledged before callback recording was introduced    | `true`      | `null` (unknown historical mode) |
+| State                                                    | `responded` | `initial_callback_type`            |
+| -------------------------------------------------------- | ----------- | ---------------------------------- |
+| Pending: no callback accepted yet                        | `false`     | `null`                             |
+| Direct `CHANNEL_MESSAGE_WITH_SOURCE` accepted            | `true`      | `4`                                |
+| Deferred `DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE` accepted | `true`      | `5`                                |
+| `MODAL` accepted with modal data                         | `true`      | `9`, plus a `modal` object (below) |
+| Other accepted callback                                  | `true`      | Accepted callback type number      |
+| Acknowledged before callback recording was introduced    | `true`      | `null` (unknown historical mode)   |
 
 `initial_callback_type` is the **response callback type**, not the incoming
 interaction's `type` (normally `2` for a slash command). The mock currently accepts
 callback types `1`, `4`, `5`, `6`, `7`, `8`, `9`, `10`, `12`, and `13`; only `4` and
 `5` create originals when a channel is supplied. Recording other accepted types
 does not extend their existing acknowledgement-only behavior.
+
+When the accepted callback was a modal (`9` with `data`), the response also has
+a `modal` key holding the modal as the user would see it. The key is absent for
+every other state, so existing consumers see an unchanged shape:
+
+```json
+{
+  "interaction_id": "123456789",
+  "application_id": "111111111111111111",
+  "responded": true,
+  "initial_callback_type": 9,
+  "modal": {
+    "custom_id": "user_mute:444444444444444444",
+    "title": "Mute user",
+    "components": [
+      {
+        "type": 18,
+        "id": 1,
+        "label": "Reason",
+        "component": {
+          "type": 4,
+          "id": 2,
+          "custom_id": "reason",
+          "style": 2,
+          "required": true,
+          "max_length": 500
+        }
+      },
+      {
+        "type": 18,
+        "id": 3,
+        "label": "Visibility",
+        "component": {
+          "type": 3,
+          "id": 4,
+          "custom_id": "visibility",
+          "options": [
+            { "label": "Public", "value": "public", "default": true },
+            { "label": "Private", "value": "private" }
+          ],
+          "min_values": 1,
+          "max_values": 1,
+          "required": true
+        }
+      }
+    ]
+  }
+}
+```
+
+The modal is normalized: defaults are filled in (`required: true`,
+`min_values`/`max_values: 1`) and missing component `id`s are assigned
+sequentially from `1` in document order, parents before children, skipping ids
+already used, as Discord does. A type-9 callback without `data` keeps its old
+acknowledgement-only behavior and records no `modal`.
 
 A harness can poll while `responded` is `false`, then distinguish direct `4` from
 deferred `5`. Any other type, or `true` with `null`, must be handled as a separate
@@ -2810,6 +2952,160 @@ mismatch of interaction ID, application ID, or token return the same `404`
 error bodies. Keep the token out of URLs, diagnostic output, and logs, including
 HTTP header dumps. Tokens follow the existing interaction lifetime (expiry is
 not modeled). This Fauxcord-specific route has no Discord OpenAPI manifest entry.
+
+---
+
+## Modal callbacks (`type: 9`)
+
+A bot answers a command (or component) interaction with
+`POST /interactions/:id/:token/callback` and `{"type": 9, "data": {…}}` to show
+a modal. `data` is validated like Discord; failures return `400` with code
+`50035`, field paths prefixed `data.` (for example
+`data.components.1.component.options`), and **do not** acknowledge the
+interaction, so the bot can retry. Unknown `data` fields, such as the `flags`
+(`IS_COMPONENTS_V2`, `32768`) or `tts`/`content`/`embeds: null` zero values
+that libraries like DiscordGo send, are accepted and ignored.
+
+| Field        | Rule                                       |
+| ------------ | ------------------------------------------ |
+| `custom_id`  | Required string, 1–100 characters          |
+| `title`      | Required string, 1–45 characters           |
+| `components` | Required array of 1–5 top-level components |
+
+Supported components (every other type, such as Text Display `10`, Container
+`17`, User/Role/Mentionable/Channel Select `5`–`8`, File Upload `19` or radio
+and checkbox groups, is **rejected** with an explicit `Component type N is not
+supported in modals here` error on its `type` path):
+
+| Component                               | Rules                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Label `18` (top level)                  | `label` required, 1–45 characters; `description` ≤ 100; `component` required and one of the inputs below                                                                                                                                                                                                                                                     |
+| Action Row `1` (top level, legacy)      | Exactly one Text Input; the input needs its own `label` (1–45)                                                                                                                                                                                                                                                                                               |
+| Text Input `4`                          | `custom_id` required (1–100); `style` `1` short or `2` paragraph; `min_length` 0–4000; `max_length` 1–4000 and ≥ `min_length`; `required` (default `true`); `placeholder` ≤ 100; pre-filled `value` ≤ 4000; `label` ≤ 45                                                                                                                                     |
+| String Select `3` (inside a Label only) | `custom_id` required; `options` 1–25, each with a `label` and unique `value` (1–100), optional `description`, `emoji`, `default`; `min_values` 0–25 (default `1`; `0` only with `required: false`); `max_values` 1–25 (default `1`); `min_values` ≤ `max_values` after defaults and ≤ the number of options; `required` (default `true`); `placeholder` ≤ 150; at most `max_values` options marked `default`; `disabled` must be absent or `false` |
+
+Input `custom_id`s must be unique across the whole modal, and explicit
+non-zero component `id`s must be unique. The modal is stored with the
+interaction and read back through the
+[observation route](#get-_testinteractionsinteractionidcallback--observe-the-initial-callback).
+Modals are refused (`400`, `type` field error) for interactions that cannot
+open one: only application-command and message-component interactions can, so
+a MODAL_SUBMIT interaction cannot be answered with another modal.
+
+---
+
+## `POST /_test/interactions/:interactionId/modal-submit` — Submit a shown modal
+
+Simulates the user filling in and submitting the modal the bot showed for an
+interaction. It creates a **new** native `INTERACTION_CREATE` of type `5`
+(MODAL_SUBMIT) for the same application, user, guild, channel and locale, and
+dispatches it to the bot like any other interaction. Like the observation
+route it is addressed by the interaction ID, the owning `application_id` (in
+the body) and the interaction token (`X-Interaction-Token` header, never in the
+URL):
+
+```bash
+curl -X POST http://localhost:3000/_test/interactions/123456789/modal-submit \
+  -H "Content-Type: application/json" \
+  -H "X-Interaction-Token: <interaction token>" \
+  -d '{
+    "application_id": "111111111111111111",
+    "custom_id": "user_mute:444444444444444444",
+    "values": {
+      "reason": "Spam",
+      "visibility": ["private"]
+    }
+  }'
+```
+
+| Field            | Required | Description                                                                                                                            |
+| ---------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `application_id` | ✅       | Application that owns the interaction                                                                                                  |
+| `custom_id`      | ✅       | Must equal the `custom_id` of the shown modal                                                                                          |
+| `values`         | —        | Submitted values keyed by the **input** `custom_id`: a string for a Text Input, an array of option `value` strings for a String Select |
+
+Inputs left out of `values` submit what Discord's client would for an
+untouched field: a Text Input its pre-filled `value` (otherwise `""`), a
+String Select its `default` options (otherwise `[]`). Values are checked
+against the modal: unknown keys are rejected; text must satisfy `required`
+(non-empty), `min_length`/`max_length` (counted in characters; an optional
+empty input is always accepted) and may not contain line breaks in a short
+input; select values must be known, unique options, within `min_values` and
+`max_values`, and an empty selection is only accepted when `required` is
+`false`.
+
+**Response**: `201` with the created interaction (`Cache-Control: no-store`),
+identical to the Gateway payload (for the modal in the observation example above):
+
+```json
+{
+  "id": "987654321",
+  "application_id": "111111111111111111",
+  "type": 5,
+  "token": "…",
+  "version": 1,
+  "locale": "en-US",
+  "guild_id": "222222222222222222",
+  "channel_id": "333333333333333333",
+  "member": { "user": { "id": "555555555555555555" } },
+  "data": {
+    "custom_id": "user_mute:444444444444444444",
+    "components": [
+      {
+        "type": 18,
+        "id": 1,
+        "component": {
+          "type": 4,
+          "id": 2,
+          "custom_id": "reason",
+          "value": "Spam"
+        }
+      },
+      {
+        "type": 18,
+        "id": 3,
+        "component": {
+          "type": 3,
+          "id": 4,
+          "custom_id": "visibility",
+          "values": ["private"]
+        }
+      }
+    ]
+  }
+}
+```
+
+The interaction's `user_id` must still identify an existing user (a guild
+member in guilds), so create the invoking user with `POST /_test/users` and
+pass it as `user_id` when starting the interaction.
+
+Label-wrapped inputs are submitted as `{type: 18, id, component: {…}}` with
+the input carrying `value` (Text Input) or `values` (String Select); legacy
+Action Row inputs as `{type: 1, id, components: […]}`. Component `id`s are
+those of the shown modal. The submission is a fresh interaction with its own
+ID and token, no `name` and no `target_id`. The bot answers it exactly like a
+command interaction: callback types `4` and `5` (including `EPHEMERAL`),
+`@original` edits and deletion, followups, and the
+[callback observation](#get-_testinteractionsinteractionidcallback--observe-the-initial-callback)
+of the submission itself. Responses to a submission are messages of type `0`.
+
+**Repeated submissions.** A shown modal is not consumed: every call creates
+another independent MODAL_SUBMIT interaction, mirroring Discord issuing a new
+interaction per submit (and letting a test resubmit after the bot rejected the
+first attempt). The original interaction's observation is unchanged.
+
+| Status | Body                                                    | Cause                                                                                                          |
+| ------ | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `400`  | `{"message": "400: Bad Request", "code": 0}`            | Missing `application_id` or `X-Interaction-Token`                                                              |
+| `400`  | `50035` with `custom_id` / `values`                     | Body shape invalid, or `custom_id` does not match the shown modal                                              |
+| `400`  | `50035` with `interaction_id`                           | The interaction's accepted callback was not a modal (pending, another type, or a data-less type `9`)           |
+| `400`  | `50035` with `values.<custom_id>`                       | Unknown component, wrong type, or a violated required/length/option/count constraint; nothing is created       |
+| `404`  | `{"message": "404: Not Found", "code": 0}`              | Unknown interaction ID, or a mismatched application ID or token                                                |
+| `404`  | `Unknown Guild` (`10004`) / `Unknown Channel` (`10003`) | The bot left or lost the guild, or the channel was deleted, since the interaction began; nothing is dispatched |
+
+Reset (`POST /_test/reset`) and setup deletion remove interactions and their
+modals. This Fauxcord-specific route has no Discord OpenAPI manifest entry.
 
 ---
 

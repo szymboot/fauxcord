@@ -1433,3 +1433,70 @@ export async function seedDisposableUploadedFile(
     uploadDirectory,
   }
 }
+
+/**
+ * Builds the `data` of a MODAL callback shaped like a DiscordGo bot's
+ * "mute user" modal: Label-wrapped paragraph and short Text Inputs plus two
+ * String Selects that each have a default option, with components v2 set.
+ * @param targetId - User the modal acts on, embedded in the modal `custom_id`
+ * @returns Callback data to send with `type: 9`
+ */
+export function buildMuteModalData(targetId: string): Record<string, unknown> {
+  return {
+    custom_id: `user_mute:${targetId}`,
+    title: 'Mute user',
+    flags: 32_768,
+    components: [
+      {
+        type: 18,
+        label: 'Reason',
+        component: {
+          type: 4,
+          custom_id: 'reason',
+          style: 2,
+          required: true,
+          max_length: 500,
+        },
+      },
+      {
+        type: 18,
+        label: 'Duration',
+        description: 'For example 1h or 7d',
+        component: {
+          type: 4,
+          custom_id: 'duration',
+          style: 1,
+          required: false,
+          placeholder: '1h',
+        },
+      },
+      {
+        type: 18,
+        label: 'Mute type',
+        component: {
+          type: 3,
+          custom_id: 'mute_type',
+          required: true,
+          disabled: false,
+          options: [
+            { label: 'Text', value: 'text', default: true },
+            { label: 'Voice', value: 'voice' },
+          ],
+        },
+      },
+      {
+        type: 18,
+        label: 'Visibility',
+        component: {
+          type: 3,
+          custom_id: 'visibility',
+          required: true,
+          options: [
+            { label: 'Public', value: 'public', default: true },
+            { label: 'Private', value: 'private' },
+          ],
+        },
+      },
+    ],
+  }
+}

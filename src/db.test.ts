@@ -966,6 +966,40 @@ describe('application commands / interactions tables', () => {
     }
   })
 
+  it('adds the modal column to legacy interactions without touching their callbacks', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-interaction-modal-'))
+    const dbPath = path.join(dir, 'legacy.db')
+    try {
+      const legacy = initializeDatabase(dbPath)
+      legacy.exec('ALTER TABLE interactions DROP COLUMN modal_json')
+      legacy
+        .prepare(
+          `INSERT INTO interactions (id, application_id, token, type, user_id, responded, initial_callback_type)
+         VALUES ('shown', 'app', 'shown-token', 2, 'user', 1, 9)`
+        )
+        .run()
+      legacy.close()
+
+      const migrated = initializeDatabase(dbPath)
+      expect(
+        getInteractionCallbackObservation(
+          migrated,
+          'shown',
+          'app',
+          'shown-token'
+        )
+      ).toEqual({
+        interaction_id: 'shown',
+        application_id: 'app',
+        responded: true,
+        initial_callback_type: 9,
+      })
+      migrated.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('migrates without inventing historical types and durably records new callbacks', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-callback-type-'))
     const dbPath = path.join(dir, 'legacy.db')

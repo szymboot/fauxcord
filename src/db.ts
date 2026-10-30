@@ -224,6 +224,19 @@ function migrateInteractionCallbackType(db: Database): void {
   }
 }
 
+/**
+ * Adds the normalized modal a bot showed through a type-9 callback.
+ * @param db - Database instance
+ */
+function migrateInteractionModal(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(interactions)').all() as {
+    name: string
+  }[]
+  if (columns.every((column) => column.name !== 'modal_json')) {
+    db.exec('ALTER TABLE interactions ADD COLUMN modal_json TEXT')
+  }
+}
+
 /** Preserves legacy controls while admitting bot-scoped user route selectors. */
 function migrateRestFaultSelectors(db: Database): void {
   db.transaction(() => {
@@ -778,6 +791,7 @@ export function initializeDatabase(dbPath: string): Database {
       responded                   INTEGER NOT NULL DEFAULT 0,
       initial_callback_type       INTEGER,
       initial_response_message_id TEXT,
+      modal_json                  TEXT,
       created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_interactions_app ON interactions(application_id);
@@ -1165,6 +1179,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateGuildAfkColumns(db)
   migrateInteractionLocale(db)
   migrateInteractionCallbackType(db)
+  migrateInteractionModal(db)
   migrateRestFaultSelectors(db)
   migrateReactionTypes(db)
   recoverRestFaultOutcomes(db)
