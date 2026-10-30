@@ -2997,6 +2997,10 @@ identical to the Gateway payload (for the modal in the observation example above
 }
 ```
 
+The interaction's `user_id` must still identify an existing user (a guild
+member in guilds), so create the invoking user with `POST /_test/users` and
+pass it as `user_id` when starting the interaction.
+
 Label-wrapped inputs are submitted as `{type: 18, id, component: {…}}` with
 the input carrying `value` (Text Input) or `values` (String Select); legacy
 Action Row inputs as `{type: 1, id, components: […]}`. Component `id`s are

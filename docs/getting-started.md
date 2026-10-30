@@ -318,7 +318,7 @@ curl -X POST http://localhost:3000/_test/interactions \
   -H "Content-Type: application/json" \
   -d '{"application_id": "111111111111111111", "command_name": "Mute",
        "target_id": "444444444444444444", "guild_id": "222222222222222222",
-       "channel_id": "333333333333333333"}'
+       "channel_id": "333333333333333333", "user_id": "555555555555555555"}'
 
 curl -X POST http://localhost:3000/_test/interactions/<interaction_id>/modal-submit \
   -H "Content-Type: application/json" -H "X-Interaction-Token: <interaction_token>" \
@@ -326,7 +326,10 @@ curl -X POST http://localhost:3000/_test/interactions/<interaction_id>/modal-sub
        "custom_id": "user_mute:444444444444444444", "values": {"reason": "Spam"}}'
 ```
 
-See [test-api.md](./test-api.md#user-context-commands) for payloads, supported
+`target_id` and `user_id` must be existing users (create them with
+`POST /_test/users`); in a guild the invoking `user_id` must also be a member,
+otherwise the submission returns `404`. See
+[test-api.md](./test-api.md#user-context-commands) for payloads, supported
 modal components, and validation errors.
 
 ---
