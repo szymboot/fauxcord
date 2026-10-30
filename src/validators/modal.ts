@@ -317,7 +317,7 @@ function stringSelect(
       'min_values cannot exceed max_values.'
     )
   }
-  if ((minValues ?? 1) > options.length) {
+  if (options.length > 0 && (minValues ?? 1) > options.length) {
     invalid(
       state.errors,
       `${path}.min_values`,

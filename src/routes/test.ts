@@ -906,6 +906,19 @@ export function createTestRoutes(
           404
         )
       }
+      case 'unknown_member': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member', 404)
+            .body,
+          404
+        )
+      }
+      case 'unknown_user': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404).body,
+          404
+        )
+      }
       default: {
         return c.json({ message: '404: Not Found', code: 0 }, 404)
       }

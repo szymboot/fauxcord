@@ -11,6 +11,8 @@ import { generateSnowflake } from '../snowflake'
 import type { ValidationErrors } from '../validators/common'
 import { buildModalSubmission, type ModalObject } from '../validators/modal'
 import { createInteraction, type InteractionObject } from './interactions'
+import { getGuildMember } from './guild-members'
+import { getUser } from './users'
 import { resolveInteractionScope } from './interaction-scope'
 
 /** Request body accepted by POST /_test/interactions/:id/modal-submit */
@@ -26,7 +28,12 @@ export type SubmitModalResult =
   | { ok: true; interaction: InteractionObject }
   | {
       ok: false
-      reason: 'not_found' | 'unknown_guild' | 'unknown_channel'
+      reason:
+        | 'not_found'
+        | 'unknown_guild'
+        | 'unknown_channel'
+        | 'unknown_member'
+        | 'unknown_user'
     }
   | { ok: false; reason: 'invalid'; errors: ValidationErrors }
 
@@ -36,7 +43,9 @@ export type SubmitModalResult =
  * INTERACTION_CREATE. The shown modal is not consumed: submitting again
  * creates another independent interaction, as Discord does per submit. The
  * guild and channel gating of interaction creation applies again, so a bot
- * removed from the guild since the modal was shown receives nothing.
+ * removed from the guild since the modal was shown receives nothing, and
+ * neither does one whose invoking user (a guild member, or a user in a DM)
+ * no longer exists, since the payload could not carry their identity.
  * @param db - Database
  * @param interactionId - Interaction the modal was shown for
  * @param applicationId - Application that owns the interaction
@@ -91,6 +100,13 @@ export function submitTestModal(
     row.channel_id ?? undefined
   )
   if (!scope.ok) return scope
+  if (row.guild_id) {
+    if (!getGuildMember(db, row.guild_id, row.user_id)) {
+      return { ok: false, reason: 'unknown_member' }
+    }
+  } else if (!getUser(db, row.user_id)) {
+    return { ok: false, reason: 'unknown_user' }
+  }
 
   const modal = JSON.parse(row.modal_json) as ModalObject
   const submission = buildModalSubmission(modal, request.values ?? {})

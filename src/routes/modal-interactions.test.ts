@@ -476,6 +476,25 @@ describe('modal callbacks and test-control submissions', () => {
       expect(count).toBe(0)
     })
 
+    it('returns 404 and creates nothing once the invoking member left the guild', async () => {
+      await showModal()
+      context.db
+        .prepare('DELETE FROM guild_members WHERE guild_id = ? AND user_id = ?')
+        .run(guildId, caller)
+      const response = await submit({
+        custom_id: `user_mute:${target}`,
+        values,
+      })
+      expect(response.status).toBe(404)
+      expect(await json(response)).toMatchObject({ code: 10_007 })
+      expect(
+        context.db
+          .prepare('SELECT COUNT(*) FROM interactions WHERE type = 5')
+          .pluck()
+          .get()
+      ).toBe(0)
+    })
+
     it('returns 404 and creates nothing once the bot left the guild or the channel is gone', async () => {
       await showModal()
       context.db.prepare('DELETE FROM channels WHERE id = ?').run(channelId)
