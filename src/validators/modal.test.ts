@@ -213,6 +213,16 @@ describe('parseModal', () => {
     ['no options', { options: [] }, 'components.0.component.options'],
     ['disabled', { disabled: true }, 'components.0.component.disabled'],
     [
+      'min above an omitted (default 1) max',
+      { min_values: 2 },
+      'components.0.component.min_values',
+    ],
+    [
+      'min 0 while required',
+      { min_values: 0 },
+      'components.0.component.min_values',
+    ],
+    [
       'min above max',
       { min_values: 2, max_values: 1 },
       'components.0.component.min_values',

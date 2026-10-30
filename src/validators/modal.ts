@@ -309,11 +309,8 @@ function stringSelect(
     25,
     state
   )
-  if (
-    minValues !== undefined &&
-    maxValues !== undefined &&
-    minValues > maxValues
-  ) {
+  // Compare the effective bounds: both default to 1 when omitted.
+  if ((minValues ?? 1) > (maxValues ?? 1)) {
     invalid(
       state.errors,
       `${path}.min_values`,
@@ -321,6 +318,13 @@ function stringSelect(
     )
   }
   const required = bool(value.required, `${path}.required`, state)
+  if (minValues === 0 && required !== false) {
+    invalid(
+      state.errors,
+      `${path}.min_values`,
+      'min_values must be omitted or at least 1 when required is omitted or true.'
+    )
+  }
   if (value.disabled != null && value.disabled !== false) {
     invalid(
       state.errors,
