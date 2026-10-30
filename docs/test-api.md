@@ -1026,6 +1026,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `PUT`    | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role assignment        |
 | `GET`    | `/guilds/{guildId}/audit-logs`                      | Deletion audit-log reads    |
 | `GET`    | `/guilds/{guildId}/members/{userId}`                | Member reads                |
+| `GET`    | `/guilds/{guildId}/voice-states/{userId}`           | Member voice state reads    |
 | `GET`    | `/users/{userId}`                                   | Global user reads           |
 | `GET`    | `/guilds/{guildId}/members`                         | A specific member page      |
 | `GET`    | `/guilds/{guildId}/bans`                            | A specific ban page         |
@@ -1225,6 +1226,40 @@ the same User target; otherwise serialize them. An active GET control for the
 same method/path, normalized query (for list GETs), and owning Bot returns `409`, including when another Guild of
 that Bot is supplied. No all-GET or wildcard selector is supported.
 
+Voice state reads (`GET /guilds/{guildId}/voice-states/{userId}`, Get User Voice
+State) follow the Guild GET rules above, like member reads: the Guild must exist
+(`404` otherwise), `guild_id` is optional and must equal the path's Guild, `query`
+and `recipient_id` return `400`, and only the Guild's owning Bot consumes the
+control. The target User need not be a member or be connected, so a fault can be
+prearmed before the member joins. A selected read returns the configured
+status/code/message before the lookup and changes nothing; the stored voice state
+is untouched. After exhaustion the normal read applies: a stored state returns
+`200`, a member without one `404` / `10065` (Unknown Voice State), and a
+non-member `404` / `10007` (Unknown Member). This selector covers only the `GET`
+route; `PATCH` voice-state requests (including the bot's own
+`PATCH /guilds/{guildId}/voice-states/@me`) neither consume nor can be selected
+by it.
+
+The selector stays numeric: `path` with `@me` or `%40me` returns `400`. The native
+route resolves `@me` (and the percent-encoded `%40me`) to the calling Bot's own
+user, so a control armed for that Bot's **numeric** user ID is also consumed by
+`GET /guilds/{guildId}/voice-states/@me` and `/%40me`, with every request prefix.
+It is never consumed by `@me` reads of another Bot or by reads of a different
+User ID. For example, to fail a bot's read of a connected member's voice state:
+
+```json
+{
+  "method": "GET",
+  "path": "/guilds/222222222222222222/voice-states/555555555555555555",
+  "status": 500,
+  "code": 0,
+  "message": "Internal Server Error",
+  "times": 1
+}
+```
+
+`src/rest-voice-state-read-faults.test.ts` covers this selector.
+
 DM channel creation uses the same owning-Bot and cleanup scope as global user
 GETs. Set `method` to `POST`, `path` to `/users/@me/channels`, and **require** a
 numeric string `guild_id` of an existing Guild. Its owning Bot is the only caller
@@ -1286,8 +1321,8 @@ two-field Discord error body when `mode` is omitted, including legacy status `42
 Use the explicit `rate_limit` mode below for retry semantics.
 
 All three request prefixes (`/api/v10`, `/api`, and bare) match the same control.
-Legacy selectors (all mutations, audit logs, individual members and global users)
-ignore request query parameters. In particular, an audit-log fault selects the exact Guild's GET route
+Legacy selectors (all mutations, audit logs, individual members, voice states and
+global users) ignore request query parameters. In particular, an audit-log fault selects the exact Guild's GET route
 regardless of `action_type`, `limit`, `user_id`, `before`, `after`, parameter
 ordering, or omitted parameters. These queries neither create separate targets
 nor expand the path selector to other Guilds or routes. Queries in the configured

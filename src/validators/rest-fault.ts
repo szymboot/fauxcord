@@ -203,7 +203,7 @@ export function validateRestFault(
     return undefined
   const guildRead =
     body.method === 'GET' &&
-    /^\/guilds\/\d{1,20}\/(?:audit-logs|members|bans|members\/\d{1,20})$/.test(
+    /^\/guilds\/\d{1,20}\/(?:audit-logs|members|bans|(?:members|voice-states)\/\d{1,20})$/.test(
       body.path
     )
   const pageRead = body.method === 'GET' && isRestFaultPagePath(body.path)
