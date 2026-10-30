@@ -50,6 +50,22 @@ export function createInteractionRoutes(db: Database, baseUrl: string): Hono {
           )
           return c.json(err.body, 404)
         }
+        if (result.reason === 'modal_not_allowed') {
+          return c.json(
+            validationError({
+              type: {
+                _errors: [
+                  {
+                    code: 'BASE_TYPE_CHOICES',
+                    message:
+                      'A modal can only answer an application command or message component interaction.',
+                  },
+                ],
+              },
+            }).body,
+            400
+          )
+        }
         const err = discordError(
           DiscordErrorCode.INTERACTION_ALREADY_ACKNOWLEDGED,
           'Interaction has already been acknowledged',

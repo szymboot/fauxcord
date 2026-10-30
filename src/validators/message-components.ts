@@ -21,12 +21,12 @@ export type MessageComponents = APIActionRowComponent<
 const LINK_BUTTON_STYLE: APIButtonComponentWithURL['style'] = 5
 
 /** Checks an untrusted component or emoji object. */
-function isObject(value: unknown): value is Record<string, unknown> {
+export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** Adds an invalid component field error using the shared dotted paths. */
-function invalid(
+export function invalid(
   errors: ValidationErrors,
   path: string,
   message: string
@@ -35,7 +35,7 @@ function invalid(
 }
 
 /** Validates a component string without trimming developer identifiers. */
-function text(
+export function text(
   value: unknown,
   path: string,
   maximum: number,
@@ -59,7 +59,11 @@ function text(
 }
 
 /** Validates the emoji shape; no live Discord emoji lookup is performed. */
-function emoji(value: unknown, path: string, errors: ValidationErrors): void {
+export function emoji(
+  value: unknown,
+  path: string,
+  errors: ValidationErrors
+): void {
   if (value == null) return
   if (!isObject(value)) {
     errors[path] = { _errors: [typeError('object')] }

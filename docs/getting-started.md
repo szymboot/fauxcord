@@ -304,6 +304,31 @@ curl -X POST "http://localhost:3000/webhooks/111111111111111111/<interaction_tok
 See [test-api.md](./test-api.md) for the full `/_test/interactions` request
 shape.
 
+### User commands and modals
+
+Register a USER command (`"type": 2`) and pass the user it is invoked on as
+`target_id`; the interaction carries `data.target_id` and `data.resolved`. When
+the bot answers with a modal (callback type `9`), read it back from
+`GET /_test/interactions/<interaction_id>/callback` and submit it with
+`POST /_test/interactions/<interaction_id>/modal-submit`, which dispatches a
+native `MODAL_SUBMIT` interaction the bot answers like any other:
+
+```bash
+curl -X POST http://localhost:3000/_test/interactions \
+  -H "Content-Type: application/json" \
+  -d '{"application_id": "111111111111111111", "command_name": "Mute",
+       "target_id": "444444444444444444", "guild_id": "222222222222222222",
+       "channel_id": "333333333333333333"}'
+
+curl -X POST http://localhost:3000/_test/interactions/<interaction_id>/modal-submit \
+  -H "Content-Type: application/json" -H "X-Interaction-Token: <interaction_token>" \
+  -d '{"application_id": "111111111111111111",
+       "custom_id": "user_mute:444444444444444444", "values": {"reason": "Spam"}}'
+```
+
+See [test-api.md](./test-api.md#user-context-commands) for payloads, supported
+modal components, and validation errors.
+
 ---
 
 ### OAuth command permission overrides
