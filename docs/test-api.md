@@ -1024,6 +1024,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `PUT`    | `/guilds/{guildId}/bans/{userId}`                   | Ban creation                |
 | `PATCH`  | `/guilds/{guildId}/members/{userId}`                | Member update / mute        |
 | `PUT`    | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role assignment        |
+| `DELETE` | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role removal           |
 | `GET`    | `/guilds/{guildId}/audit-logs`                      | Deletion audit-log reads    |
 | `GET`    | `/guilds/{guildId}/members/{userId}`                | Member reads                |
 | `GET`    | `/users/{userId}`                                   | Global user reads           |
@@ -1145,6 +1146,49 @@ mode-omitted controls follow the Guild's current owning Bot, as existing scoped
 user/DM controls do. These failures model errors **before** mutation, not an
 ambiguous failure after a successful creation. Coverage is in
 `src/rest-guild-channel-create-faults.test.ts`, using full `buildApp` routes and
+real HTTP/Gateway sockets.
+
+Member role removal (`DELETE /guilds/{guildId}/members/{userId}/roles/{roleId}`)
+mirrors the `PUT` role assignment selector. For example, fail the removal of a
+mute role during a manual unmute, an expiry tick, or a mute-type rollback:
+
+```json
+{
+  "method": "DELETE",
+  "path": "/guilds/222222222222222222/members/555555555555555555/roles/777777777777777777",
+  "status": 500,
+  "code": 0,
+  "message": "Internal Server Error",
+  "times": 1
+}
+```
+
+The Guild, Member, and Role IDs are concrete numeric strings of 1–20 digits
+and select that exact request; other roles, members, Guilds, methods
+(including `PUT` on the same path and the unsupported member kick
+`DELETE /guilds/{guildId}/members/{userId}`) and paths run their ordinary
+routes without consuming the control. The Guild must exist (`404` otherwise);
+the Member and Role need not exist yet, so the control can be prearmed. Query
+strings, wildcards, trailing slashes, and the `query` and `recipient_id` fields
+are rejected with `400`, and `guild_id` is ignored in favor of the path's Guild.
+Like the `PUT` selector, a mode-omitted control is consumed by any authenticated
+caller issuing the exact request, while explicit `rate_limit`, `delay`, and
+`disconnect` modes bind the Guild's owning Bot and use the existing bounds,
+expiry, and outcome counters. One active control per exact method/path is
+allowed (`409` otherwise, including across modes), and it is independent of the
+`PUT` control for the same path.
+
+Every selected failure runs before native Guild/Role/Member validation and
+removes **no role assignment** and emits **no `GUILD_MEMBER_UPDATE`**. Each
+retry across `/api/v10`, `/api`, and bare prefixes consumes one attempt (`times`
+budget). After exhaustion, cancellation, or expiry, the request reaches the
+native route and its ordinary validation. For an existing Guild, Member, and
+assignable Role it returns `204`, removes the role, and dispatches
+`GUILD_MEMBER_UPDATE` once; a prearmed nonexistent Role or Member still returns
+the native `404`, and `@everyone` returns `400`, with no event. Consumption evidence remains inspectable after
+exhaustion until the control is deleted; Guild/setup deletion and global or
+Bot-scoped reset remove active and exhausted controls. Coverage is in
+`src/rest-member-role-removal-faults.test.ts`, using full `buildApp` routes and
 real HTTP/Gateway sockets.
 
 To fail a message edit (including a shop category or item message refresh in
