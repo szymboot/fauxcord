@@ -11,9 +11,18 @@ export function createRestFaultMiddleware(
 ): MiddlewareHandler<AppEnv> {
   const runtime = getRestFaultRuntime(db)
   return async (c, next) => {
-    const path = c.req.path
+    let path = c.req.path
       .replace(/^\/api(?:\/v10)?(?=\/)/, '')
       .replace(/^\/users\/%40me\/channels$/, '/users/@me/channels')
+    const bot = c.get('bot')
+    // The native voice-state read resolves `@me` (or `%40me`, which decodeURI
+    // keeps) to the calling bot, so the fault selector for that bot's numeric
+    // user ID is consumed by either spelling.
+    if (c.req.method === 'GET' && bot?.user_id)
+      path = path.replace(
+        /^(\/guilds\/\d{1,20}\/voice-states)\/(?:@|%40)me$/,
+        (_, prefix: string) => `${prefix}/${bot.user_id}`
+      )
     let recipientId: string | undefined
     if (path === '/users/@me/channels' && c.req.method === 'POST') {
       const payload: unknown = await c.req.raw
