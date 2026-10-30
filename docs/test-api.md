@@ -2903,7 +2903,7 @@ supported in modals here` error on its `type` path):
 | Label `18` (top level)                  | `label` required, 1–45 characters; `description` ≤ 100; `component` required and one of the inputs below                                                                                                                                                                                                                                                     |
 | Action Row `1` (top level, legacy)      | Exactly one Text Input; the input needs its own `label` (1–45)                                                                                                                                                                                                                                                                                               |
 | Text Input `4`                          | `custom_id` required (1–100); `style` `1` short or `2` paragraph; `min_length` 0–4000; `max_length` 1–4000 and ≥ `min_length`; `required` (default `true`); `placeholder` ≤ 100; pre-filled `value` ≤ 4000; `label` ≤ 45                                                                                                                                     |
-| String Select `3` (inside a Label only) | `custom_id` required; `options` 1–25, each with a `label` and unique `value` (1–100), optional `description`, `emoji`, `default`; `min_values` 0–25 (default `1`; `0` only with `required: false`); `max_values` 1–25 (default `1`); `min_values` ≤ `max_values` after defaults; `required` (default `true`); `placeholder` ≤ 150; at most `max_values` options marked `default`; `disabled` must be absent or `false` |
+| String Select `3` (inside a Label only) | `custom_id` required; `options` 1–25, each with a `label` and unique `value` (1–100), optional `description`, `emoji`, `default`; `min_values` 0–25 (default `1`; `0` only with `required: false`); `max_values` 1–25 (default `1`); `min_values` ≤ `max_values` after defaults and ≤ the number of options; `required` (default `true`); `placeholder` ≤ 150; at most `max_values` options marked `default`; `disabled` must be absent or `false` |
 
 Input `custom_id`s must be unique across the whole modal, and explicit
 non-zero component `id`s must be unique. The modal is stored with the
@@ -2965,7 +2965,7 @@ identical to the Gateway payload (for the modal in the observation example above
   "type": 5,
   "token": "…",
   "version": 1,
-  "locale": "pl",
+  "locale": "en-US",
   "guild_id": "222222222222222222",
   "channel_id": "333333333333333333",
   "member": { "user": { "id": "555555555555555555" } },

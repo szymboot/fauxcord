@@ -218,6 +218,11 @@ describe('parseModal', () => {
       'components.0.component.min_values',
     ],
     [
+      'min above the option count',
+      { min_values: 2, max_values: 2 },
+      'components.0.component.min_values',
+    ],
+    [
       'min 0 while required',
       { min_values: 0 },
       'components.0.component.min_values',
