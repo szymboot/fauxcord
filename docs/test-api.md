@@ -1015,6 +1015,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | Method   | Path                                                | Use                         |
 | -------- | --------------------------------------------------- | --------------------------- |
 | `POST`   | `/channels/{channelId}/messages`                    | Message / edit-log sending  |
+| `POST`   | `/channels/{channelId}/invites`                     | Invite creation             |
 | `POST`   | `/users/@me/channels`                               | DM channel creation         |
 | `PATCH`  | `/channels/{channelId}`                             | Guild channel edit          |
 | `POST`   | `/guilds/{guildId}/channels`                        | Guild channel creation      |
@@ -1026,6 +1027,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `PUT`    | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role assignment        |
 | `DELETE` | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role removal           |
 | `GET`    | `/guilds/{guildId}/audit-logs`                      | Deletion audit-log reads    |
+| `GET`    | `/guilds/{guildId}/invites`                         | Guild invite listing        |
 | `GET`    | `/guilds/{guildId}/members/{userId}`                | Member reads                |
 | `GET`    | `/guilds/{guildId}/voice-states/{userId}`           | Member voice state reads    |
 | `GET`    | `/users/{userId}`                                   | Global user reads           |
@@ -1041,6 +1043,28 @@ need to exist yet, allowing prearming before message injection. Existing
 Channel/Guild `POST`/`DELETE`/`PUT`/`PATCH` faults, except Guild channel creation
 and Channel editing below, apply to any authenticated caller issuing that exact
 request, regardless of token or body.
+
+Invite faults cover cached-invite checks and invite creation for unban and
+ban-expiry DMs. `GET /guilds/{guildId}/invites` follows the Guild GET scope rules:
+the Guild must exist, and optional `guild_id` must exactly match the path. Only
+its owning Bot consumes the control. This is not a paginated page read;
+`query` is rejected (`400`), and native request query parameters are ignored.
+`POST /channels/{channelId}/invites` derives its Guild from the existing Channel;
+unknown Channels, DMs/group DMs, or Channels without an existing Guild return
+`404` when arming. `guild_id` is rejected (`400`). Both selectors reject
+`recipient_id`, and invite creation also rejects `query`.
+
+Mode-omitted invite creation follows message sending: any authenticated caller
+issuing the exact request consumes it. Explicit `rate_limit`, `delay`, and
+`disconnect` modes bind the owning Bot for both invite selectors and use the
+same bounds, expiry, outcome counters, conflicts, cancellation, and reset
+semantics below. Every selected failure runs before the native route: creation
+creates **no Invite**, and listing changes nothing. Delays never resume the
+native operation, including after cancellation or expiry. Retries after
+exhaustion/removal/expiry run the ordinary invite routes and validation.
+`times`, `remaining`, and `consumed` track attempts across all three API prefixes;
+inspection retains exhausted evidence until cancellation or cleanup. Coverage
+is in `src/rest-invite-faults.test.ts`.
 
 Channel editing (`PATCH /channels/{channelId}`) derives its Guild and registered
 owning Bot from the **existing Channel**. Do not supply `guild_id`, `query`, or
