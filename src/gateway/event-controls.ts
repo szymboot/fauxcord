@@ -10,6 +10,8 @@ import { sendReconnect } from './server'
 /** Native dispatches supported by the narrow test capture control. */
 export const CONTROL_EVENTS = [
   'GUILD_MEMBER_UPDATE',
+  'GUILD_BAN_ADD',
+  'GUILD_BAN_REMOVE',
   'MESSAGE_CREATE',
   'MESSAGE_DELETE',
   'MESSAGE_DELETE_BULK',
@@ -21,11 +23,13 @@ export const CONTROL_EVENTS = [
 ] as const
 
 /**
- * Dispatches that describe one guild member and can be narrowed by
+ * Dispatches that describe one subject user and can be narrowed by
  * `member_id`, mapped to the payload field carrying that member's user ID.
  */
 export const MEMBER_SCOPED_EVENTS = [
   'GUILD_MEMBER_UPDATE',
+  'GUILD_BAN_ADD',
+  'GUILD_BAN_REMOVE',
   'VOICE_STATE_UPDATE',
 ] as const
 
@@ -36,7 +40,9 @@ export function memberScopedUserId(
 ): unknown {
   if (!data || typeof data !== 'object') return undefined
   const payload = data as { user?: { id?: unknown }; user_id?: unknown }
-  return event === 'GUILD_MEMBER_UPDATE'
+  return ['GUILD_MEMBER_UPDATE', 'GUILD_BAN_ADD', 'GUILD_BAN_REMOVE'].includes(
+    event ?? ''
+  )
     ? payload.user?.id
     : event === 'VOICE_STATE_UPDATE'
       ? payload.user_id
@@ -52,7 +58,9 @@ export interface EventControlRequest {
   session_id?: string
   /**
    * Optional exact member selector; every listed event must be one of
-   * {@link MEMBER_SCOPED_EVENTS}. Other members' dispatches pass through.
+   * {@link MEMBER_SCOPED_EVENTS}. Ban-only policies allow non-members; member
+   * and voice events require current membership when arming. Other users pass
+   * through.
    */
   member_id?: string
   /** Requires explicit consuming-client acknowledgements for delivery barriers. */
@@ -351,6 +359,10 @@ export class GatewayEventControls {
     if (typeof session === 'string') return session
     if (
       request.member_id !== undefined &&
+      request.events.some(
+        (event) =>
+          event === 'GUILD_MEMBER_UPDATE' || event === 'VOICE_STATE_UPDATE'
+      ) &&
       !this.db
         .prepare(
           'SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ?'
