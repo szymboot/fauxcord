@@ -191,7 +191,10 @@ export function validateRestFault(
     body.method === 'GET' && /^\/users\/\d{1,20}$/.test(body.path)
   const dmCreate = body.method === 'POST' && body.path === '/users/@me/channels'
   const channelEdit = isRestFaultChannelEdit(body.method, body.path)
-  if (channelEdit && body.guild_id !== undefined) return undefined
+  const inviteCreate =
+    body.method === 'POST' && /^\/channels\/\d{1,20}\/invites$/.test(body.path)
+  if ((channelEdit || inviteCreate) && body.guild_id !== undefined)
+    return undefined
   const guildChannelCreate =
     body.method === 'POST' && isRestFaultGuildChannelCreatePath(body.path)
   if (
@@ -203,7 +206,7 @@ export function validateRestFault(
     return undefined
   const guildRead =
     body.method === 'GET' &&
-    /^\/guilds\/\d{1,20}\/(?:audit-logs|members|bans|(?:members|voice-states)\/\d{1,20})$/.test(
+    /^\/guilds\/\d{1,20}\/(?:audit-logs|members|bans|invites|(?:members|voice-states)\/\d{1,20})$/.test(
       body.path
     )
   const pageRead = body.method === 'GET' && isRestFaultPagePath(body.path)
@@ -234,6 +237,7 @@ export function validateRestFault(
     userRead ||
     dmCreate ||
     channelEdit ||
+    inviteCreate ||
     guildChannelCreate ||
     guildRead ||
     pageRead ||
