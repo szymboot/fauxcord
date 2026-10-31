@@ -477,9 +477,9 @@ export function registerGatewaySubscriptions(
     payload
   ) => {
     if (payload.scope.db !== db) return
-    // Discord only sends GUILD_BAN_ADD to bots with BAN_MEMBERS or
-    // VIEW_AUDIT_LOG. Bans are only created through the owning bot's REST
-    // calls, which real Discord would reject without BAN_MEMBERS.
+    // Discord requires BAN_MEMBERS or VIEW_AUDIT_LOG to receive either ban
+    // event. Fauxcord routes them to the owning bot without modeling this
+    // permission check.
     broadcastToBot(
       manager,
       payload.scope.botId,
@@ -491,6 +491,20 @@ export function registerGatewaySubscriptions(
         // by Discord Userdoccers) with the ban's message deletion window.
         delete_message_secs: payload.deleteMessageSeconds,
       },
+      GatewayIntentBits.GuildModeration,
+      payload.scope.token
+    )
+  }
+  const onGuildBanRemove: Parameters<
+    typeof gatewayBus.on<'guild.ban.remove'>
+  >[1] = (payload) => {
+    if (payload.scope.db !== db) return
+    // Use the same scoped delivery and permission simplification as ban add.
+    broadcastToBot(
+      manager,
+      payload.scope.botId,
+      'GUILD_BAN_REMOVE',
+      { guild_id: payload.guildId, user: payload.user },
       GatewayIntentBits.GuildModeration,
       payload.scope.token
     )
@@ -574,6 +588,7 @@ export function registerGatewaySubscriptions(
   gatewayBus.on('guild.member.remove', onGuildMemberRemove)
   gatewayBus.on('guild.delete', onGuildDelete)
   gatewayBus.on('guild.ban.add', onGuildBanAdd)
+  gatewayBus.on('guild.ban.remove', onGuildBanRemove)
   gatewayBus.on('guild.role.create', onGuildRoleCreate)
   gatewayBus.on('guild.role.update', onGuildRoleUpdate)
   gatewayBus.on('guild.role.delete', onGuildRoleDelete)
@@ -600,6 +615,7 @@ export function registerGatewaySubscriptions(
     gatewayBus.off('guild.member.remove', onGuildMemberRemove)
     gatewayBus.off('guild.delete', onGuildDelete)
     gatewayBus.off('guild.ban.add', onGuildBanAdd)
+    gatewayBus.off('guild.ban.remove', onGuildBanRemove)
     gatewayBus.off('guild.role.create', onGuildRoleCreate)
     gatewayBus.off('guild.role.update', onGuildRoleUpdate)
     gatewayBus.off('guild.role.delete', onGuildRoleDelete)

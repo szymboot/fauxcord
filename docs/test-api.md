@@ -490,6 +490,7 @@ disconnect real Discord sends, before the member removal event:
 | `DELETE /guilds/:guildId/members/:userId` | `VOICE_STATE_UPDATE`¹, `GUILD_MEMBER_REMOVE`                                                         |
 | `PUT /guilds/:guildId/bans/:userId`       | `GUILD_BAN_ADD`³, `VOICE_STATE_UPDATE`¹, `GUILD_MEMBER_REMOVE`²                                      |
 | `POST /guilds/:guildId/bulk-ban`          | per banned user, in `user_ids` order: `GUILD_BAN_ADD`, `VOICE_STATE_UPDATE`¹, `GUILD_MEMBER_REMOVE`² |
+| `DELETE /guilds/:guildId/bans/:userId`    | `GUILD_BAN_REMOVE` when an existing ban is removed                                                   |
 
 1. Only when the member had a connected voice/stage state, meaning its channel
    is a voice or stage channel of the same guild (the rule
@@ -515,6 +516,18 @@ ban's effective message deletion window in seconds (from
 `delete_message_seconds` or the legacy `delete_message_days`; `0` when
 omitted). The field is absent from the official docs but sent by real Discord
 and documented by [Discord Userdoccers](https://docs.discord.food/gateway/gateway-events).
+
+`GUILD_BAN_REMOVE` carries `{ guild_id, user }`, as documented in Discord's
+[Guild Ban Remove Gateway event](https://docs.discord.com/developers/events/gateway-events#guild-ban-remove).
+The user is the same object returned by a ban read, including the minimal
+`Unknown User` fallback when the user has no stored profile. A successful unban
+returns `204` and publishes after the deletion commits. An absent ban returns
+`404/10026 Unknown Ban`; a missing guild returns `404/10004 Unknown Guild`.
+Neither failure publishes an event. Unban does not restore membership or voice
+state. Unbanning the guild's detached owning bot deletes its ban but leaves the
+bot detached: it receives no `GUILD_BAN_REMOVE`, consumes no sequence number
+and gets no replay entry. The same suppression applies to other unbans while
+the owning bot is detached.
 
 Bulk ban accepts `delete_message_seconds` (integer `0`–`604800`, otherwise
 `400` with code `50035` and no bans) and deletes each newly banned user's
@@ -550,14 +563,16 @@ Known differences from that observation:
   `VOICE_CHANNEL_START_TIME_UPDATE` and `VOICE_CHANNEL_STATUS_UPDATE` between
   the ban and the member removal, and `GUILD_AUDIT_LOG_ENTRY_CREATE` afterwards.
   Fauxcord emits none of these.
-- Discord only sends `GUILD_BAN_ADD` to bots with `BAN_MEMBERS` or
-  `VIEW_AUDIT_LOG`. Fauxcord does not model that check, because bans can only
-  be created by the guild's own bot through REST.
+- Discord only sends `GUILD_BAN_ADD` and `GUILD_BAN_REMOVE` to bots with
+  `BAN_MEMBERS` or `VIEW_AUDIT_LOG`. Fauxcord does not model these permission
+  checks; both events follow the guild's registered bot token and retain
+  existing REST authentication behavior.
 
 Test cleanup stays silent: `/_test/reset`, `DELETE /_test/setup/:token` and
-`DELETE /guilds/:guildId` remove memberships and voice states without any
-`VOICE_STATE_UPDATE`, `GUILD_MEMBER_REMOVE` or `GUILD_BAN_ADD`. Leaving,
-kicking or banning the guild's own bot follows
+`DELETE /guilds/:guildId` emit no `VOICE_STATE_UPDATE`, `GUILD_MEMBER_REMOVE`,
+`GUILD_BAN_ADD` or `GUILD_BAN_REMOVE`. Reset preserves bans; setup/guild
+deletion removes them silently. Leaving, kicking or banning the guild's own
+bot follows
 [Remove a guild from the bot](#remove-a-guild-from-the-bot-through-discord-rest-guild_delete)
 instead: a connected bot gets its own voice disconnect first, then
 `GUILD_MEMBER_REMOVE` and `GUILD_DELETE`, and the guild keeps every other
