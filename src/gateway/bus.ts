@@ -127,6 +127,11 @@ export interface GatewayBusEvents {
     deleteMessageSeconds: number
     scope: { db: Database; botId: string; token: string }
   }
+  'guild.ban.remove': {
+    guildId: string
+    user: Record<string, unknown>
+    scope: { db: Database; botId: string; token: string }
+  }
   'guild.delete': {
     guildId: string
     /** The bot (and exact setup token) that lost access to the guild. */

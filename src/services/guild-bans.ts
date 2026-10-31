@@ -8,6 +8,7 @@ import { runInTransaction, type Database } from '../db'
 import {
   deleteGuildMembership,
   publishGuildBanAdd,
+  publishGuildBanRemove,
   publishMemberDeparture,
   snapshotDepartingMember,
   type DepartingMember,
@@ -319,7 +320,9 @@ export function bulkBanGuildMembers(
 }
 
 /**
- * Removes a guild ban (unban).
+ * Removes a guild ban (unban) and publishes GUILD_BAN_REMOVE after commit.
+ * The native dispatcher suppresses delivery while the owning bot is detached;
+ * unbanning never restores its guild membership.
  * @param db - Database
  * @param guildId - Guild ID
  * @param userId - Banned user ID
@@ -330,8 +333,16 @@ export function removeGuildBan(
   guildId: string,
   userId: string
 ): boolean {
-  const result = db
-    .prepare('DELETE FROM guild_bans WHERE guild_id = ? AND user_id = ?')
-    .run(guildId, userId)
-  return result.changes > 0
+  const user = db.transaction(() => {
+    const ban = getGuildBan(db, guildId, userId)
+    if (!ban) return null
+    db.prepare('DELETE FROM guild_bans WHERE guild_id = ? AND user_id = ?').run(
+      guildId,
+      userId
+    )
+    return ban.user
+  })()
+  if (!user) return false
+  publishGuildBanRemove(db, guildId, user)
+  return true
 }

@@ -145,6 +145,27 @@ export function publishGuildBanAdd(
 }
 
 /**
+ * Publishes GUILD_BAN_REMOVE for a committed unban. Native dispatch visibility
+ * suppresses delivery while the owning bot is detached from the guild.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param user - Unbanned user payload read before deletion
+ */
+export function publishGuildBanRemove(
+  db: Database,
+  guildId: string,
+  user: UserObject
+): void {
+  const scope = getGuildDispatchScope(db, guildId)
+  if (!scope) return
+  gatewayBus.emit('guild.ban.remove', {
+    guildId,
+    user: user as unknown as Record<string, unknown>,
+    scope,
+  })
+}
+
+/**
  * Removes a member from a guild (kick) and publishes the departure.
  * @param db - Database
  * @param guildId - Guild ID
