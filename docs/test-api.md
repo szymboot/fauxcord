@@ -1022,6 +1022,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `PATCH`  | `/channels/{channelId}/messages/{messageId}`        | Exact message edit          |
 | `DELETE` | `/channels/{channelId}`                             | Channel deletion            |
 | `PUT`    | `/guilds/{guildId}/bans/{userId}`                   | Ban creation                |
+| `DELETE` | `/guilds/{guildId}/bans/{userId}`                   | Ban removal / unban         |
 | `PATCH`  | `/guilds/{guildId}/members/{userId}`                | Member update / mute        |
 | `PUT`    | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role assignment        |
 | `DELETE` | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role removal           |
@@ -1038,9 +1039,21 @@ slash. It selects the exact Channel, Channel/Message, or Guild/User/Role IDs, so
 unrelated requests cannot consume the fault. The Channel must belong to an existing Guild,
 or the Guild must exist (`404` otherwise). The target Message/User/Role does not
 need to exist yet, allowing prearming before message injection. Existing
-Channel/Guild `POST`/`DELETE`/`PUT`/`PATCH` faults, except Guild channel creation
-and Channel editing below, apply to any authenticated caller issuing that exact
-request, regardless of token or body.
+Channel/Guild mode-omitted `POST`/`DELETE`/`PUT`/`PATCH` faults, except Guild
+channel creation and Channel editing below, apply to any authenticated caller
+issuing that exact request, regardless of token or body.
+
+Ban removal (`DELETE /guilds/{guildId}/bans/{userId}`) uses the same caller
+scope as ban creation (`PUT`): without `mode`, any authenticated Bot or Bearer
+caller issuing that exact request can consume it. Explicit `delay`,
+`disconnect`, and `rate_limit` modes bind to the Guild's registered owning Bot
+token; other Bots and Bearer callers follow their ordinary route without
+consuming the control. The Guild must exist (`404` otherwise), but the User
+need not exist or be banned yet. Each selected unban fails before removing the
+ban or publishing any Gateway event, including when injecting `404` / `10026`
+(`Unknown Ban`). After exhaustion, cancellation or expiry, a new unban follows
+the ordinary route. The shared count, inspection, cancellation, reset and
+cleanup rules below apply.
 
 Channel editing (`PATCH /channels/{channelId}`) derives its Guild and registered
 owning Bot from the **existing Channel**. Do not supply `guild_id`, `query`, or
