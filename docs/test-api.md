@@ -539,10 +539,15 @@ instead of a body, as documented for
 
 Each event uses its own intent (`GuildVoiceStates`, `GuildMembers`,
 `GuildModeration`) and is delivered to the guild's registered Bot token and
-app database only. Events use normal sequencing and the replay buffer, so
-RESUME replays them, and `VOICE_STATE_UPDATE` capture/hold/release/replay
-controls see the removal disconnect like any other voice transition. The
-voice-state row is deleted with the membership.
+app database only. Ordinary delivery uses normal sequencing and the replay
+buffer, so RESUME replays those envelopes. The
+[scoped Gateway capture controls](#scoped-gateway-capture-hold-release-and-replay)
+can capture/hold `GUILD_BAN_ADD`, `GUILD_BAN_REMOVE` and the
+`VOICE_STATE_UPDATE` removal disconnect independently. Holding a ban does not
+hold its following disconnect or member removal. Held envelopes consume their
+native sequence but stay out of RESUME history; new-sequence release/replay
+adds history, while opted-in original-sequence writes do not. The voice-state
+row is deleted with the membership.
 
 Discord documents the event set ("Sent when a user is removed from a guild
 (leave/kick/ban)" for `GUILD_MEMBER_REMOVE`, "Sent when a user is banned from
@@ -3334,13 +3339,33 @@ the newly resolved session.
 `events` is a nonempty, unique subset of `VOICE_STATE_UPDATE`, `MESSAGE_CREATE`,
 `MESSAGE_DELETE`,
 `MESSAGE_DELETE_BULK`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
-`MESSAGE_REACTION_REMOVE_ALL`, `MESSAGE_REACTION_REMOVE_EMOJI`, and
-`GUILD_MEMBER_UPDATE`. Only events
+`MESSAGE_REACTION_REMOVE_ALL`, `MESSAGE_REACTION_REMOVE_EMOJI`,
+`GUILD_MEMBER_UPDATE`, `GUILD_BAN_ADD`, and `GUILD_BAN_REMOVE`. Only events
 that the native producer actually emits are captured. Message creation (including
 human messages via `POST /_test/channels/:channelId/messages`), single deletion,
 native bulk deletion through the REST endpoint below, reaction addition (including
 human additions through the control above), single reaction removal, and both
 reaction-clear DELETE endpoints have native producers.
+
+For bans, select `GUILD_BAN_ADD` and/or `GUILD_BAN_REMOVE`. Native producers
+are `PUT /guilds/:guildId/bans/:userId`, `POST /guilds/:guildId/bulk-ban`, and
+`DELETE /guilds/:guildId/bans/:userId` (unban). Re-banning an already banned
+user, failed bulk-ban targets, absent bans, cleanup and a detached owning bot
+produce no ban envelope to capture. Ban events require Guild Moderation intent
+and retain the guild's owning-bot, exact setup-token and app-database scope.
+Add `member_id` to match `d.user.id`, including users who are no longer members
+or never joined (see [member selectors](#member-selectors)).
+
+Holding a ban event holds only its matching envelope. A following
+`VOICE_STATE_UPDATE` disconnect and `GUILD_MEMBER_REMOVE` proceed normally;
+select voice separately to hold the disconnect too. `GUILD_MEMBER_REMOVE` is
+not a supported capture event. The ban's database changes still commit before
+capture. Held ban originals consume their native sequence but do not enter
+RESUME history; release/replay with `sequence: "new"` adds a fresh sequence to
+history, while opted-in `sequence: "original"` writes the captured envelope
+without adding history. Release/replay never repeats the ban/unban or restores
+membership; inspection, limits, TTL, recoverable ownership and cleanup follow
+the same rules as other captured events below.
 
 For voice, arm the same control API with
 `"events": ["VOICE_STATE_UPDATE"]` and drive real transitions through
@@ -3413,8 +3438,8 @@ Capture/hold happens after the SQLite deletion. Release/replay delivers the
 native snapshot even after source-message deletion and never restores reactions.
 
 Capture runs after native intent filtering: missing Guild Messages / Guild
-Message Reactions / Guild Voice States intent means no corresponding capture or
-delivery. Unrelated event types, guilds, bots and other sessions keep their
+Message Reactions / Guild Voice States / Guild Members / Guild Moderation intent
+means no corresponding capture or delivery. Unrelated event types, guilds, bots and other sessions keep their
 existing delivery behavior. `hold` defaults to `false`: observe while delivering
 normally. With
 `hold: true`, matching events are retained without sending or entering the
@@ -3720,21 +3745,29 @@ handling. Malformed action JSON, duplicate IDs or invalid sequence mode returns
 
 ### Member selectors
 
-`member_id` narrows a control to one existing guild member. It uses the same
-positive 1–20 digit string format as the scope IDs; null/malformed selectors
-return `400`, and a user who is not currently a member of the guild returns
-`404`. The selector matches the subject user of each event:
+`member_id` narrows a control to one subject user. It uses the same positive
+1–20 digit string format as the scope IDs; null/malformed selectors return
+`400`. If **every selected event is `GUILD_BAN_ADD` or `GUILD_BAN_REMOVE`**, the
+user need not be a current guild member or exist in the users table. This lets
+a controller arm an unban capture after banning removed the user's membership,
+or select a ban target who never joined. If the control also selects
+`GUILD_MEMBER_UPDATE` or `VOICE_STATE_UPDATE`, the user must be a current member
+of that guild **when arming**, otherwise creation returns `404`. Membership is
+not rechecked on capture, release or replay: a ban's events remain capturable
+after membership removal. The selector matches the subject user of each event:
 
 | Event                 | Matched field |
 | --------------------- | ------------- |
 | `GUILD_MEMBER_UPDATE` | `d.user.id`   |
 | `VOICE_STATE_UPDATE`  | `d.user_id`   |
+| `GUILD_BAN_ADD`       | `d.user.id`   |
+| `GUILD_BAN_REMOVE`    | `d.user.id`   |
 
-`events` may combine both (for example one control holding a user's nickname and
-voice changes). Every listed event must be one of these member-scoped events;
-any other event type (messages, reactions) together with `member_id` returns
-`400` with
-`{"message":"member_id requires every event to be one of GUILD_MEMBER_UPDATE, VOICE_STATE_UPDATE","code":0}`.
+`events` may combine these four events (for example holding a user's ban and
+voice disconnect together). Every listed event must be one of these
+user-scoped events; any other event type (messages, reactions) together with
+`member_id` returns `400` with
+`{"message":"member_id requires every event to be one of GUILD_MEMBER_UPDATE, GUILD_BAN_ADD, GUILD_BAN_REMOVE, VOICE_STATE_UPDATE","code":0}`.
 Dispatches of other users never match a selected control and pass through
 untouched.
 
