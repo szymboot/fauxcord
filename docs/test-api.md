@@ -1324,9 +1324,23 @@ path, or other `@original` methods follow their ordinary route (`404` for unknow
 credentials). Selectors containing a token (`/interactions/{id}/{token}/callback`,
 `/webhooks/...`) are rejected (`400`).
 
-The interaction must exist when arming (`404` otherwise; hold `INTERACTION_CREATE`
-with a [Gateway capture](#scoped-gateway-capture-hold-release-and-replay) if the
-bot could respond before you arm). Owner and scope derive from it: the control
+The interaction must exist when arming (`404` otherwise), but a bot can answer a
+simulated interaction or modal submission within milliseconds. Hold its dispatch
+with a [Gateway capture](#scoped-gateway-capture-hold-release-and-replay) of
+`INTERACTION_CREATE`, arm the fault by the interaction ID the test-control call
+returned, then release:
+
+1. `POST /_test/gateway-event-controls` with `events: ["INTERACTION_CREATE"]`,
+   `hold: true`, the guild and bot (and optionally `member_id`).
+2. `POST /_test/interactions` or `POST /_test/interactions/:id/modal-submit`;
+   it returns `201` with the interaction while the bot has received nothing.
+3. `POST /_test/rest-faults` with `POST /interactions/{returned id}/callback`
+   (or an `@original` selector).
+4. `POST /_test/gateway-event-controls/:id/release` with the captured event ID.
+   The bot's callback now fails, `GET /_test/interactions/:id/callback` reports
+   `responded: false`, and its retry succeeds natively once the fault is spent.
+
+Owner and scope derive from it: the control
 binds the Bot that owns the interaction's Guild when that Bot is the interaction's
 application, the cleanup Guild is the interaction's Guild (or its channel's Guild
 for channel-only interactions), and `channel_id` is the interaction's channel.
@@ -1341,8 +1355,9 @@ natively (`204`, then `responded: true`). A faulted `PATCH .../@original` leaves
 the message content, embeds and components unchanged and emits no `MESSAGE_UPDATE`;
 a faulted `GET` returns no message. `GET` and `PATCH` for the same interaction are
 separate controls; `POST` callback faults do not affect `@original`. Coverage is in
-`src/rest-appeal-faults.test.ts` (full `buildApp` routes over a real HTTP socket)
-and `src/validators/rest-fault.test.ts`.
+`src/rest-appeal-faults.test.ts` (full `buildApp` routes over a real HTTP socket),
+`src/gateway/interaction-event-controls.test.ts` (held modal submission → fault →
+release over a real Gateway socket) and `src/validators/rest-fault.test.ts`.
 
 To fail a message edit (including a shop category or item message refresh in
 discord-bot Harness task DSC-1004), arm the exact native PATCH path:
@@ -3539,8 +3554,9 @@ the newly resolved session.
 `MESSAGE_DELETE`,
 `MESSAGE_DELETE_BULK`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
 `MESSAGE_REACTION_REMOVE_ALL`, `MESSAGE_REACTION_REMOVE_EMOJI`,
-`GUILD_MEMBER_UPDATE`, `GUILD_BAN_ADD`, and `GUILD_BAN_REMOVE`. Only events
-that the native producer actually emits are captured. Message creation (including
+`GUILD_MEMBER_UPDATE`, `GUILD_BAN_ADD`, `GUILD_BAN_REMOVE`, and
+`INTERACTION_CREATE`. Only events that the native producer actually emits are
+captured. Message creation (including
 human messages via `POST /_test/channels/:channelId/messages`), single deletion,
 native bulk deletion through the REST endpoint below, reaction addition (including
 human additions through the control above), single reaction removal, and both
@@ -3554,6 +3570,19 @@ produce no ban envelope to capture. Ban events require Guild Moderation intent
 and retain the guild's owning-bot, exact setup-token and app-database scope.
 Add `member_id` to match `d.user.id`, including users who are no longer members
 or never joined (see [member selectors](#member-selectors)).
+
+For interactions, select `INTERACTION_CREATE`. Native producers are
+`POST /_test/interactions` and `POST /_test/interactions/:interactionId/modal-submit`
+(both return the interaction to the controller at once, even while its dispatch
+is held, because the stored interaction exists before dispatch). The event is not
+intent-gated; it is captured for the guild the interaction carries (`d.guild_id`)
+and the exact session that belongs to the application's bot, so interactions of
+other guilds, other bots and DMs pass through. There is no channel selector; add
+`member_id` to match the invoking user (`d.member.user.id`, see
+[member selectors](#member-selectors)). Hold, release, replay, sequence modes and
+limits are unchanged. This is how a controller arms an
+[interaction callback or `@original` fault](#ban-appeal-selectors) before a bot that
+answers within milliseconds can reach the route.
 
 Holding a ban event holds only its matching envelope. A following
 `VOICE_STATE_UPDATE` disconnect and `GUILD_MEMBER_REMOVE` proceed normally;
@@ -3950,8 +3979,8 @@ handling. Malformed action JSON, duplicate IDs or invalid sequence mode returns
 user need not be a current guild member or exist in the users table. This lets
 a controller arm an unban capture after banning removed the user's membership,
 or select a ban target who never joined. If the control also selects
-`GUILD_MEMBER_UPDATE` or `VOICE_STATE_UPDATE`, the user must be a current member
-of that guild **when arming**, otherwise creation returns `404`. Membership is
+`GUILD_MEMBER_UPDATE`, `VOICE_STATE_UPDATE` or `INTERACTION_CREATE`, the user must
+be a current member of that guild **when arming**, otherwise creation returns `404`. Membership is
 not rechecked on capture, release or replay: a ban's events remain capturable
 after membership removal. The selector matches the subject user of each event:
 
@@ -3961,12 +3990,13 @@ after membership removal. The selector matches the subject user of each event:
 | `VOICE_STATE_UPDATE`  | `d.user_id`   |
 | `GUILD_BAN_ADD`       | `d.user.id`   |
 | `GUILD_BAN_REMOVE`    | `d.user.id`   |
+| `INTERACTION_CREATE`  | `d.member.user.id` |
 
-`events` may combine these four events (for example holding a user's ban and
+`events` may combine these five events (for example holding a user's ban and
 voice disconnect together). Every listed event must be one of these
 user-scoped events; any other event type (messages, reactions) together with
 `member_id` returns `400` with
-`{"message":"member_id requires every event to be one of GUILD_MEMBER_UPDATE, GUILD_BAN_ADD, GUILD_BAN_REMOVE, VOICE_STATE_UPDATE","code":0}`.
+`{"message":"member_id requires every event to be one of GUILD_MEMBER_UPDATE, GUILD_BAN_ADD, GUILD_BAN_REMOVE, VOICE_STATE_UPDATE, INTERACTION_CREATE","code":0}`.
 Dispatches of other users never match a selected control and pass through
 untouched.
 

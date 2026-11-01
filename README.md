@@ -236,7 +236,10 @@ channel, ban, member, role, invite and voice-state routes, plus the ban-appeal
 paths `GET /guilds/:guildId/channels`, `DELETE /users/@me/guilds/:guildId`,
 and, by interaction ID rather than secret token,
 `POST /interactions/:interactionId/callback` and
-`GET`/`PATCH /interactions/:interactionId/messages/@original`. See the
+`GET`/`PATCH /interactions/:interactionId/messages/@original`. To arm those
+before a fast bot answers, hold the simulated interaction's dispatch with a
+`INTERACTION_CREATE` Gateway capture (`POST /_test/gateway-event-controls`), arm
+the fault by the returned interaction ID, then release it. See the
 [selector list](./docs/test-api.md#post-_testrest-faults--fail-bounded-exact-rest-attempts).
 
 ### Inspect channel messages (for testing)

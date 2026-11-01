@@ -20,6 +20,7 @@ export const CONTROL_EVENTS = [
   'MESSAGE_REACTION_REMOVE_ALL',
   'MESSAGE_REACTION_REMOVE_EMOJI',
   'VOICE_STATE_UPDATE',
+  'INTERACTION_CREATE',
 ] as const
 
 /**
@@ -31,6 +32,7 @@ export const MEMBER_SCOPED_EVENTS = [
   'GUILD_BAN_ADD',
   'GUILD_BAN_REMOVE',
   'VOICE_STATE_UPDATE',
+  'INTERACTION_CREATE',
 ] as const
 
 /** Reads the subject user ID of a member-scoped dispatch, if it has one. */
@@ -39,7 +41,14 @@ export function memberScopedUserId(
   data: unknown
 ): unknown {
   if (!data || typeof data !== 'object') return undefined
-  const payload = data as { user?: { id?: unknown }; user_id?: unknown }
+  const payload = data as {
+    user?: { id?: unknown }
+    user_id?: unknown
+    member?: { user?: { id?: unknown } }
+  }
+  // A guild interaction names its invoking user in `member.user`; one whose
+  // user is not a guild member carries no subject and never matches.
+  if (event === 'INTERACTION_CREATE') return payload.member?.user?.id
   return ['GUILD_MEMBER_UPDATE', 'GUILD_BAN_ADD', 'GUILD_BAN_REMOVE'].includes(
     event ?? ''
   )
@@ -58,9 +67,9 @@ export interface EventControlRequest {
   session_id?: string
   /**
    * Optional exact member selector; every listed event must be one of
-   * {@link MEMBER_SCOPED_EVENTS}. Ban-only policies allow non-members; member
-   * and voice events require current membership when arming. Other users pass
-   * through.
+   * {@link MEMBER_SCOPED_EVENTS}. Ban-only policies allow non-members; member,
+   * voice and interaction events require current membership when arming.
+   * Other users pass through.
    */
   member_id?: string
   /** Requires explicit consuming-client acknowledgements for delivery barriers. */
@@ -359,9 +368,12 @@ export class GatewayEventControls {
     if (typeof session === 'string') return session
     if (
       request.member_id !== undefined &&
-      request.events.some(
-        (event) =>
-          event === 'GUILD_MEMBER_UPDATE' || event === 'VOICE_STATE_UPDATE'
+      request.events.some((event) =>
+        [
+          'GUILD_MEMBER_UPDATE',
+          'VOICE_STATE_UPDATE',
+          'INTERACTION_CREATE',
+        ].includes(event)
       ) &&
       !this.db
         .prepare(
