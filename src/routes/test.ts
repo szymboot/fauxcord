@@ -62,6 +62,7 @@ import { validateTestUserGlobalName } from '../validators/test-user-global-name'
 import { validateRestFault } from '../validators/rest-fault'
 import { createClosedDmRoutes } from './test-closed-dms'
 import { createDmChannelRoutes } from './test-dm-channels'
+import { createTestGuildBotRoutes } from './test-guild-bot'
 import { createTestRole, getGuildRoles } from '../services/guild-roles'
 import { getGuild } from '../services/guilds'
 import { validateTestRole } from '../validators/test-role'
@@ -154,6 +155,7 @@ export function createTestRoutes(
   app.route('/', createTestVoiceStateRoutes(db))
   app.route('/', createClosedDmRoutes(db))
   app.route('/', createDmChannelRoutes(db))
+  app.route('/', createTestGuildBotRoutes(db))
 
   app.post('/_test/guilds/:guildId/roles', async (c) => {
     const guildId = c.req.param('guildId')
@@ -322,6 +324,12 @@ export function createTestRoutes(
       if (err instanceof Error && err.message === 'INVALID_GUILD_ICON') {
         return c.json(
           { message: 'icon must be a non-empty hash string or null', code: 0 },
+          400
+        )
+      }
+      if (err instanceof Error && err.message === 'INVALID_GUILD_BOT_PRESENT') {
+        return c.json(
+          { message: 'bot_present must be a boolean', code: 0 },
           400
         )
       }
