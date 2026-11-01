@@ -49,6 +49,7 @@ curl -X POST http://localhost:3000/_test/setup \
 | `guilds[].premium_tier`    | —        | Integer boost tier (`0`, `1`, `2`, or `3`); default: `0` |
 | `guilds[].afk_channel_id`  | —        | Voice channel (type `2`) of this guild, or null; default: null |
 | `guilds[].afk_timeout`     | —        | `60`, `300`, `900`, `1800` or `3600` seconds; default: `300` |
+| `guilds[].bot_present`     | —        | Boolean; `false` prepares the guild **without** the bot as a member (see [Prepare a guild the bot has not joined](#prepare-a-guild-the-bot-has-not-joined)); default: `true` |
 | `guilds[].channels`        | —        | Array of channels to create                              |
 | `guilds[].channels[].id`   | —        | Channel ID (auto-generated if omitted)                   |
 | `guilds[].channels[].name` | ✅       | Channel name                                             |
@@ -76,6 +77,32 @@ stage (`2` ↔ `13`) remains a privileged fixture override. The ordinary Discord
 `PATCH /channels/{channel.id}` rejects any `type` change on a voice or stage
 channel and any change into one with `50035` (`BASE_TYPE_CHOICES`); other
 `type` values there are still ignored.
+
+### Prepare a guild the bot has not joined
+
+`"bot_present": false` registers the guild under the setup (so it belongs to
+that bot and lives until the setup or guild is deleted) but leaves the bot out
+of it, exactly like a guild the bot left (`guilds.bot_present = 0`):
+
+- no bot member row is created, and nothing is emitted: the guild is absent from
+  `READY.guilds` and from IDENTIFY-time `GUILD_CREATE`s, and
+  `GET /users/@me/guilds` omits it;
+- the bot is refused where Fauxcord models its access (`403` `50001` for
+  message sends and other permission-resolved calls, guild-ownership routes,
+  `POST /_test/interactions` returns `404`); see
+  [Fixture lifetime versus bot membership](#fixture-lifetime-versus-bot-membership)
+  for the unchanged emulator limits of a detached guild;
+- `owner_id` should name a registered human; with the default owner (the bot)
+  the guild has no human owner until the bot joins;
+- re-listing an existing guild ID with `"bot_present": false` detaches it and
+  removes the setup bot's membership; omitted or `true` attaches it as before.
+
+Seed the rest through the ordinary controls, all silent while the bot is
+absent: humans with `POST /_test/users` and
+`POST /_test/guilds/:guildId/members/:userId`, roles with
+`POST /_test/guilds/:guildId/roles`, channels in the setup request itself,
+messages, voice states, and bans. Then add the bot with
+[`POST /_test/guilds/:guildId/bot`](#post-_testguildsguildidbot--add-the-bot-to-an-existing-guild).
 
 ### Native category parents
 
@@ -5353,7 +5380,10 @@ After the bot is detached:
   another bot, returns `404` `{"message":"Unknown Guild","code":10004}` and
   dispatches nothing. Kicking the detached bot again returns `404`
   (`Unknown Member`); banning it again is an ordinary idempotent `204`.
-- **Rejoin**: `POST /_test/setup` for the existing guild ID (under a new
+- **Rejoin**: [`POST /_test/guilds/:guildId/bot`](#post-_testguildsguildidbot--add-the-bot-to-an-existing-guild)
+  re-adds the setup's own bot to the guild with the same fixture, sending
+  `GUILD_CREATE` to its live sessions without a new token. Alternatively,
+  `POST /_test/setup` for the existing guild ID (under a new
   token, as setup tokens are unique) reattaches the guild to that setup,
   re-adds the bot as a member, clears a ban of the bot's user ID and sends
   `GUILD_CREATE` with the surviving fixture (channels, members, voice
@@ -5391,6 +5421,83 @@ leave.
 
 Test-control cleanup (`DELETE /_test/setup/:token`, `POST /_test/reset`) is
 always silent.
+
+---
+
+## `POST /_test/guilds/:guildId/bot` — Add the bot to an existing guild
+
+Simulates a server administrator authorizing the bot through the OAuth2 `bot`
+scope: the bot, already connected to the Gateway, joins a guild that exists
+and receives `GUILD_CREATE` live, without a restart. Use it for a guild
+prepared with `"bot_present": false` in setup, and to put the bot back into a
+guild it left (`DELETE /users/@me/guilds/:id`), or was kicked or banned from.
+
+```bash
+curl -X POST http://localhost:3000/_test/guilds/222222222222222222/bot \
+  -H "Content-Type: application/json" \
+  -d '{ "token": "Bot mytoken", "roles": ["444444444444444444"] }'
+```
+
+**Fields**
+
+| Field            | Required | Description                                                                                                  |
+| ---------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
+| `token`          | one of   | Setup token of the bot, with or without the `Bot ` prefix                                                    |
+| `application_id` | one of   | Application (bot user) ID. When both are given they must name the same bot                                   |
+| `roles`          | —        | Existing role IDs of the guild for the bot member, e.g. a `managed` role from `POST /_test/guilds/:id/roles`. `@everyone` is implicit and rejected |
+
+**Response**: `201` with the bot's new guild member object.
+
+What happens, atomically before any event is sent:
+
+- the guild is attached again (`bot_present = 1`), the bot's membership is
+  created with the requested roles and the current `joined_at`, a stale
+  removal marker and a ban of the bot are cleared (an administrator who
+  re-invites a banned bot has lifted its ban), as with a rejoin through setup;
+- every human member, role, channel, message and voice state is preserved.
+
+Then, after commit:
+
+- every live session of **that setup** (same token) holding the `GUILDS`
+  intent receives one full native `GUILD_CREATE` (members including the bot,
+  channels, roles, voice states, `member_count`), as a normal sequenced
+  dispatch kept in the replay buffer, so a disconnected session gets it on
+  `RESUME`, or sees the guild in the READY of a fresh IDENTIFY after
+  `INVALID_SESSION`. Sessions of other setups never receive it;
+- sessions that are not the joining setup's and hold the `GUILD_MEMBERS` intent
+  receive `GUILD_MEMBER_ADD` for the bot member (the same broadcast rule as a
+  human join). The joining setup's own sessions do not: `GUILD_CREATE` already
+  carries the member, as on Discord.
+
+Afterwards the guild is listed by `GET /users/@me/guilds`, the guild's REST
+routes and `POST /_test/interactions` work for the bot, and later READYs include it.
+
+**Errors** (nothing is changed or emitted)
+
+| Status | Body                                                          | Cause                                                              |
+| ------ | ------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `400`  | `Invalid Form Body` (`50035`)                                 | Neither `token` nor `application_id`, wrong types, unknown fields, or the two name different bots |
+| `404`  | `{"message":"Unknown Guild","code":10004}`                    | Unknown guild                                                      |
+| `404`  | `{"message":"Unknown Bot","code":0}`                          | No registered setup matches `token`/`application_id`               |
+| `404`  | `{"message":"Unknown Role","code":10011}`                     | A role is not in the guild (or is `@everyone`)                     |
+| `409`  | `{"message":"Guild belongs to another setup","code":0}`       | Ownership rule below                                               |
+| `409`  | `{"message":"Bot is already a member of the guild","code":0}` | The bot is already present                                         |
+
+Joining a guild the bot is already in is an error rather than a no-op, like the
+human member join (`409` when the member exists): a harness that calls it twice
+has lost track of its fixture, and a duplicate `GUILD_CREATE` would corrupt
+client caches.
+
+**Ownership rule**: a guild belongs to exactly one setup (`guilds.bot_token`)
+and this control only adds **that** setup's bot. Another setup's bot is refused
+with `409`; moving a guild between setups remains `POST /_test/setup` for the
+existing guild ID (see Rejoin above), which keeps its takeover semantics.
+
+**Reset**: `POST /_test/reset` never changes bot membership. A prepared guild
+stays absent and can still be joined afterwards; a joined guild stays attached
+with its members and channels (only posted data, voice states and control
+records are cleared); a guild the bot left stays detached until this control
+re-adds it. `DELETE /_test/setup/:token` removes the guild and everything in it.
 
 ---
 

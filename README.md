@@ -168,6 +168,15 @@ then call `POST /_test/guilds/:guildId/members/:userId` (optionally with
 intent. See the [test API documentation](./docs/test-api.md) for errors and
 the leave/rejoin flow using the existing member DELETE.
 
+To test a server administrator adding the already-connected bot to an existing
+Guild, prepare the Guild without the bot (`"bot_present": false` on the Guild
+in `POST /_test/setup`), seed its humans, roles and channels, then call
+`POST /_test/guilds/:guildId/bot` with `{"token":"Bot mytoken123"}` (or
+`{"application_id":"..."}`, optionally with `"roles":[...]`). The bot's live
+Gateway sessions receive `GUILD_CREATE` without a restart. The same control
+re-adds a bot that left or was removed, keeping the Guild's fixtures. See the
+[test API documentation](./docs/test-api.md) for errors and ownership rules.
+
 ### Reset the test environment
 
 ```bash

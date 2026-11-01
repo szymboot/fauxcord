@@ -7,7 +7,8 @@ import type {
 } from 'discord-api-types/v10'
 import { getChannelRecipientUsers } from '../services/channels'
 import { gatewayBus } from './bus'
-import { broadcastToAll, broadcastToBot } from './dispatch'
+import { broadcastToAll, broadcastToBot, sendDispatch } from './dispatch'
+import { hasIntent } from './intents'
 import type { SessionManager } from './session'
 
 /**
@@ -343,6 +344,18 @@ export function registerGatewaySubscriptions(
   const onGuildCreate: Parameters<typeof gatewayBus.on<'guild.create'>>[1] = (
     payload
   ) => {
+    if (payload.scope) {
+      if (payload.scope.db !== db) return
+      broadcastToBot(
+        manager,
+        payload.scope.botId,
+        'GUILD_CREATE',
+        payload.guild,
+        GatewayIntentBits.Guilds,
+        payload.scope.token
+      )
+      return
+    }
     broadcastToAll(
       manager,
       'GUILD_CREATE',
@@ -421,10 +434,26 @@ export function registerGatewaySubscriptions(
   const onGuildMemberAdd: Parameters<
     typeof gatewayBus.on<'guild.member.add'>
   >[1] = (payload) => {
+    const data = { ...payload.member, guild_id: payload.guildId }
+    if (payload.exceptScope) {
+      if (payload.exceptScope.db !== db) return
+      for (const session of manager.getAll()) {
+        const sessionToken = session.token.startsWith('Bot ')
+          ? session.token
+          : `Bot ${session.token}`
+        if (
+          sessionToken === payload.exceptScope.token ||
+          !hasIntent(session.intents, GatewayIntentBits.GuildMembers)
+        )
+          continue
+        sendDispatch(manager, session, 'GUILD_MEMBER_ADD', data)
+      }
+      return
+    }
     broadcastToAll(
       manager,
       'GUILD_MEMBER_ADD',
-      { ...payload.member, guild_id: payload.guildId },
+      data,
       GatewayIntentBits.GuildMembers
     )
   }

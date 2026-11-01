@@ -86,7 +86,11 @@ export interface GatewayBusEvents {
     emoji: ReactionEmoji
     scope: { db: Database; botId: string; token: string }
   }
-  'guild.create': { guild: Record<string, unknown> }
+  'guild.create': {
+    guild: Record<string, unknown>
+    /** Exact setup scope; omitted by legacy callers that broadcast to all. */
+    scope?: { db: Database; botId: string; token: string }
+  }
   'guild.emojis.update': {
     guildId: string
     /** Full current emoji list of the guild. */
@@ -106,7 +110,16 @@ export interface GatewayBusEvents {
     scope?: { db: Database; botId: string; token: string }
   }
   'channel.delete': { channel: Record<string, unknown> }
-  'guild.member.add': { guildId: string; member: Record<string, unknown> }
+  'guild.member.add': {
+    guildId: string
+    member: Record<string, unknown>
+    /**
+     * Setup whose sessions already learned of the member from another event
+     * (the bot's own join is carried by its GUILD_CREATE) and must not get a
+     * duplicate GUILD_MEMBER_ADD.
+     */
+    exceptScope?: { db: Database; token: string }
+  }
   'guild.member.update': {
     guildId: string
     member: Record<string, unknown>

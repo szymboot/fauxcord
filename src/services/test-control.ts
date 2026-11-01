@@ -28,6 +28,7 @@ import {
 import { validateGuildAfk } from '../validators/guild'
 import type { ValidationErrors } from '../validators/common'
 import { getGuildMember, type GuildMemberObject } from './guild-members'
+import { deleteGuildMembership } from './member-removal'
 import { getChannel, isVoiceCapableChannelType } from './channels'
 import { getUser, type UserObject } from './users'
 import { resetAuditLogResponses } from './audit-log-responses'
@@ -77,6 +78,12 @@ export interface SetupGuildRequest {
   afk_channel_id?: string | null
   /** 60, 300, 900, 1800 or 3600 seconds; omission preserves (default 300). */
   afk_timeout?: number
+  /**
+   * `false` prepares the guild without the bot as a member: it is absent from
+   * READY and GUILD_CREATE and refused over REST until
+   * `POST /_test/guilds/:id/bot` adds the bot. Defaults to true.
+   */
+  bot_present?: boolean
   channels?: SetupChannelRequest[]
 }
 
@@ -417,6 +424,12 @@ export function setupTestEnvironment(
       ) {
         throw new Error('INVALID_GUILD_ICON')
       }
+      if (
+        guildReq.bot_present !== undefined &&
+        typeof guildReq.bot_present !== 'boolean'
+      ) {
+        throw new Error('INVALID_GUILD_BOT_PRESENT')
+      }
       if (guildReq.owner_id === undefined) continue
       if (
         typeof guildReq.owner_id !== 'string' ||
@@ -470,17 +483,20 @@ export function setupTestEnvironment(
     for (const guildReq of guildRequests) {
       const guildId = guildReq.id ?? generateSnowflake()
       const ownerId = guildReq.owner_id ?? userId
+      // A guild prepared without the bot stays detached and silent until the
+      // bot joins it through the test control.
+      const botPresent = guildReq.bot_present !== false
 
       // Create the guild (if the same ID still exists, overwrite its contents and reuse it = idempotent)
       db.prepare(
-        `INSERT INTO guilds (id, name, icon, premium_tier, owner_id, bot_token) VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO guilds (id, name, icon, premium_tier, owner_id, bot_token, bot_present) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            icon = CASE WHEN ? THEN excluded.icon ELSE guilds.icon END,
            premium_tier = CASE WHEN ? THEN excluded.premium_tier ELSE guilds.premium_tier END,
            owner_id = excluded.owner_id,
            bot_token = excluded.bot_token,
-           bot_present = 1`
+           bot_present = excluded.bot_present`
       ).run(
         guildId,
         guildReq.name,
@@ -488,22 +504,24 @@ export function setupTestEnvironment(
         guildReq.premium_tier ?? 0,
         ownerId,
         request.token,
+        botPresent ? 1 : 0,
         guildReq.icon === undefined ? 0 : 1,
         guildReq.premium_tier === undefined ? 0 : 1
       )
 
-      pendingEvents.push(() => {
-        // The guild row was just inserted/updated above within this same
-        // transaction, so `buildGuildCreatePayload` should never actually
-        // return null here -- but it's still guarded explicitly (rather than
-        // cast past the type checker) so a future refactor that breaks that
-        // invariant fails loudly instead of broadcasting a null payload.
-        const guild = buildGuildCreatePayload(db, guildId)
-        if (!guild) return
-        gatewayBus.emit('guild.create', {
-          guild: guild as unknown as Record<string, unknown>,
+      if (botPresent)
+        pendingEvents.push(() => {
+          // The guild row was just inserted/updated above within this same
+          // transaction, so `buildGuildCreatePayload` should never actually
+          // return null here -- but it's still guarded explicitly (rather than
+          // cast past the type checker) so a future refactor that breaks that
+          // invariant fails loudly instead of broadcasting a null payload.
+          const guild = buildGuildCreatePayload(db, guildId)
+          if (!guild) return
+          gatewayBus.emit('guild.create', {
+            guild: guild as unknown as Record<string, unknown>,
+          })
         })
-      })
 
       // Auto-create the @everyone role (Discord API spec: every guild always has @everyone)
       // The @everyone role ID is identical to the guild ID
@@ -512,47 +530,53 @@ export function setupTestEnvironment(
          VALUES (?, ?, '@everyone', '1071698660929', 0, 0, 0, 0)`
       ).run(guildId, guildId)
 
-      // Register the bot as a member of the guild. On real Discord, a
-      // bot present in a guild always shows up in that guild's member list;
-      // without this row, GET/PATCH/PUT/DELETE /guilds/{id}/members/{bot_id}*
-      // 404 for the bot itself, breaking any client library flow that
-      // manages the bot's own guild member (e.g. self role assignment).
-      db.prepare(
-        'INSERT OR IGNORE INTO guild_members (guild_id, user_id) VALUES (?, ?)'
-      ).run(guildId, userId)
-      // A rejoining setup sees its guild again.
-      db.prepare(
-        'DELETE FROM guild_bot_removals WHERE guild_id = ? AND bot_token = ?'
-      ).run(guildId, request.token)
-      // Re-listing a guild whose bot was banned re-adds the bot (rejoin), so
-      // the stale ban must not remain.
-      db.prepare(
-        'DELETE FROM guild_bans WHERE guild_id = ? AND user_id = ?'
-      ).run(guildId, userId)
-
-      pendingEvents.push(() => {
-        gatewayBus.emit('guild.member.add', {
-          guildId,
-          member: getGuildMember(db, guildId, userId) as unknown as Record<
-            string,
-            unknown
-          >,
-        })
-      })
-
-      if (ownerId !== userId) {
+      if (botPresent) {
+        // Register the bot as a member of the guild. On real Discord, a
+        // bot present in a guild always shows up in that guild's member list;
+        // without this row, GET/PATCH/PUT/DELETE /guilds/{id}/members/{bot_id}*
+        // 404 for the bot itself, breaking any client library flow that
+        // manages the bot's own guild member (e.g. self role assignment).
         db.prepare(
           'INSERT OR IGNORE INTO guild_members (guild_id, user_id) VALUES (?, ?)'
-        ).run(guildId, ownerId)
+        ).run(guildId, userId)
+        // A rejoining setup sees its guild again.
+        db.prepare(
+          'DELETE FROM guild_bot_removals WHERE guild_id = ? AND bot_token = ?'
+        ).run(guildId, request.token)
+        // Re-listing a guild whose bot was banned re-adds the bot (rejoin), so
+        // the stale ban must not remain.
+        db.prepare(
+          'DELETE FROM guild_bans WHERE guild_id = ? AND user_id = ?'
+        ).run(guildId, userId)
+
         pendingEvents.push(() => {
           gatewayBus.emit('guild.member.add', {
             guildId,
-            member: getGuildMember(db, guildId, ownerId) as unknown as Record<
+            member: getGuildMember(db, guildId, userId) as unknown as Record<
               string,
               unknown
             >,
           })
         })
+      } else {
+        // A prepared guild has no bot member until the join control runs.
+        deleteGuildMembership(db, guildId, userId)
+      }
+
+      if (ownerId !== userId) {
+        db.prepare(
+          'INSERT OR IGNORE INTO guild_members (guild_id, user_id) VALUES (?, ?)'
+        ).run(guildId, ownerId)
+        if (botPresent)
+          pendingEvents.push(() => {
+            gatewayBus.emit('guild.member.add', {
+              guildId,
+              member: getGuildMember(db, guildId, ownerId) as unknown as Record<
+                string,
+                unknown
+              >,
+            })
+          })
       }
 
       const channelsResponse: { id: string; name: string; type: number }[] = []
