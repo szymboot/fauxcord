@@ -227,6 +227,18 @@ dispatch of that guild until it recovers, and then a fresh `GUILD_CREATE`
 snapshot. IDENTIFY, RESUME, TTL and evidence are described in the
 [test API documentation](./docs/test-api.md#simulated-guild-outage-guild_delete-unavailable--guild_create).
 
+### Inject exact REST failures
+
+`POST /_test/rest-faults` arms bounded failures (HTTP errors, `rate_limit`,
+`delay`, `disconnect`) for one exact REST request, scoped to a bot's guild, with
+`times`, TTL, inspection counters and reset cleanup. Selectors include message,
+channel, ban, member, role, invite and voice-state routes, plus the ban-appeal
+paths `GET /guilds/:guildId/channels`, `DELETE /users/@me/guilds/:guildId`,
+and, by interaction ID rather than secret token,
+`POST /interactions/:interactionId/callback` and
+`GET`/`PATCH /interactions/:interactionId/messages/@original`. See the
+[selector list](./docs/test-api.md#post-_testrest-faults--fail-bounded-exact-rest-attempts).
+
 ### Inspect channel messages (for testing)
 
 ```bash

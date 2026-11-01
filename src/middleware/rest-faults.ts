@@ -3,9 +3,19 @@ import type { MiddlewareHandler } from 'hono'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import type { Database } from '../db'
 import type { AppEnv } from './auth'
-import { consumeRestFault, getRestFaultRuntime } from '../services/rest-faults'
+import { parseRestFaultInteractionSelector } from '../validators/rest-fault'
+import {
+  consumeRestFault,
+  getRestFaultRuntime,
+  resolveInteractionFaultTarget,
+} from '../services/rest-faults'
 
-/** Intercepts configured authenticated requests before their route can mutate state. */
+/**
+ * Intercepts configured requests before their route can mutate state. Bot
+ * routes use the calling bot; token-authorized interaction routes (outside
+ * bot auth) use the bot owning the stored interaction, so they pass through
+ * unchanged unless a control is armed for that exact interaction.
+ */
 export function createRestFaultMiddleware(
   db: Database
 ): MiddlewareHandler<AppEnv> {
@@ -13,8 +23,19 @@ export function createRestFaultMiddleware(
   return async (c, next) => {
     let path = c.req.path
       .replace(/^\/api(?:\/v10)?(?=\/)/, '')
-      .replace(/^\/users\/%40me\/channels$/, '/users/@me/channels')
+      .replace(
+        /^\/users\/%40me\/(?=channels$|guilds\/\d{1,20}$)/,
+        '/users/@me/'
+      )
     const bot = c.get('bot')
+    const interaction = resolveInteractionFaultTarget(db, c.req.method, path)
+    if (interaction) path = interaction.path
+    // Token-free interaction selectors are never reachable by sending their
+    // pseudo-paths directly; only a verified native request consumes them.
+    else if (parseRestFaultInteractionSelector(c.req.method, path)) {
+      await next()
+      return
+    }
     // The native voice-state read resolves `@me` (or `%40me`, which decodeURI
     // keeps) to the calling bot, so the fault selector for that bot's numeric
     // user ID is consumed by either spelling.
@@ -41,7 +62,7 @@ export function createRestFaultMiddleware(
       db,
       c.req.method,
       path,
-      c.get('bot')?.token,
+      interaction?.ownerToken ?? bot?.token,
       new URL(c.req.url).searchParams,
       recipientId
     )

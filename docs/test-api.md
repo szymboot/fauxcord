@@ -1076,6 +1076,11 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `DELETE` | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role removal           |
 | `GET`    | `/guilds/{guildId}/audit-logs`                      | Deletion audit-log reads    |
 | `GET`    | `/guilds/{guildId}/invites`                         | Guild invite listing        |
+| `GET`    | `/guilds/{guildId}/channels`                        | Guild channel listing       |
+| `DELETE` | `/users/@me/guilds/{guildId}`                       | Bot leaving a guild         |
+| `POST`   | `/interactions/{interactionId}/callback`            | Interaction callback        |
+| `GET`    | `/interactions/{interactionId}/messages/@original`  | Original response read      |
+| `PATCH`  | `/interactions/{interactionId}/messages/@original`  | Original response edit      |
 | `GET`    | `/guilds/{guildId}/members/{userId}`                | Member reads                |
 | `GET`    | `/guilds/{guildId}/voice-states/{userId}`           | Member voice state reads    |
 | `GET`    | `/users/{userId}`                                   | Global user reads           |
@@ -1275,6 +1280,69 @@ exhaustion until the control is deleted; Guild/setup deletion and global or
 Bot-scoped reset remove active and exhausted controls. Coverage is in
 `src/rest-member-role-removal-faults.test.ts`, using full `buildApp` routes and
 real HTTP/Gateway sockets.
+
+### Ban-appeal selectors
+
+Four selector families cover the error paths of a ban-appeal flow. All of them
+use the existing modes (`rate_limit`, `delay`, `disconnect`, or a legacy HTTP
+error when `mode` is omitted), `times`, TTL, `remaining`/`consumed` counters,
+`outcomes`, `409` conflicts, cancellation, reset cleanup and `query`/`recipient_id`
+rejection (`400`), and every selected failure runs **before** the native route.
+
+**Guild channel listing** (`GET /guilds/{guildId}/channels`) follows the Guild
+GET scope rules: the Guild must exist (`404` otherwise), optional `guild_id` must
+equal the path's Guild (`400` otherwise), and only the Guild's owning Bot consumes
+the control. Request query parameters are ignored. It is independent of the
+`POST` guild channel creation selector for the same path.
+
+**Bot leaving a guild** (`DELETE /users/@me/guilds/{guildId}`) is owned by the
+calling Bot: the control binds the Guild's registered Bot **in every mode,
+including legacy errors**, so another Bot leaving that Guild runs its ordinary
+route (`404` / `Unknown Guild`) without consuming it. The scope Guild is the
+path's Guild (it must exist; optional `guild_id` must match). A faulted leave does
+not detach the Bot (`bot_present` stays `1`) and emits neither `GUILD_MEMBER_REMOVE`
+nor `GUILD_DELETE`; the percent-encoded `/users/%40me/guilds/{guildId}` spelling
+consumes the same control. After exhaustion the leave runs natively.
+
+**Interaction callback and original response** are authorized by the interaction
+token, not a Bot token, so they sit outside bot authentication yet still pass
+through the fault middleware (a request with no armed control behaves exactly as
+before). Their selectors carry **only the interaction ID**, not the secret token:
+
+| Native request                                                      | Selector `path`                                    |
+| ------------------------------------------------------------------- | -------------------------------------------------- |
+| `POST /interactions/{id}/{token}/callback`                          | `/interactions/{id}/callback`                      |
+| `GET`/`PATCH /webhooks/{applicationId}/{token}/messages/@original`  | `/interactions/{id}/messages/@original`            |
+
+The token stays out of selectors because interaction IDs are unique, and because
+the control API echoes `path` back on inspection and is auth-exempt; credentials
+would otherwise leak into evidence. The token is still checked at request time: a
+native request consumes the control only when its ID and token (callback), or its
+application ID and token (`@original`), identify that stored interaction, so
+requests with a wrong token, another interaction, a real webhook with a similar
+path, or other `@original` methods follow their ordinary route (`404` for unknown
+credentials). Selectors containing a token (`/interactions/{id}/{token}/callback`,
+`/webhooks/...`) are rejected (`400`).
+
+The interaction must exist when arming (`404` otherwise; hold `INTERACTION_CREATE`
+with a [Gateway capture](#scoped-gateway-capture-hold-release-and-replay) if the
+bot could respond before you arm). Owner and scope derive from it: the control
+binds the Bot that owns the interaction's Guild when that Bot is the interaction's
+application, the cleanup Guild is the interaction's Guild (or its channel's Guild
+for channel-only interactions), and `channel_id` is the interaction's channel.
+Interactions outside a Guild, or whose Bot or channel no longer matches, return
+`404`; `guild_id` is rejected (`400`). Owner reassignment and channel deletion
+invalidate the control, and Bot-scoped or global reset removes it.
+
+A faulted callback leaves the interaction **unacknowledged**: it fails before body
+validation, so `GET /_test/interactions/{id}/callback` still reports
+`responded: false`, no original response is created, and a retry is accepted
+natively (`204`, then `responded: true`). A faulted `PATCH .../@original` leaves
+the message content, embeds and components unchanged and emits no `MESSAGE_UPDATE`;
+a faulted `GET` returns no message. `GET` and `PATCH` for the same interaction are
+separate controls; `POST` callback faults do not affect `@original`. Coverage is in
+`src/rest-appeal-faults.test.ts` (full `buildApp` routes over a real HTTP socket)
+and `src/validators/rest-fault.test.ts`.
 
 To fail a message edit (including a shop category or item message refresh in
 discord-bot Harness task DSC-1004), arm the exact native PATCH path:
