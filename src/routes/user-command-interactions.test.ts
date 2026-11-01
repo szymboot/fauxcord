@@ -202,7 +202,7 @@ describe('POST /_test/interactions for USER commands', () => {
       { command_type: 3, target_id: '1' },
       'command_type',
     ],
-    ['a non-command interaction type', { target_id: '1', type: 3 }, 'type'],
+    ['a non-command interaction type', { target_id: '1', type: 5 }, 'type'],
     [
       'options on a USER command',
       { target_id: '1', options: [{ name: 'a', type: 3, value: 'b' }] },

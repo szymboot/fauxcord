@@ -2,7 +2,7 @@
 
 import type { Locale } from 'discord-api-types/v10'
 import { requiredError, typeError, type ValidationErrors } from './common'
-import { validateMessageComponents } from './message-components'
+import { text, validateMessageComponents } from './message-components'
 import { validateMessageEmbeds } from './message'
 import { parseModal } from './modal'
 
@@ -168,6 +168,13 @@ export function validateInteractionCallback(
 
 /** Fields accepted by `POST /_test/interactions` that need validation. */
 export interface TestInteractionFields {
+  application_id?: unknown
+  channel_id?: unknown
+  message_id?: unknown
+  custom_id?: unknown
+  user_id?: unknown
+  guild_id?: unknown
+  command_name?: unknown
   command_type?: unknown
   target_id?: unknown
   type?: unknown
@@ -175,9 +182,62 @@ export interface TestInteractionFields {
   locale?: unknown
 }
 
+/** Snowflake string check shared by component interaction identifiers. */
+const SNOWFLAKE = /^[1-9]\d{0,19}$/
+
 /**
- * Validates the fields of a simulated interaction request that select the
- * command kind: `command_type` (1 CHAT_INPUT, 2 USER), the USER command's
+ * Validates a simulated MESSAGE_COMPONENT (type 3) interaction request: the
+ * identifiers of the application, channel, message, and clicking user are
+ * required, `guild_id` is optional, and every command-only field is refused.
+ * @param fields - Request body fields
+ * @returns Discord-shaped field errors, or an empty object when valid
+ */
+function validateTestComponentInteraction(
+  fields: TestInteractionFields
+): ValidationErrors {
+  const errors = validateInteractionLocale(fields.locale)
+  for (const key of [
+    'application_id',
+    'channel_id',
+    'message_id',
+    'user_id',
+  ] as const) {
+    if (fields[key] === undefined) errors[key] = { _errors: [requiredError()] }
+    else if (typeof fields[key] !== 'string' || !SNOWFLAKE.test(fields[key]))
+      errors[key] = { _errors: [typeError('Snowflake string')] }
+  }
+  if (
+    fields.guild_id !== undefined &&
+    (typeof fields.guild_id !== 'string' || !SNOWFLAKE.test(fields.guild_id))
+  ) {
+    errors.guild_id = { _errors: [typeError('Snowflake string')] }
+  }
+  // Same required/type/character-count rule as the button's own custom_id.
+  text(fields.custom_id, 'custom_id', 100, errors, true)
+  for (const key of [
+    'command_name',
+    'command_type',
+    'target_id',
+    'options',
+  ] as const) {
+    if (fields[key] !== undefined) {
+      errors[key] = {
+        _errors: [
+          {
+            code: 'BASE_TYPE_BAD_VALUE',
+            message: 'Not allowed for MESSAGE_COMPONENT (3) interactions.',
+          },
+        ],
+      }
+    }
+  }
+  return errors
+}
+
+/**
+ * Validates the fields of a simulated interaction request. A MESSAGE_COMPONENT
+ * (`type: 3`) button click is validated as such; otherwise the fields that
+ * select the command kind are checked: `command_type` (1 CHAT_INPUT, 2 USER), the USER command's
  * `target_id`, and the invoking user's locale. `command_type` defaults to 2
  * when a `target_id` is given and to 1 otherwise.
  * @param body - Untrusted request body
@@ -188,6 +248,7 @@ export function validateTestInteraction(body: unknown): ValidationErrors {
     return { body: { _errors: [typeError('object')] } }
   }
   const fields = body as TestInteractionFields
+  if (fields.type === 3) return validateTestComponentInteraction(fields)
   const errors = validateInteractionLocale(fields.locale)
   const choices = (message: string): ValidationErrors[string] => ({
     _errors: [{ code: 'BASE_TYPE_CHOICES', message }],

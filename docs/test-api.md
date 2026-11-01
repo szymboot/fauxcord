@@ -2762,7 +2762,8 @@ guild-scoped) and dispatches it to the bot via the Gateway as
 `INTERACTION_CREATE`. Responds `201` immediately with the interaction's
 info; the Gateway dispatch happens asynchronously right after. The default
 interaction is a slash command (CHAT_INPUT); pass `target_id` to invoke a
-[user context command](#user-context-commands).
+[user context command](#user-context-commands), or `type: 3` to
+[click a button](#button-clicks-message_component) on a bot message.
 
 ```bash
 curl -X POST http://localhost:3000/_test/interactions \
@@ -2877,6 +2878,96 @@ created. Responses to a user command use message type `23`
 | `404`  | `{"message": "404: Not Found", "code": 0}`              | No command of that kind and name in scope (a slash command of the same name does not match) |
 | `404`  | `Unknown User` (`10013`)                                | `target_id` is not an existing user (create one with `POST /_test/users`)                   |
 | `404`  | `Unknown Guild` (`10004`) / `Unknown Channel` (`10003`) | As for every simulated interaction                                                          |
+
+### Button clicks (MESSAGE_COMPONENT)
+
+`type: 3` simulates a user clicking a button on a message, dispatching a native
+`MESSAGE_COMPONENT` `INTERACTION_CREATE`. It is the same route as commands
+(so locale, guild/channel gating, tokens, callbacks and the callback
+observation behave identically) rather than a sibling route, because a click
+differs from a command only in which fields select its target.
+
+```bash
+curl -X POST http://localhost:3000/_test/interactions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": 3,
+    "application_id": "111111111111111111",
+    "channel_id": "333333333333333333",
+    "message_id": "666666666666666666",
+    "custom_id": "approve_unban_appeal:42",
+    "user_id": "555555555555555555"
+  }'
+```
+
+| Field            | Required | Description                                                                          |
+| ---------------- | -------- | ------------------------------------------------------------------------------------ |
+| `type`           | ✅       | `3`                                                                                  |
+| `application_id` | ✅       | The bot's application ID; the message must have been sent by this application        |
+| `channel_id`     | ✅       | Channel holding the message                                                          |
+| `message_id`     | ✅       | The message carrying the button                                                      |
+| `custom_id`      | ✅       | Exact `custom_id` of a clickable button on the message                               |
+| `user_id`        | ✅       | Clicking user: an existing guild member in guilds, a recipient of the channel in DMs |
+| `guild_id`       | —        | Guild ID; inferred from the channel when omitted, and must match it when given       |
+| `locale`         | —        | Invoking user's locale (default `en-US`)                                             |
+
+`command_name`, `command_type`, `target_id` and `options` are refused for
+`type: 3` (`400`, `50035` with that field); command interactions are unchanged.
+
+A click is only created when a Discord client could make it. Checks run in
+this order and nothing is created or dispatched on failure:
+
+| Status | Body                                                    | Cause                                                                                                                                      |
+| ------ | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `400`  | `50035` with a field error                              | A required field is missing or malformed, a command-only field was sent, or `locale` is unsupported                                        |
+| `404`  | `Unknown Guild` (`10004`) / `Unknown Channel` (`10003`) | As for every simulated interaction (the bot left or lost the guild, or the channel does not exist)                                         |
+| `404`  | `Unknown Message` (`10008`)                             | No such message in `channel_id`                                                                                                            |
+| `400`  | `50035` with `message_id`                               | The message was not sent by `application_id` (interactions route to the application owning the message)                                    |
+| `400`  | `50035` with `custom_id`                                | No button with that `custom_id`; link buttons have none, so passing a link button's `url` is reported as "Link buttons cannot be clicked." |
+| `400`  | `50035` with `custom_id`                                | The button has `disabled: true`; a client cannot click it                                                                                  |
+| `404`  | `Unknown Member` (`10007`) / `Unknown User` (`10013`)   | `user_id` is not a guild member (in a guild) / not an existing user who is a recipient of the DM channel                                   |
+
+Disabling a button with `PATCH /channels/:id/messages/:id` makes later clicks
+fail with the disabled-button error. Ephemeral original responses of earlier
+interactions can be clicked too, but only by the user they were sent to (any
+other `user_id` gets `Unknown Message`), as in Discord.
+
+The interaction, its response and the Gateway event carry the Discord shape:
+
+```json
+{
+  "id": "…",
+  "application_id": "111111111111111111",
+  "type": 3,
+  "token": "…",
+  "version": 1,
+  "locale": "en-US",
+  "guild_id": "222222222222222222",
+  "channel_id": "333333333333333333",
+  "member": { "user": { "id": "555555555555555555" }, "roles": [] },
+  "data": { "custom_id": "approve_unban_appeal:42", "component_type": 2 },
+  "message": { "id": "666666666666666666", "components": ["…"], "…": "…" }
+}
+```
+
+`message` is the full message exactly as
+`GET /channels/:id/messages/:id` returns it at click time, including its
+`components`; in DMs the payload has `user` instead of `member`. A snapshot is
+kept, so later edits do not change what that interaction (or modals opened
+from it) carries. Like all interactions here, no `app_permissions`, `channel`
+or `entitlements` fields are sent.
+
+Callbacks behave as for commands: `4` and `5` create the original response
+(`EPHEMERAL` honored; the response is a message of type `0`), and `9` shows a
+modal that can be read through the
+[callback observation](#get-_testinteractionsinteractionidcallback--observe-the-initial-callback)
+and [submitted](#post-_testinteractionsinteractionidmodal-submit--submit-a-shown-modal).
+A `MODAL_SUBMIT` created from a click carries the clicked `message`, as in
+Discord (it is absent for modals opened from a command). Callbacks `6`
+(DEFERRED_UPDATE_MESSAGE) and `7` (UPDATE_MESSAGE) are acknowledgement-only:
+they do not edit the clicked message and record no original response (so
+webhook `@original` edits return `404`); a bot should edit the clicked message
+with `PATCH /channels/:id/messages/:id` as usual.
 
 The optional `locale` field accepts the invoking user's
 [Discord locale](https://docs.discord.com/developers/reference#locales), such

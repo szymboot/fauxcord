@@ -237,6 +237,20 @@ function migrateInteractionModal(db: Database): void {
   }
 }
 
+/**
+ * Adds the message snapshot a component click (and a modal opened from it)
+ * carries.
+ * @param db - Database instance
+ */
+function migrateInteractionMessage(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(interactions)').all() as {
+    name: string
+  }[]
+  if (columns.every((column) => column.name !== 'message_json')) {
+    db.exec('ALTER TABLE interactions ADD COLUMN message_json TEXT')
+  }
+}
+
 /** Preserves legacy controls while admitting bot-scoped user route selectors. */
 function migrateRestFaultSelectors(db: Database): void {
   db.transaction(() => {
@@ -792,6 +806,7 @@ export function initializeDatabase(dbPath: string): Database {
       initial_callback_type       INTEGER,
       initial_response_message_id TEXT,
       modal_json                  TEXT,
+      message_json                TEXT,
       created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_interactions_app ON interactions(application_id);
@@ -1180,6 +1195,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateInteractionLocale(db)
   migrateInteractionCallbackType(db)
   migrateInteractionModal(db)
+  migrateInteractionMessage(db)
   migrateRestFaultSelectors(db)
   migrateReactionTypes(db)
   recoverRestFaultOutcomes(db)
