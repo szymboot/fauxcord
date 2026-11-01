@@ -27,6 +27,11 @@ export interface InteractionObject {
   channel_id?: string
   member?: Record<string, unknown>
   user?: Record<string, unknown>
+  /**
+   * The message a component click happened on, as REST returned it when the
+   * click was made; also carried by a modal submitted from that click.
+   */
+  message?: Record<string, unknown>
   token: string
   version: number
 }
@@ -48,6 +53,7 @@ interface InteractionRow {
   initial_callback_type: number | null
   initial_response_message_id: string | null
   modal_json: string | null
+  message_json: string | null
   created_at: string
 }
 
@@ -98,6 +104,9 @@ function toInteractionObject(
     ...(row.guild_id && { guild_id: row.guild_id }),
     ...(member && { member: member as unknown as Record<string, unknown> }),
     ...(user && { user: user as unknown as Record<string, unknown> }),
+    ...(row.message_json && {
+      message: JSON.parse(row.message_json) as Record<string, unknown>,
+    }),
   }
 
   return result
@@ -115,6 +124,8 @@ export interface CreateInteractionParams {
   channelId?: string
   commandId?: string
   data?: Record<string, unknown>
+  /** Message snapshot of a component click, kept for its modal submissions. */
+  message?: Record<string, unknown>
   userId: string
 }
 
@@ -131,8 +142,8 @@ export function createInteraction(
 ): InteractionObject {
   db.prepare(
     `INSERT INTO interactions
-       (id, application_id, token, type, locale, guild_id, channel_id, command_id, data, user_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (id, application_id, token, type, locale, guild_id, channel_id, command_id, data, user_id, message_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     params.interactionId,
     params.applicationId,
@@ -143,7 +154,8 @@ export function createInteraction(
     params.channelId ?? null,
     params.commandId ?? null,
     JSON.stringify(params.data ?? {}),
-    params.userId
+    params.userId,
+    params.message ? JSON.stringify(params.message) : null
   )
 
   const row = db

@@ -40,7 +40,8 @@ export type SubmitModalResult =
 /**
  * Submits the modal shown for an interaction as the same user, guild,
  * channel, and locale, dispatching a native MODAL_SUBMIT (type 5)
- * INTERACTION_CREATE. The shown modal is not consumed: submitting again
+ * INTERACTION_CREATE (carrying the clicked `message` when the modal was
+ * opened from a component interaction). The shown modal is not consumed: submitting again
  * creates another independent interaction, as Discord does per submit. The
  * guild and channel gating of interaction creation applies again, so a bot
  * removed from the guild since the modal was shown receives nothing, and
@@ -62,7 +63,7 @@ export function submitTestModal(
 ): SubmitModalResult {
   const row = db
     .prepare(
-      `SELECT guild_id, channel_id, locale, user_id, initial_callback_type, modal_json
+      `SELECT guild_id, channel_id, locale, user_id, initial_callback_type, modal_json, message_json
        FROM interactions WHERE id = ? AND application_id = ? AND token = ?`
     )
     .get(interactionId, applicationId, token) as
@@ -73,6 +74,7 @@ export function submitTestModal(
         user_id: string
         initial_callback_type: number | null
         modal_json: string | null
+        message_json: string | null
       }
     | undefined
   if (!row) return { ok: false, reason: 'not_found' }
@@ -136,6 +138,10 @@ export function submitTestModal(
     guildId: scope.guildId,
     channelId: row.channel_id ?? undefined,
     data: submission.data,
+    // Discord attaches the clicked message when the modal came from a component.
+    message: row.message_json
+      ? (JSON.parse(row.message_json) as Record<string, unknown>)
+      : undefined,
     userId: row.user_id,
   })
   return { ok: true, interaction }

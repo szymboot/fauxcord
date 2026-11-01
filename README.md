@@ -7,7 +7,7 @@ Run integration tests for Discord bots and applications without connecting to th
 
 - **Discord API v10 compatible** — Covers channels, Guilds, messages, Webhooks, and OAuth2
 - **Stateful consistency** — Messages created via POST can be retrieved via GET
-- **Test control API** — Set up and reset test environments via `/_test/*`
+- **Test control API** — Set up and reset test environments via `/_test/*`, including simulated users clicking bot-message buttons (`POST /_test/interactions` with `type: 3`)
 - **Rate Limit headers** — Discord-compatible headers attached to responses (dummy values)
 - **Snowflake IDs** — Automatically generates Discord-compatible IDs
 - **File attachments** — Supports file uploads via multipart/form-data

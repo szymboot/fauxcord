@@ -332,6 +332,25 @@ otherwise the submission returns `404`. See
 [test-api.md](./test-api.md#user-context-commands) for payloads, supported
 modal components, and validation errors.
 
+### Button clicks
+
+Simulate a user clicking a button on a message the bot sent with
+`"type": 3` (the bot receives a native `MESSAGE_COMPONENT` interaction whose
+`message` is the clicked message):
+
+```bash
+curl -X POST http://localhost:3000/_test/interactions \
+  -H "Content-Type: application/json" \
+  -d '{"type": 3, "application_id": "111111111111111111",
+       "channel_id": "333333333333333333", "message_id": "<message_id>",
+       "custom_id": "appeal", "user_id": "555555555555555555"}'
+```
+
+The message must have been sent by that application and carry an enabled,
+non-link button with that exact `custom_id`; in a guild `user_id` must be a
+member. See [test-api.md](./test-api.md#button-clicks-message_component) for
+the payload and every rejection.
+
 ---
 
 ### OAuth command permission overrides

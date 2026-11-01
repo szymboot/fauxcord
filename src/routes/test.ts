@@ -51,6 +51,10 @@ import type {
 import { getChannelWebhooks } from '../services/webhooks'
 import { getInteractionCallbackObservation } from '../services/interactions'
 import {
+  createTestComponentInteraction,
+  type TestComponentInteractionRequest,
+} from '../services/component-interactions'
+import {
   submitTestModal,
   type ModalSubmitRequest,
 } from '../services/modal-submissions'
@@ -827,16 +831,75 @@ export function createTestRoutes(
   })
 
   // POST /_test/interactions — Simulate an interaction against a registered
-  // command, without a real Discord client.
+  // command (or, with `type: 3`, a button on a bot message), without a real
+  // Discord client.
   app.post('/_test/interactions', async (c) => {
     const raw: unknown = await c.req.json().catch(() => null)
     const errors = validateTestInteraction(raw)
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
     }
-    const result = createTestInteraction(db, raw as TestInteractionRequest)
+    const result =
+      (raw as { type?: unknown }).type === 3
+        ? createTestComponentInteraction(
+            db,
+            raw as TestComponentInteractionRequest,
+            baseUrl
+          )
+        : createTestInteraction(db, raw as TestInteractionRequest)
     if (result.ok) return c.json(result.interaction, 201)
     switch (result.reason) {
+      case 'unknown_message': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_MESSAGE, 'Unknown Message', 404)
+            .body,
+          404
+        )
+      }
+      case 'unknown_member': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member', 404)
+            .body,
+          404
+        )
+      }
+      case 'foreign_message': {
+        return c.json(
+          validationError({
+            message_id: {
+              _errors: [
+                {
+                  code: 'BASE_TYPE_BAD_VALUE',
+                  message: 'Message was not sent by this application.',
+                },
+              ],
+            },
+          }).body,
+          400
+        )
+      }
+      case 'unknown_component':
+      case 'link_button':
+      case 'disabled_component': {
+        const messages = {
+          unknown_component: 'Message has no button with this custom_id.',
+          link_button: 'Link buttons cannot be clicked.',
+          disabled_component: 'Disabled buttons cannot be clicked.',
+        }
+        return c.json(
+          validationError({
+            custom_id: {
+              _errors: [
+                {
+                  code: 'BASE_TYPE_BAD_VALUE',
+                  message: messages[result.reason],
+                },
+              ],
+            },
+          }).body,
+          400
+        )
+      }
       case 'unknown_user': {
         return c.json(
           discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404).body,
