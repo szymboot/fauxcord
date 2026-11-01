@@ -6,8 +6,10 @@ import { generateSnowflake } from '../snowflake'
 import {
   isRestFaultChannelEdit,
   isRestFaultGuildChannelCreatePath,
+  isRestFaultGuildLeave,
   isRestFaultPagePath,
   normalizeRestFaultQuery,
+  parseRestFaultInteractionSelector,
   type RestFaultRequest,
 } from '../validators/rest-fault'
 
@@ -367,15 +369,63 @@ function deserializeFault(
   }
 }
 
-/** Resolves ownership and inserts a control inside the caller's transaction. */
-function insertRestFault(
+/** Guild, owning bot and optional channel that scope one control. */
+interface RestFaultScope {
+  guild: { id: string; bot_token: string }
+  channelId: string | null
+  /** Whether only the scope's owning bot may consume the control. */
+  ownerBound: boolean
+}
+
+/**
+ * Joins a stored interaction to its guild, the bot owning that guild and the
+ * interaction's application, and its channel. The guild is the interaction's
+ * own, or its channel's when only a channel was recorded; interactions outside
+ * a guild, with a vanished channel, or whose application is not the guild's
+ * bot have no scope.
+ */
+const INTERACTION_FAULT_SCOPE_SQL = `
+  FROM interactions i
+  LEFT JOIN channels c ON c.id = i.channel_id
+  JOIN guilds g ON g.id = COALESCE(i.guild_id, c.guild_id)
+  JOIN bots b ON b.token = g.bot_token AND b.user_id = i.application_id
+  WHERE (i.channel_id IS NULL OR c.guild_id = g.id)`
+
+/** Resolves an interaction selector's scope from the stored interaction. */
+function resolveInteractionFaultScope(
+  db: Database,
+  interactionId: string
+): RestFaultScope | undefined {
+  const row = db
+    .prepare(
+      `SELECT g.id, g.bot_token, i.channel_id ${INTERACTION_FAULT_SCOPE_SQL} AND i.id = ?`
+    )
+    .get(interactionId) as
+    { id: string; bot_token: string; channel_id: string | null } | undefined
+  return row
+    ? {
+        guild: { id: row.id, bot_token: row.bot_token },
+        channelId: row.channel_id,
+        ownerBound: true,
+      }
+    : undefined
+}
+
+/** Resolves the scope an exact selector derives from existing fixtures. */
+function resolveRestFaultScope(
   db: Database,
   request: RestFaultRequest
-): RestFault | 'UNKNOWN_SCOPE' | 'CONFLICT' {
-  const query = request.query ? JSON.stringify(request.query) : ''
+): RestFaultScope | undefined {
+  const interactionId = parseRestFaultInteractionSelector(
+    request.method,
+    request.path
+  )
+  if (interactionId !== undefined)
+    return resolveInteractionFaultScope(db, interactionId)
   const parts = request.path.split('/')
   const channelId = parts[1] === 'channels' ? parts[2] : null
   const channelEdit = isRestFaultChannelEdit(request.method, request.path)
+  const guildLeave = isRestFaultGuildLeave(request.method, request.path)
   const guild = channelId
     ? (db
         .prepare(
@@ -388,9 +438,27 @@ function insertRestFault(
         { id: string; bot_token: string } | undefined)
     : (db
         .prepare('SELECT id, bot_token FROM guilds WHERE id = ?')
-        .get(parts[1] === 'users' ? request.guild_id : parts[2]) as
-        { id: string; bot_token: string } | undefined)
-  if (!guild?.id) return 'UNKNOWN_SCOPE'
+        .get(
+          parts[1] === 'users'
+            ? guildLeave
+              ? parts[4]
+              : request.guild_id
+            : parts[2]
+        ) as { id: string; bot_token: string } | undefined)
+  return guild?.id
+    ? { guild, channelId, ownerBound: channelEdit || guildLeave }
+    : undefined
+}
+
+/** Resolves ownership and inserts a control inside the caller's transaction. */
+function insertRestFault(
+  db: Database,
+  request: RestFaultRequest
+): RestFault | 'UNKNOWN_SCOPE' | 'CONFLICT' {
+  const query = request.query ? JSON.stringify(request.query) : ''
+  const scope = resolveRestFaultScope(db, request)
+  if (!scope) return 'UNKNOWN_SCOPE'
+  const { guild, channelId } = scope
   if (
     db
       .prepare(
@@ -441,7 +509,7 @@ function insertRestFault(
       }),
     }),
     request.mode ? Date.now() + (request.timeout_ms ?? 30_000) : 0,
-    channelEdit || request.mode ? guild.bot_token : null
+    scope.ownerBound || request.mode ? guild.bot_token : null
   )
   const result = deserializeFault(
     db
@@ -478,6 +546,44 @@ export function deleteRestFault(db: Database, id: string): boolean {
     db.prepare('DELETE FROM test_rest_faults WHERE id = ?').run(id).changes > 0
   getRestFaultRuntime(db).prune()
   return deleted
+}
+
+/**
+ * Maps a native token-authorized interaction request to its token-free
+ * selector path and owning bot. The ID and token (or application ID and
+ * token) must identify the same stored interaction in a guild whose bot is
+ * the interaction's application; anything else follows the native route
+ * without consuming a control.
+ */
+export function resolveInteractionFaultTarget(
+  db: Database,
+  method: string,
+  path: string
+): { path: string; ownerToken: string } | undefined {
+  const callback =
+    method === 'POST'
+      ? /^\/interactions\/([^/]+)\/([^/]+)\/callback$/.exec(path)
+      : null
+  const original =
+    method === 'GET' || method === 'PATCH'
+      ? /^\/webhooks\/([^/]+)\/([^/]+)\/messages\/@original$/.exec(path)
+      : null
+  const match = callback ?? original
+  if (!match) return undefined
+  const row = db
+    .prepare(
+      `SELECT i.id, g.bot_token ${INTERACTION_FAULT_SCOPE_SQL}
+      AND ${callback ? 'i.id' : 'i.application_id'} = ? AND i.token = ?`
+    )
+    .get(match[1], match[2]) as { id: string; bot_token: string } | undefined
+  return row
+    ? {
+        path: callback
+          ? `/interactions/${row.id}/callback`
+          : `/interactions/${row.id}/messages/@original`,
+        ownerToken: row.bot_token,
+      }
+    : undefined
 }
 
 /** Atomically consumes one matching attempt, with no ordinary route side effects. */

@@ -388,7 +388,6 @@ describe('guild channel creation REST faults through buildApp', () => {
     { method: 'PUT' },
     { method: 'PATCH' },
     { method: 'DELETE' },
-    { method: 'GET' },
     { path: '/guilds/{guildID}/channels' },
     { path: '/guilds/*/channels' },
     { path: '/guilds/1.2/channels' },

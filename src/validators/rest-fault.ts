@@ -38,6 +38,31 @@ export function isRestFaultGuildChannelCreatePath(path: string): boolean {
   return /^\/guilds\/\d{1,20}\/channels$/.test(path)
 }
 
+/**
+ * Extracts the interaction ID from the token-free interaction selectors:
+ * `POST /interactions/{id}/callback` and `GET|PATCH
+ * /interactions/{id}/messages/@original`. The secret interaction token is
+ * deliberately not part of a selector; the middleware matches it against the
+ * stored interaction at request time.
+ */
+export function parseRestFaultInteractionSelector(
+  method: unknown,
+  path: string
+): string | undefined {
+  const match =
+    method === 'POST'
+      ? /^\/interactions\/(\d{1,20})\/callback$/.exec(path)
+      : method === 'GET' || method === 'PATCH'
+        ? /^\/interactions\/(\d{1,20})\/messages\/@original$/.exec(path)
+        : null
+  return match?.[1]
+}
+
+/** Identifies the exact selector for the calling bot leaving a guild. */
+export function isRestFaultGuildLeave(method: unknown, path: string): boolean {
+  return method === 'DELETE' && /^\/users\/@me\/guilds\/\d{1,20}$/.test(path)
+}
+
 /** Identifies list routes whose faults select a page rather than ignoring queries. */
 export function isRestFaultPagePath(path: string): boolean {
   return (
@@ -193,7 +218,19 @@ export function validateRestFault(
   const channelEdit = isRestFaultChannelEdit(body.method, body.path)
   const inviteCreate =
     body.method === 'POST' && /^\/channels\/\d{1,20}\/invites$/.test(body.path)
-  if ((channelEdit || inviteCreate) && body.guild_id !== undefined)
+  const interactionSelector =
+    parseRestFaultInteractionSelector(body.method, body.path) !== undefined
+  const guildLeave = isRestFaultGuildLeave(body.method, body.path)
+  if (
+    (channelEdit || inviteCreate || interactionSelector) &&
+    body.guild_id !== undefined
+  )
+    return undefined
+  if (
+    guildLeave &&
+    body.guild_id !== undefined &&
+    body.guild_id !== body.path.slice('/users/@me/guilds/'.length)
+  )
     return undefined
   const guildChannelCreate =
     body.method === 'POST' && isRestFaultGuildChannelCreatePath(body.path)
@@ -206,7 +243,7 @@ export function validateRestFault(
     return undefined
   const guildRead =
     body.method === 'GET' &&
-    /^\/guilds\/\d{1,20}\/(?:audit-logs|members|bans|invites|(?:members|voice-states)\/\d{1,20})$/.test(
+    /^\/guilds\/\d{1,20}\/(?:audit-logs|members|bans|invites|channels|(?:members|voice-states)\/\d{1,20})$/.test(
       body.path
     )
   const pageRead = body.method === 'GET' && isRestFaultPagePath(body.path)
@@ -241,6 +278,8 @@ export function validateRestFault(
     guildChannelCreate ||
     guildRead ||
     pageRead ||
+    guildLeave ||
+    interactionSelector ||
     (body.method === 'POST' &&
       /^\/channels\/\d{1,20}\/messages$/.test(body.path)) ||
     (body.method === 'DELETE' &&

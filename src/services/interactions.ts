@@ -163,9 +163,19 @@ export function createInteraction(
     .get(params.interactionId) as InteractionRow
   const interaction = toInteractionObject(db, row)
 
+  // Only the setup owning the interaction's guild receives it, like other
+  // scoped events, so apps sharing a process and bot ID stay isolated.
+  const guild = db
+    .prepare(
+      'SELECT bot_token FROM guilds WHERE id = COALESCE(?, (SELECT guild_id FROM channels WHERE id = ?))'
+    )
+    .get(params.guildId ?? null, params.channelId ?? null) as
+    { bot_token: string } | undefined
   gatewayBus.emit('interaction.create', {
     applicationId: params.applicationId,
     interaction: interaction as unknown as Record<string, unknown>,
+    db,
+    ...(guild && { token: guild.bot_token }),
   })
 
   return interaction

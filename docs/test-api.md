@@ -1076,6 +1076,11 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `DELETE` | `/guilds/{guildId}/members/{userId}/roles/{roleId}` | Mute-role removal           |
 | `GET`    | `/guilds/{guildId}/audit-logs`                      | Deletion audit-log reads    |
 | `GET`    | `/guilds/{guildId}/invites`                         | Guild invite listing        |
+| `GET`    | `/guilds/{guildId}/channels`                        | Guild channel listing       |
+| `DELETE` | `/users/@me/guilds/{guildId}`                       | Bot leaving a guild         |
+| `POST`   | `/interactions/{interactionId}/callback`            | Interaction callback        |
+| `GET`    | `/interactions/{interactionId}/messages/@original`  | Original response read      |
+| `PATCH`  | `/interactions/{interactionId}/messages/@original`  | Original response edit      |
 | `GET`    | `/guilds/{guildId}/members/{userId}`                | Member reads                |
 | `GET`    | `/guilds/{guildId}/voice-states/{userId}`           | Member voice state reads    |
 | `GET`    | `/users/{userId}`                                   | Global user reads           |
@@ -1275,6 +1280,92 @@ exhaustion until the control is deleted; Guild/setup deletion and global or
 Bot-scoped reset remove active and exhausted controls. Coverage is in
 `src/rest-member-role-removal-faults.test.ts`, using full `buildApp` routes and
 real HTTP/Gateway sockets.
+
+### Ban-appeal selectors
+
+Four selector families cover the error paths of a ban-appeal flow. All of them
+use the existing modes (`rate_limit`, `delay`, `disconnect`, or a legacy HTTP
+error when `mode` is omitted), `times`, TTL, `remaining`/`consumed` counters,
+`outcomes`, `409` conflicts, cancellation, reset cleanup and `query`/`recipient_id`
+rejection (`400`), and every selected failure runs **before** the native route.
+
+**Guild channel listing** (`GET /guilds/{guildId}/channels`) follows the Guild
+GET scope rules: the Guild must exist (`404` otherwise), optional `guild_id` must
+equal the path's Guild (`400` otherwise), and only the Guild's owning Bot consumes
+the control. Request query parameters are ignored. It is independent of the
+`POST` guild channel creation selector for the same path.
+
+**Bot leaving a guild** (`DELETE /users/@me/guilds/{guildId}`) is owned by the
+calling Bot: the control binds the Guild's registered Bot **in every mode,
+including legacy errors**, so another Bot leaving that Guild runs its ordinary
+route (`404` / `Unknown Guild`) without consuming it. The scope Guild is the
+path's Guild (it must exist; optional `guild_id` must match). A faulted leave does
+not detach the Bot (`bot_present` stays `1`) and emits neither `GUILD_MEMBER_REMOVE`
+nor `GUILD_DELETE`; the percent-encoded `/users/%40me/guilds/{guildId}` spelling
+consumes the same control. After exhaustion the leave runs natively.
+
+**Interaction callback and original response** are authorized by the interaction
+token, not a Bot token, so they sit outside bot authentication yet still pass
+through the fault middleware (a request with no armed control behaves exactly as
+before). Their selectors carry **only the interaction ID**, not the secret token:
+
+| Native request                                                      | Selector `path`                                    |
+| ------------------------------------------------------------------- | -------------------------------------------------- |
+| `POST /interactions/{id}/{token}/callback`                          | `/interactions/{id}/callback`                      |
+| `GET`/`PATCH /webhooks/{applicationId}/{token}/messages/@original`  | `/interactions/{id}/messages/@original`            |
+
+The token stays out of selectors because interaction IDs are unique, and because
+the control API echoes `path` back on inspection and is auth-exempt; credentials
+would otherwise leak into evidence. The token is still checked at request time: a
+native request consumes the control only when its ID and token (callback), or its
+application ID and token (`@original`), identify that stored interaction, so
+requests with a wrong token, another interaction, a real webhook with a similar
+path, or other `@original` methods follow their ordinary route (`404` for unknown
+credentials). Selectors containing a token (`/interactions/{id}/{token}/callback`,
+`/webhooks/...`) are rejected (`400`).
+
+The interaction must exist when arming (`404` otherwise), but a bot can answer a
+simulated interaction or modal submission within milliseconds. Hold its dispatch
+with a [Gateway capture](#scoped-gateway-capture-hold-release-and-replay) of
+`INTERACTION_CREATE`, arm the fault by the interaction ID the test-control call
+returned, then release:
+
+1. `POST /_test/gateway-event-controls` with `events: ["INTERACTION_CREATE"]`,
+   `hold: true`, the guild and bot (and optionally `member_id`).
+2. `POST /_test/interactions` or `POST /_test/interactions/:id/modal-submit`;
+   it returns `201` with the interaction while the bot has received nothing.
+3. `POST /_test/rest-faults` with `POST /interactions/{returned id}/callback`
+   (or an `@original` selector).
+4. `POST /_test/gateway-event-controls/:id/release` with the captured event ID.
+   With a callback fault, the bot's callback now fails,
+   `GET /_test/interactions/:id/callback` reports `responded: false`, and its
+   retry succeeds natively once the fault is spent. With an `@original` fault the
+   initial callback succeeds (`responded: true`); only the later read or edit of
+   the original response fails.
+
+The capture only sees interactions of the guild's registered bot: a dispatch is
+scoped to the creating app's database and the setup token owning the
+interaction's guild, so other apps or setups sharing a bot ID neither receive nor
+capture it.
+
+Owner and scope derive from the stored interaction: the control
+binds the Bot that owns the interaction's Guild when that Bot is the interaction's
+application, the cleanup Guild is the interaction's Guild (or its channel's Guild
+for channel-only interactions), and `channel_id` is the interaction's channel.
+Interactions outside a Guild, or whose Bot or channel no longer matches, return
+`404`; `guild_id` is rejected (`400`). Owner reassignment and channel deletion
+invalidate the control, and Bot-scoped or global reset removes it.
+
+A faulted callback leaves the interaction **unacknowledged**: it fails before body
+validation, so `GET /_test/interactions/{id}/callback` still reports
+`responded: false`, no original response is created, and a retry is accepted
+natively (`204`, then `responded: true`). A faulted `PATCH .../@original` leaves
+the message content, embeds and components unchanged and emits no `MESSAGE_UPDATE`;
+a faulted `GET` returns no message. `GET` and `PATCH` for the same interaction are
+separate controls; `POST` callback faults do not affect `@original`. Coverage is in
+`src/rest-appeal-faults.test.ts` (full `buildApp` routes over a real HTTP socket),
+`src/gateway/interaction-event-controls.test.ts` (held modal submission → fault →
+release over a real Gateway socket) and `src/validators/rest-fault.test.ts`.
 
 To fail a message edit (including a shop category or item message refresh in
 discord-bot Harness task DSC-1004), arm the exact native PATCH path:
@@ -3471,8 +3562,9 @@ the newly resolved session.
 `MESSAGE_DELETE`,
 `MESSAGE_DELETE_BULK`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
 `MESSAGE_REACTION_REMOVE_ALL`, `MESSAGE_REACTION_REMOVE_EMOJI`,
-`GUILD_MEMBER_UPDATE`, `GUILD_BAN_ADD`, and `GUILD_BAN_REMOVE`. Only events
-that the native producer actually emits are captured. Message creation (including
+`GUILD_MEMBER_UPDATE`, `GUILD_BAN_ADD`, `GUILD_BAN_REMOVE`, and
+`INTERACTION_CREATE`. Only events that the native producer actually emits are
+captured. Message creation (including
 human messages via `POST /_test/channels/:channelId/messages`), single deletion,
 native bulk deletion through the REST endpoint below, reaction addition (including
 human additions through the control above), single reaction removal, and both
@@ -3486,6 +3578,19 @@ produce no ban envelope to capture. Ban events require Guild Moderation intent
 and retain the guild's owning-bot, exact setup-token and app-database scope.
 Add `member_id` to match `d.user.id`, including users who are no longer members
 or never joined (see [member selectors](#member-selectors)).
+
+For interactions, select `INTERACTION_CREATE`. Native producers are
+`POST /_test/interactions` and `POST /_test/interactions/:interactionId/modal-submit`
+(both return the interaction to the controller at once, even while its dispatch
+is held, because the stored interaction exists before dispatch). The event is not
+intent-gated; it is captured for the guild the interaction carries (`d.guild_id`)
+and the exact session that belongs to the application's bot, so interactions of
+other guilds, other bots and DMs pass through. There is no channel selector; add
+`member_id` to match the invoking user (`d.member.user.id`, see
+[member selectors](#member-selectors)). Hold, release, replay, sequence modes and
+limits are unchanged. This is how a controller arms an
+[interaction callback or `@original` fault](#ban-appeal-selectors) before a bot that
+answers within milliseconds can reach the route.
 
 Holding a ban event holds only its matching envelope. A following
 `VOICE_STATE_UPDATE` disconnect and `GUILD_MEMBER_REMOVE` proceed normally;
@@ -3882,8 +3987,8 @@ handling. Malformed action JSON, duplicate IDs or invalid sequence mode returns
 user need not be a current guild member or exist in the users table. This lets
 a controller arm an unban capture after banning removed the user's membership,
 or select a ban target who never joined. If the control also selects
-`GUILD_MEMBER_UPDATE` or `VOICE_STATE_UPDATE`, the user must be a current member
-of that guild **when arming**, otherwise creation returns `404`. Membership is
+`GUILD_MEMBER_UPDATE`, `VOICE_STATE_UPDATE` or `INTERACTION_CREATE`, the user must
+be a current member of that guild **when arming**, otherwise creation returns `404`. Membership is
 not rechecked on capture, release or replay: a ban's events remain capturable
 after membership removal. The selector matches the subject user of each event:
 
@@ -3893,12 +3998,13 @@ after membership removal. The selector matches the subject user of each event:
 | `VOICE_STATE_UPDATE`  | `d.user_id`   |
 | `GUILD_BAN_ADD`       | `d.user.id`   |
 | `GUILD_BAN_REMOVE`    | `d.user.id`   |
+| `INTERACTION_CREATE`  | `d.member.user.id` |
 
-`events` may combine these four events (for example holding a user's ban and
+`events` may combine these five events (for example holding a user's ban and
 voice disconnect together). Every listed event must be one of these
 user-scoped events; any other event type (messages, reactions) together with
 `member_id` returns `400` with
-`{"message":"member_id requires every event to be one of GUILD_MEMBER_UPDATE, GUILD_BAN_ADD, GUILD_BAN_REMOVE, VOICE_STATE_UPDATE","code":0}`.
+`{"message":"member_id requires every event to be one of GUILD_MEMBER_UPDATE, GUILD_BAN_ADD, GUILD_BAN_REMOVE, VOICE_STATE_UPDATE, INTERACTION_CREATE","code":0}`.
 Dispatches of other users never match a selected control and pass through
 untouched.
 

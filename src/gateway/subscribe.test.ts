@@ -1,3 +1,4 @@
+import type { Database } from '../db'
 import { describe, it, expect, vi } from 'vitest'
 import { GatewayIntentBits } from 'discord-api-types/v10'
 import { SessionManager } from './session'
@@ -72,6 +73,46 @@ describe('registerGatewaySubscriptions', () => {
     ) as { t: string; d: unknown }
     expect(sent.t).toBe('GUILD_CREATE')
     expect(sent.d).toEqual({ id: 'g1' })
+
+    unsubscribe()
+  })
+
+  it('scopes INTERACTION_CREATE to the creating database and owning setup token', () => {
+    const manager = new SessionManager()
+    const owner = { readyState: 1, send: vi.fn(), close: vi.fn() }
+    const sibling = { readyState: 1, send: vi.fn(), close: vi.fn() }
+    manager.create({
+      botId: 'bot-a',
+      token: 'Bot owner',
+      intents: 0,
+      ws: owner as never,
+    })
+    manager.create({
+      botId: 'bot-a',
+      token: 'Bot sibling',
+      intents: 0,
+      ws: sibling as never,
+    })
+    const db = {} as Database
+    const unsubscribe = registerGatewaySubscriptions(manager, db)
+
+    const payload = {
+      applicationId: 'bot-a',
+      interaction: { id: 'int1', type: 2 },
+    }
+    gatewayBus.emit('interaction.create', {
+      ...payload,
+      db: {} as Database,
+      token: 'Bot owner',
+    })
+    expect(owner.send).not.toHaveBeenCalled()
+    gatewayBus.emit('interaction.create', {
+      ...payload,
+      db,
+      token: 'Bot owner',
+    })
+    expect(owner.send).toHaveBeenCalledTimes(1)
+    expect(sibling.send).not.toHaveBeenCalled()
 
     unsubscribe()
   })
