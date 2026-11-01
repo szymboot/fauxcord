@@ -116,7 +116,7 @@ describe('parseModal', () => {
   })
 
   it.each([
-    [{ type: 10, content: 'hi' }, 'components.0.type'],
+    [{ type: 12, items: [] }, 'components.0.type'],
     [{ type: 17, components: [] }, 'components.0.type'],
     [
       {
@@ -153,6 +153,118 @@ describe('parseModal', () => {
     expect(parsed.errors[path]._errors[0].message).toMatch(
       /not supported|wrap other inputs/
     )
+  })
+
+  it('accepts Text Display at the top level, mixed in any order', () => {
+    const modal = accepted({
+      custom_id: 'm',
+      title: 'T',
+      components: [
+        { type: 10, content: 'Intro **markdown**', extra: 'ignored' },
+        {
+          type: 18,
+          label: 'L',
+          component: { type: 4, custom_id: 'a', style: 1 },
+        },
+        { type: 10, id: 3, content: 'Between', unknown: true },
+        {
+          type: 1,
+          components: [{ type: 4, custom_id: 'b', style: 1, label: 'B' }],
+        },
+        { type: 10, id: null, content: 'x'.repeat(4000) },
+      ],
+    })
+    expect(modal.components.map((top) => [top.type, top.id])).toEqual([
+      [10, 1],
+      [18, 2],
+      [10, 3],
+      [1, 5],
+      [10, 7],
+    ])
+    expect(modal.components[0]).toEqual({
+      type: 10,
+      id: 1,
+      content: 'Intro **markdown**',
+    })
+    expect(modal.components[2]).toEqual({
+      type: 10,
+      id: 3,
+      content: 'Between',
+    })
+    expect(
+      modalInputs(modal).map((input) => [input.custom_id, input.id])
+    ).toEqual([
+      ['a', 4],
+      ['b', 6],
+    ])
+  })
+
+  it('accepts a modal made only of Text Display components', () => {
+    const modal = accepted({
+      custom_id: 'confirm',
+      title: 'Approve appeal',
+      components: [{ type: 10, content: 'Are you sure?' }],
+    })
+    expect(modal.components).toEqual([
+      { type: 10, id: 1, content: 'Are you sure?' },
+    ])
+    expect(modalInputs(modal)).toEqual([])
+  })
+
+  it.each([
+    ['missing content', {}, 'components.0.content'],
+    ['null content', { content: null }, 'components.0.content'],
+    ['empty content', { content: '' }, 'components.0.content'],
+    ['too long content', { content: 'x'.repeat(4001) }, 'components.0.content'],
+    ['non-string content', { content: 5 }, 'components.0.content'],
+    ['string id', { content: 'x', id: '1' }, 'components.0.id'],
+    ['negative id', { content: 'x', id: -1 }, 'components.0.id'],
+    ['too large id', { content: 'x', id: 2_147_483_648 }, 'components.0.id'],
+  ])('rejects a Text Display with %s', (_name, override, path) => {
+    expect(
+      rejected({
+        custom_id: 'm',
+        title: 'T',
+        components: [{ type: 10, ...override }],
+      })
+    ).toEqual([path])
+  })
+
+  it('rejects duplicate explicit ids across Text Display and other components', () => {
+    expect(
+      rejected({
+        custom_id: 'm',
+        title: 'T',
+        components: [
+          { type: 10, id: 2, content: 'a' },
+          { type: 10, id: 2, content: 'b' },
+          {
+            type: 18,
+            id: 2,
+            label: 'L',
+            component: { type: 4, custom_id: 'a', style: 1 },
+          },
+        ],
+      })
+    ).toEqual(['components.1.id', 'components.2.id'])
+  })
+
+  it('counts Text Display toward the top-level component limit', () => {
+    const display = { type: 10, content: 'x' }
+    expect(
+      accepted({
+        custom_id: 'm',
+        title: 'T',
+        components: Array.from({ length: 5 }, () => display),
+      }).components
+    ).toHaveLength(5)
+    expect(
+      rejected({
+        custom_id: 'm',
+        title: 'T',
+        components: Array.from({ length: 6 }, () => display),
+      })
+    ).toEqual(['components'])
   })
 
   it.each([
@@ -443,6 +555,64 @@ describe('buildModalSubmission', () => {
         buildModalSubmission(multi, { s: ['a', 'b', 'c', 'd'] }).errors
       )
     ).toEqual(['values.s'])
+  })
+
+  describe('with Text Display components', () => {
+    const mixed = accepted({
+      custom_id: 'mixed',
+      title: 'T',
+      components: [
+        { type: 10, content: 'Heads up' },
+        {
+          type: 18,
+          label: 'L',
+          component: { type: 4, custom_id: 'a', style: 1, required: false },
+        },
+      ],
+    })
+    const displayOnly = accepted({
+      custom_id: 'confirm',
+      title: 'T',
+      components: [{ type: 10, content: 'Are you sure?' }],
+    })
+
+    it('submits Text Display as type and id only, in order', () => {
+      expect(buildModalSubmission(mixed, { a: 'hi' }).data).toEqual({
+        custom_id: 'mixed',
+        components: [
+          { type: 10, id: 1 },
+          {
+            type: 18,
+            id: 2,
+            component: { type: 4, id: 3, custom_id: 'a', value: 'hi' },
+          },
+        ],
+      })
+    })
+
+    it.each([undefined, {}])(
+      'submits a Text Display-only modal with values %j',
+      (values) => {
+        expect(buildModalSubmission(displayOnly, values ?? {})).toEqual({
+          errors: {},
+          data: { custom_id: 'confirm', components: [{ type: 10, id: 1 }] },
+        })
+      }
+    )
+
+    it.each([
+      ['the id of a Text Display', { 1: 'x' }, 'values.1'],
+      [
+        'the content of a Text Display',
+        { 'Are you sure?': 'x' },
+        'values.Are you sure?',
+      ],
+      ['an unknown id', { nope: 'x' }, 'values.nope'],
+    ])('rejects a value keyed by %s', (_name, values, path) => {
+      const result = buildModalSubmission(displayOnly, values)
+      expect(result.data).toBeUndefined()
+      expect(Object.keys(result.errors)).toEqual([path])
+    })
   })
 
   it('does not treat prototype keys as components', () => {
