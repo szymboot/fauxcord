@@ -57,6 +57,7 @@ describe('interactions service', () => {
     expect(spy).toHaveBeenCalledWith({
       applicationId,
       interaction: expect.objectContaining({ id: 'int1', locale: 'en-US' }),
+      db,
     })
 
     gatewayBus.off('interaction.create', spy)

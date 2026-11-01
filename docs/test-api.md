@@ -1337,10 +1337,18 @@ returned, then release:
 3. `POST /_test/rest-faults` with `POST /interactions/{returned id}/callback`
    (or an `@original` selector).
 4. `POST /_test/gateway-event-controls/:id/release` with the captured event ID.
-   The bot's callback now fails, `GET /_test/interactions/:id/callback` reports
-   `responded: false`, and its retry succeeds natively once the fault is spent.
+   With a callback fault, the bot's callback now fails,
+   `GET /_test/interactions/:id/callback` reports `responded: false`, and its
+   retry succeeds natively once the fault is spent. With an `@original` fault the
+   initial callback succeeds (`responded: true`); only the later read or edit of
+   the original response fails.
 
-Owner and scope derive from it: the control
+The capture only sees interactions of the guild's registered bot: a dispatch is
+scoped to the creating app's database and the setup token owning the
+interaction's guild, so other apps or setups sharing a bot ID neither receive nor
+capture it.
+
+Owner and scope derive from the stored interaction: the control
 binds the Bot that owns the interaction's Guild when that Bot is the interaction's
 application, the cleanup Guild is the interaction's Guild (or its channel's Guild
 for channel-only interactions), and `channel_id` is the interaction's channel.

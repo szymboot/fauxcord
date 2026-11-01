@@ -156,6 +156,10 @@ export interface GatewayBusEvents {
   'interaction.create': {
     applicationId: string
     interaction: Record<string, unknown>
+    /** Database that created the interaction; other apps ignore it. */
+    db?: Database
+    /** Owning setup token of the interaction's guild, when it has one. */
+    token?: string
   }
 }
 

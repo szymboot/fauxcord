@@ -26,8 +26,15 @@ interface Capture {
   events_captured: { id: string; state: string; envelope: Frame }[]
 }
 
+/** Identity of a simulated interaction. */
+interface Interaction {
+  id: string
+  token: string
+  type: number
+}
+
 describe('INTERACTION_CREATE capture controls', () => {
-  let close: (() => Promise<void>) | undefined
+  const closers: (() => Promise<void>)[] = []
   const sockets: WebSocket[] = []
   let httpUrl: string
   let db: Awaited<ReturnType<typeof createTestGatewayServer>>['db']
@@ -37,16 +44,23 @@ describe('INTERACTION_CREATE capture controls', () => {
   let bot: string
   let caller: string
   let target: string
+  let barrier: string
 
   afterEach(async () => {
     for (const socket of sockets.splice(0)) socket.terminate()
-    await close?.()
-    close = undefined
+    for (const close of closers.splice(0)) await close()
   })
 
-  /** Connects and identifies a bot, collecting its dispatches. */
-  async function connect(token: string): Promise<Frame[]> {
-    const ws = new WebSocket(url)
+  /**
+   * Connects and identifies a bot, collecting its dispatches. `onFrame` lets
+   * the bot react the instant a dispatch arrives, like a real consumer.
+   */
+  async function connect(
+    server: string,
+    token: string,
+    onFrame?: (frame: Frame) => void
+  ): Promise<Frame[]> {
+    const ws = new WebSocket(server)
     sockets.push(ws)
     await new Promise((resolve) => ws.once('message', resolve))
     ws.send(
@@ -55,9 +69,16 @@ describe('INTERACTION_CREATE capture controls', () => {
     await new Promise((resolve) => ws.once('message', resolve))
     const received: Frame[] = []
     ws.on('message', (raw: Buffer) => {
-      received.push(JSON.parse(raw.toString()) as Frame)
+      const frame = JSON.parse(raw.toString()) as Frame
+      received.push(frame)
+      onFrame?.(frame)
     })
     return received
+  }
+
+  /** The interaction dispatches a bot has received so far. */
+  function dispatched(received: Frame[]): Frame[] {
+    return received.filter((frame) => frame.t === 'INTERACTION_CREATE')
   }
 
   /** Waits until the bot has received this many interaction dispatches. */
@@ -65,10 +86,8 @@ describe('INTERACTION_CREATE capture controls', () => {
     received: Frame[],
     count: number
   ): Promise<Frame[]> {
-    await expect
-      .poll(() => received.filter((f) => f.t === 'INTERACTION_CREATE').length)
-      .toBe(count)
-    return received.filter((frame) => frame.t === 'INTERACTION_CREATE')
+    await expect.poll(() => dispatched(received).length).toBe(count)
+    return dispatched(received)
   }
 
   /** Sends JSON over HTTP and returns the response. */
@@ -138,38 +157,50 @@ describe('INTERACTION_CREATE capture controls', () => {
     })
   }
 
+  /**
+   * Orders earlier dispatches before a marker: an uncaptured interaction of
+   * another member travels the same socket, so once it arrives anything that
+   * had been sent before it has arrived too.
+   */
+  async function flush(received: Frame[]): Promise<void> {
+    const marker = await body<Interaction>(await simulate(barrier))
+    await expect
+      .poll(() =>
+        dispatched(received).some((frame) => frame.d.id === marker.id)
+      )
+      .toBe(true)
+  }
+
   /** Reads the observable callback state of an interaction. */
-  async function observe(interaction: {
-    id: string
-    token: string
-  }): Promise<{ responded: boolean; initial_callback_type: number | null }> {
-    const response = await send(
-      `/_test/interactions/${interaction.id}/callback?application_id=${applicationId}`,
-      'GET',
-      undefined,
-      { 'X-Interaction-Token': interaction.token }
+  async function observe(
+    interaction: Interaction
+  ): Promise<{ responded: boolean; initial_callback_type: number | null }> {
+    return body(
+      await send(
+        `/_test/interactions/${interaction.id}/callback?application_id=${applicationId}`,
+        'GET',
+        undefined,
+        { 'X-Interaction-Token': interaction.token }
+      )
     )
-    return body<{
-      responded: boolean
-      initial_callback_type: number | null
-    }>(response)
   }
 
   /** Sends the bot's callback for an interaction without bot authorization. */
   function callback(
     interaction: { id: string; token: string },
-    body: unknown
+    payload: unknown
   ): Promise<Response> {
     return send(
       `/api/v10/interactions/${interaction.id}/${interaction.token}/callback`,
       'POST',
-      body
+      payload
     )
   }
 
-  async function setup(): Promise<Frame[]> {
+  /** Starts a server with a connected bot and members of one guild. */
+  async function setup(onFrame?: (frame: Frame) => void): Promise<Frame[]> {
     const server = await createTestGatewayServer()
-    close = server.close
+    closers.push(server.close)
     db = server.db
     url = server.url
     httpUrl = url.replace('ws://', 'http://')
@@ -178,25 +209,28 @@ describe('INTERACTION_CREATE capture controls', () => {
     channelId = seedChannel(db, guildId)
     caller = createTestUser(db, { username: 'Caller' }).id
     target = createTestUser(db, { username: 'Target' }).id
-    for (const id of [caller, target])
+    barrier = createTestUser(db, { username: 'Barrier' }).id
+    for (const id of [caller, target, barrier])
       db.prepare(
         'INSERT INTO guild_members (guild_id, user_id) VALUES (?, ?)'
       ).run(guildId, id)
     createCommand(db, applicationId, guildId, { name: 'Mute', type: 2 })
-    return connect(bot)
+    return connect(url, bot, onFrame)
   }
 
   it('holds an interaction, returns it to the controller, then releases and replays it', async () => {
     const received = await setup()
-    const control = await armed()
+    const control = await armed({ member_id: caller })
     const created = await simulate()
     expect(created.status).toBe(201)
-    const interaction = await body<{ id: string; token: string }>(created)
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(received.filter((f) => f.t === 'INTERACTION_CREATE')).toEqual([])
-    const held = await inspect(control.id)
-    expect(held.events_captured).toHaveLength(1)
-    expect(held.events_captured[0]).toMatchObject({
+    const interaction = await body<Interaction>(created)
+    await flush(received)
+    expect(dispatched(received).map((frame) => frame.d.id)).not.toContain(
+      interaction.id
+    )
+    const held = await captured(control.id)
+    expect(held).toHaveLength(1)
+    expect(held[0]).toMatchObject({
       state: 'held',
       envelope: { t: 'INTERACTION_CREATE', d: { id: interaction.id } },
     })
@@ -204,27 +238,29 @@ describe('INTERACTION_CREATE capture controls', () => {
     const released = await send(
       `/_test/gateway-event-controls/${control.id}/release`,
       'POST',
-      { event_ids: [held.events_captured[0].id] }
+      { event_ids: [held[0].id] }
     )
     expect(released.status).toBe(200)
-    const [frame] = await interactions(received, 1)
-    expect(frame.d).toEqual(interaction)
-    // Held events are released as new dispatches; the held interaction has
-    // not been answered meanwhile.
+    const afterRelease = await interactions(received, 2)
+    const frame = afterRelease.find((entry) => entry.d.id === interaction.id)
+    expect(frame?.d).toEqual(interaction)
+    // The held interaction was never answered.
     expect(await observe(interaction)).toMatchObject({ responded: false })
 
     const replayed = await send(
       `/_test/gateway-event-controls/${control.id}/replay`,
       'POST',
-      { event_ids: [held.events_captured[0].id] }
+      { event_ids: [held[0].id] }
     )
     expect(replayed.status).toBe(200)
-    const [first, second] = await interactions(received, 2)
-    expect(second.d).toEqual(first.d)
-    expect(second.s).toBeGreaterThan(first.s ?? 0)
+    const afterReplay = await interactions(received, 3)
+    const copies = afterReplay.filter((entry) => entry.d.id === interaction.id)
+    expect(copies).toHaveLength(2)
+    expect(copies[1].d).toEqual(copies[0].d)
+    expect(copies[1].s).toBeGreaterThan(copies[0].s ?? 0)
   })
 
-  it('passes through other guilds, other users and unselected capture states', async () => {
+  it('passes through other guilds and other users', async () => {
     const received = await setup()
     const control = await armed({ member_id: caller })
     const stranger = createTestUser(db, { username: 'Stranger' }).id
@@ -253,17 +289,17 @@ describe('INTERACTION_CREATE capture controls', () => {
     expect(await captured(control.id)).toHaveLength(0)
 
     expect(await code(simulate(caller))).toBe(201)
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(received.filter((f) => f.t === 'INTERACTION_CREATE')).toHaveLength(2)
+    await flush(received)
+    expect(dispatched(received)).toHaveLength(3)
     expect(await captured(control.id)).toHaveLength(1)
   })
 
-  it('does not capture another bot setup and rejects unknown subjects', async () => {
+  it('does not capture another bot setup and validates member selectors', async () => {
     const received = await setup()
     const otherBot = seedBot(db, 'Bot other-capture', '444444444444444444')
     const otherGuild = seedGuild(db, otherBot, '555555555555555555')
     const otherChannel = seedChannel(db, otherGuild, '888888888888888888')
-    const others = await connect(otherBot)
+    const others = await connect(url, otherBot)
     createCommand(db, '444444444444444444', otherGuild, {
       name: 'Mute',
       type: 2,
@@ -282,32 +318,71 @@ describe('INTERACTION_CREATE capture controls', () => {
     ).toBe(201)
     await interactions(others, 1)
     expect(await captured(control.id)).toHaveLength(0)
-    expect(received.filter((f) => f.t === 'INTERACTION_CREATE')).toEqual([])
+    expect(dispatched(received)).toEqual([])
     // member_id on an interaction control needs a current guild member.
     await send(`/_test/gateway-event-controls/${control.id}`, 'DELETE')
     expect(await code(arm({ member_id: '999999999999999999' }))).toBe(404)
-    // Interaction scope accepts only user-scoped companions with member_id.
+    // A member selector cannot narrow events without a subject user.
     expect(
       await code(arm({ member_id: caller, events: ['MESSAGE_CREATE'] }))
     ).toBe(400)
   })
 
-  it('arms a callback fault for a held modal submission, then releases it', async () => {
+  it('keeps interactions of another app sharing the process and IDs out of a capture', async () => {
     const received = await setup()
+    const control = await armed()
+    const second = await createTestGatewayServer()
+    closers.push(second.close)
+    seedBot(second.db, 'Bot interaction-capture', applicationId)
+    seedGuild(second.db, 'Bot interaction-capture', guildId)
+    seedChannel(second.db, guildId, channelId)
+    createCommand(second.db, applicationId, guildId, { name: 'mute' })
+    const secondBot = await connect(second.url, 'Bot interaction-capture')
+    const created = await fetch(
+      `${second.url.replace('ws://', 'http://')}/_test/interactions`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          application_id: applicationId,
+          command_name: 'mute',
+          guild_id: guildId,
+          channel_id: channelId,
+        }),
+      }
+    )
+    expect(created.status).toBe(201)
+    await interactions(secondBot, 1)
+    // Capture runs synchronously inside the dispatch, so it is already final.
+    expect(await captured(control.id)).toHaveLength(0)
+    expect(dispatched(received)).toEqual([])
+  })
+
+  it('arms a callback fault for a held modal submission that the bot answers instantly', async () => {
+    const answers: Promise<Response>[] = []
+    let answerSubmissions = false
+    const received = await setup((frame) => {
+      // Like a real bot, defer every modal submission the moment it arrives.
+      if (
+        answerSubmissions &&
+        frame.t === 'INTERACTION_CREATE' &&
+        frame.d.type === 5
+      ) {
+        answers.push(callback(frame.d as unknown as Interaction, { type: 5 }))
+      }
+    })
     const created = await simulate()
-    const command = await body<{ id: string; token: string }>(created)
+    const command = await body<Interaction>(created)
     await interactions(received, 1)
     expect(
       await code(
-        callback(command, {
-          type: 9,
-          data: buildMuteModalData(target),
-        })
+        callback(command, { type: 9, data: buildMuteModalData(target) })
       )
     ).toBe(204)
 
     // Hold the submission's dispatch before it is sent.
     const control = await armed({ member_id: caller })
+    answerSubmissions = true
     const submitted = await send(
       `/_test/interactions/${command.id}/modal-submit`,
       'POST',
@@ -319,12 +394,12 @@ describe('INTERACTION_CREATE capture controls', () => {
       { 'X-Interaction-Token': command.token }
     )
     expect(submitted.status).toBe(201)
-    const submission = await body<{ id: string; token: string; type: number }>(
-      submitted
-    )
+    const submission = await body<Interaction>(submitted)
     expect(submission.type).toBe(5)
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(received.filter((f) => f.t === 'INTERACTION_CREATE')).toHaveLength(1)
+    await flush(received)
+    // Nothing reached the bot, so it has not answered yet.
+    expect(answers).toHaveLength(0)
+    expect(await observe(submission)).toMatchObject({ responded: false })
 
     // Arm the callback fault by the submission's interaction ID.
     const fault = await send('/_test/rest-faults', 'POST', {
@@ -336,17 +411,17 @@ describe('INTERACTION_CREATE capture controls', () => {
     })
     expect(fault.status).toBe(201)
     const faultBody = await body<{ id: string }>(fault)
-    const faultId = faultBody.id
 
-    const held = await inspect(control.id)
+    const held = await captured(control.id)
     await send(`/_test/gateway-event-controls/${control.id}/release`, 'POST', {
-      event_ids: [held.events_captured[0].id],
+      event_ids: [held[0].id],
     })
-    const [, delivered] = await interactions(received, 2)
-    expect(delivered.d).toEqual(submission)
 
-    // The bot's deferred acknowledgement fails and leaves the submission open.
-    expect(await code(callback(submission, { type: 5 }))).toBe(503)
+    // The bot's immediate deferred acknowledgement fails and leaves the
+    // submission open.
+    await expect.poll(() => answers.length).toBe(1)
+    const answered = await answers[0]
+    expect(answered.status).toBe(503)
     expect(await observe(submission)).toEqual({
       interaction_id: submission.id,
       application_id: applicationId,
@@ -354,7 +429,7 @@ describe('INTERACTION_CREATE capture controls', () => {
       initial_callback_type: null,
     })
     const spent = await body<{ consumed: number }>(
-      await send(`/_test/rest-faults/${faultId}`, 'GET')
+      await send(`/_test/rest-faults/${faultBody.id}`, 'GET')
     )
     expect(spent.consumed).toBe(1)
 

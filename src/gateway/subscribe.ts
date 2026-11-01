@@ -587,13 +587,16 @@ export function registerGatewaySubscriptions(
   const onInteractionCreate: Parameters<
     typeof gatewayBus.on<'interaction.create'>
   >[1] = (payload) => {
+    if (payload.db && payload.db !== db) return
     // INTERACTION_CREATE is not gated by any Gateway intent (Discord spec):
     // requiredIntent is intentionally omitted here.
     broadcastToBot(
       manager,
       payload.applicationId,
       'INTERACTION_CREATE',
-      payload.interaction
+      payload.interaction,
+      undefined,
+      payload.token
     )
   }
 
