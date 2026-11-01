@@ -3,8 +3,11 @@
  *
  * Supports the Discord modal component subset that carries user input:
  * Label (18) wrapping a Text Input (4) or String Select (3), and the legacy
- * Action Row (1) wrapping one Text Input. Every other component is rejected
- * explicitly. Field errors use the shared dotted-path format.
+ * Action Row (1) wrapping one Text Input. Text Display (10) is also accepted
+ * as a top-level component; it shows markdown content, takes no input, and
+ * is submitted back as `{type, id}` only. A modal may consist solely of Text
+ * Displays. Every other component is rejected explicitly. Field errors use
+ * the shared dotted-path format.
  */
 
 import {
@@ -19,6 +22,7 @@ import { emoji, invalid, isObject, text } from './message-components'
 const ACTION_ROW = 1
 const STRING_SELECT = 3
 const TEXT_INPUT = 4
+const TEXT_DISPLAY = 10
 const LABEL = 18
 
 /** Largest value of the 32-bit component `id`. */
@@ -75,8 +79,15 @@ export interface ModalActionRow {
   components: [ModalTextInput]
 }
 
+/** Text Display shown in a modal; it has no input and no `custom_id`. */
+export interface ModalTextDisplay {
+  type: 10
+  id: number
+  content: string
+}
+
 /** A top-level modal component. */
-export type ModalComponent = ModalLabel | ModalActionRow
+export type ModalComponent = ModalLabel | ModalActionRow | ModalTextDisplay
 
 /** A validated, normalized modal. */
 export interface ModalObject {
@@ -441,6 +452,21 @@ function actionRow(
   }
 }
 
+/** Validates a top-level Text Display; `content` is 1 to 4000 characters. */
+function textDisplay(
+  value: Record<string, unknown>,
+  path: string,
+  state: ParseState
+): ModalTextDisplay {
+  const id = componentId(value.id, path, state)
+  text(value.content, `${path}.content`, 4000, state.errors, true)
+  return {
+    type: TEXT_DISPLAY,
+    id,
+    content: typeof value.content === 'string' ? value.content : '',
+  }
+}
+
 /** Visits every component in document order, parents before children. */
 function assignIds(components: ModalComponent[], state: ParseState): void {
   let next = 1
@@ -453,7 +479,9 @@ function assignIds(components: ModalComponent[], state: ParseState): void {
   for (const top of components) {
     top.id = take(top.id)
     if (top.type === LABEL) top.component.id = take(top.component.id)
-    else top.components[0].id = take(top.components[0].id)
+    else if (top.type === ACTION_ROW) {
+      top.components[0].id = take(top.components[0].id)
+    }
   }
 }
 
@@ -478,9 +506,28 @@ function topLevel(raw: unknown, state: ParseState): ModalComponent[] {
       continue
     }
     let parsed: ModalComponent | undefined
-    if (top.type === LABEL) parsed = label(top, path, state)
-    else if (top.type === ACTION_ROW) parsed = actionRow(top, path, state)
-    else unsupported(state, path, top.type, 'label (18) and action row (1)')
+    switch (top.type) {
+      case LABEL: {
+        parsed = label(top, path, state)
+        break
+      }
+      case ACTION_ROW: {
+        parsed = actionRow(top, path, state)
+        break
+      }
+      case TEXT_DISPLAY: {
+        parsed = textDisplay(top, path, state)
+        break
+      }
+      default: {
+        unsupported(
+          state,
+          path,
+          top.type,
+          'label (18), text display (10) and action row (1)'
+        )
+      }
+    }
     if (parsed) components.push(parsed)
   }
   return components
@@ -516,7 +563,7 @@ export function parseModal(data: unknown): ParsedModal {
   }
 }
 
-/** One input of a modal, flattened for submission handling. */
+/** One input of a modal, flattened for submission handling (no Text Display). */
 export type ModalInput = ModalTextInput | ModalStringSelect
 
 /**
@@ -525,9 +572,10 @@ export type ModalInput = ModalTextInput | ModalStringSelect
  * @returns Every Text Input and String Select
  */
 export function modalInputs(modal: ModalObject): ModalInput[] {
-  return modal.components.map((top) =>
-    top.type === LABEL ? top.component : top.components[0]
-  )
+  return modal.components.flatMap((top) => {
+    if (top.type === LABEL) return [top.component]
+    return top.type === ACTION_ROW ? [top.components[0]] : []
+  })
 }
 
 /** The value Discord's client would submit for an input left untouched. */
@@ -668,21 +716,30 @@ export function buildModalSubmission(
     errors: {},
     data: {
       custom_id: modal.custom_id,
-      components: modal.components.map((top) =>
-        top.type === LABEL
-          ? {
+      components: modal.components.map((top) => {
+        switch (top.type) {
+          case LABEL: {
+            return {
               type: LABEL,
               id: top.id,
               component: submitted(top.component, valueOf(top.component)),
             }
-          : {
+          }
+          case ACTION_ROW: {
+            return {
               type: ACTION_ROW,
               id: top.id,
               components: [
                 submitted(top.components[0], valueOf(top.components[0])),
               ],
             }
-      ),
+          }
+          default: {
+            // Discord echoes a Text Display as its type and id only.
+            return { type: TEXT_DISPLAY, id: top.id }
+          }
+        }
+      }),
     },
   }
 }

@@ -3029,20 +3029,27 @@ that libraries like DiscordGo send, are accepted and ignored.
 | `title`      | Required string, 1–45 characters           |
 | `components` | Required array of 1–5 top-level components |
 
-Supported components (every other type, such as Text Display `10`, Container
-`17`, User/Role/Mentionable/Channel Select `5`–`8`, File Upload `19` or radio
-and checkbox groups, is **rejected** with an explicit `Component type N is not
+The limit is 5 top-level components, Text Display included (Discord's
+documentation states 1–5; the vendored OpenAPI spec allows up to 40, which
+Fauxcord does not follow yet).
+
+Supported components (every other type, such as Container `17`,
+User/Role/Mentionable/Channel Select `5`–`8`, File Upload `19` or radio and
+checkbox groups, is **rejected** with an explicit `Component type N is not
 supported in modals here` error on its `type` path):
 
 | Component                               | Rules                                                                                                                                                                                                                                                                                                                                                        |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Label `18` (top level)                  | `label` required, 1–45 characters; `description` ≤ 100; `component` required and one of the inputs below                                                                                                                                                                                                                                                     |
+| Text Display `10` (top level)           | `content` required string, 1–4000 characters (Markdown); optional `id`. It has no `custom_id` and takes no input, so it may be mixed with Labels and Action Rows in any order, or be the only component of a confirmation modal |
 | Action Row `1` (top level, legacy)      | Exactly one Text Input; the input needs its own `label` (1–45)                                                                                                                                                                                                                                                                                               |
 | Text Input `4`                          | `custom_id` required (1–100); `style` `1` short or `2` paragraph; `min_length` 0–4000; `max_length` 1–4000 and ≥ `min_length`; `required` (default `true`); `placeholder` ≤ 100; pre-filled `value` ≤ 4000; `label` ≤ 45                                                                                                                                     |
 | String Select `3` (inside a Label only) | `custom_id` required; `options` 1–25, each with a `label` and unique `value` (1–100), optional `description`, `emoji`, `default`; `min_values` 0–25 (default `1`; `0` only with `required: false`); `max_values` 1–25 (default `1`); `min_values` ≤ `max_values` after defaults and ≤ the number of options; `required` (default `true`); `placeholder` ≤ 150; at most `max_values` options marked `default`; `disabled` must be absent or `false` |
 
 Input `custom_id`s must be unique across the whole modal, and explicit
-non-zero component `id`s must be unique. The modal is stored with the
+non-zero component `id`s must be unique (Text Display ids included). A modal
+without any input, for example a single Text Display, is valid and can be
+submitted without `values`. The modal is stored with the
 interaction and read back through the
 [observation route](#get-_testinteractionsinteractionidcallback--observe-the-initial-callback).
 Modals are refused (`400`, `type` field error) for interactions that cannot
@@ -3136,6 +3143,12 @@ identical to the Gateway payload (for the modal in the observation example above
 The interaction's `user_id` must still identify an existing user (a guild
 member in guilds), so create the invoking user with `POST /_test/users` and
 pass it as `user_id` when starting the interaction.
+
+A Text Display is echoed as `{type: 10, id}` only, in its position among the
+other components (Discord does not repeat its `content`). It accepts no value:
+`values` keys must be input `custom_id`s, so a key naming a Text Display's `id`
+or any other unknown component is rejected (`values.<key>`). Submitting a modal
+that has no inputs needs only `custom_id` (`values` may be omitted or `{}`).
 
 Label-wrapped inputs are submitted as `{type: 18, id, component: {…}}` with
 the input carrying `value` (Text Input) or `values` (String Select); legacy

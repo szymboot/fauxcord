@@ -172,6 +172,40 @@ describe('modal callbacks and test-control submissions', () => {
       })
     })
 
+    it('records a Text Display-only modal with ids', async () => {
+      const response = await callback({
+        type: 9,
+        data: {
+          custom_id: 'approve_unban_appeal:12:333:444',
+          title: 'Approve appeal',
+          components: [
+            {
+              type: 10,
+              content: 'Are you sure you want to unban this member?',
+            },
+          ],
+        },
+      })
+      expect(response.status).toBe(204)
+      expect(await json(observe())).toEqual({
+        interaction_id: started.id,
+        application_id: applicationId,
+        responded: true,
+        initial_callback_type: 9,
+        modal: {
+          custom_id: 'approve_unban_appeal:12:333:444',
+          title: 'Approve appeal',
+          components: [
+            {
+              type: 10,
+              id: 1,
+              content: 'Are you sure you want to unban this member?',
+            },
+          ],
+        },
+      })
+    })
+
     it("accepts DiscordGo's marshalled Label modal response", async () => {
       // Produced by json.Marshal of a discordgo InteractionResponse (v0.29.1
       // pre-release with Label support): zero values such as `tts`, empty
@@ -243,7 +277,7 @@ describe('modal callbacks and test-control submissions', () => {
           custom_id: 'm',
           title: 'T',
           components: [
-            { type: 10, content: 'Hello' },
+            { type: 17, components: [] },
             {
               type: 18,
               label: 'L',
@@ -355,6 +389,50 @@ describe('modal callbacks and test-control submissions', () => {
       expect(submission.token).not.toBe(started.token)
       expect(submission.data).not.toHaveProperty('name')
       expect(submission.data).not.toHaveProperty('target_id')
+    })
+
+    describe('with a Text Display-only modal', () => {
+      const confirm = 'approve_unban_appeal:12:333:444'
+
+      beforeEach(async () => {
+        const response = await callback({
+          type: 9,
+          data: {
+            custom_id: confirm,
+            title: 'Approve appeal',
+            components: [{ type: 10, content: 'Are you sure?' }],
+          },
+        })
+        expect(response.status).toBe(204)
+      })
+
+      it.each([
+        ['no values', {}],
+        ['empty values', { values: {} }],
+      ])('dispatches a MODAL_SUBMIT with %s', async (_name, extra) => {
+        const response = await submit({ custom_id: confirm, ...extra })
+        expect(response.status).toBe(201)
+        const submission = (await response.json()) as Record<string, unknown>
+        expect(submission).toMatchObject({
+          type: 5,
+          application_id: applicationId,
+          guild_id: guildId,
+          channel_id: channelId,
+          member: { user: { id: caller } },
+          data: { custom_id: confirm, components: [{ type: 10, id: 1 }] },
+        })
+        expect(
+          (submission.data as { components: unknown[] }).components
+        ).toEqual([{ type: 10, id: 1 }])
+      })
+
+      it('rejects values keyed by the Text Display or an unknown id', async () => {
+        const response = await submit({
+          custom_id: confirm,
+          values: { 1: 'x', nope: 'y' },
+        })
+        expect(await errorFields(response)).toEqual(['values.1', 'values.nope'])
+      })
     })
 
     it('submits defaults for untouched fields', async () => {
