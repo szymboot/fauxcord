@@ -12,12 +12,15 @@ export const PermissionBit = {
   MUTE_MEMBERS: 1n << 22n,
   DEAFEN_MEMBERS: 1n << 23n,
   MOVE_MEMBERS: 1n << 24n,
+  MANAGE_ROLES: 1n << 28n,
 } as const
 
 /** A member's resolved channel permissions. */
 export interface ResolvedChannelPermissions {
   /** True for the guild owner or a member with guild-level ADMINISTRATOR. */
   privileged: boolean
+  /** True only for the guild owner, who also bypasses the role hierarchy. */
+  owner: boolean
   /** Channel permissions after overwrites; meaningless when privileged. */
   permissions: bigint
 }
@@ -53,7 +56,7 @@ export function resolveChannelPermissions(
   // except a bot that left or was removed: it has no access at all.
   const detachedBot = guild?.bot_present === 0 && guild.bot_user_id === userId
   if (!detachedBot && guild?.owner_id === userId)
-    return { privileged: true, permissions: 0n }
+    return { privileged: true, owner: true, permissions: 0n }
 
   const member = db
     .prepare('SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ?')
@@ -78,7 +81,7 @@ export function resolveChannelPermissions(
     if (role.id !== guildId) roleIds.add(role.id)
   }
   if (permissions & PermissionBit.ADMINISTRATOR)
-    return { privileged: true, permissions }
+    return { privileged: true, owner: false, permissions }
 
   const everyone = overwrites.find(
     (overwrite) => overwrite.type === 0 && overwrite.id === guildId
@@ -103,5 +106,5 @@ export function resolveChannelPermissions(
     permissions =
       (permissions & ~BigInt(personal.deny)) | BigInt(personal.allow)
 
-  return { privileged: false, permissions }
+  return { privileged: false, owner: false, permissions }
 }

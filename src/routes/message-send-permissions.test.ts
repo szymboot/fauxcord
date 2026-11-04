@@ -6,7 +6,7 @@ import {
   seedWebhook,
 } from '../test-helpers'
 import { setupTestEnvironment } from '../services/test-control'
-import { addMemberRole } from '../services/guild-members'
+import { addMemberRole, removeMemberRole } from '../services/guild-members'
 
 const VIEW = 1n << 10n
 const SEND = 1n << 11n
@@ -295,17 +295,11 @@ describe('guild message-send permissions', () => {
       'PATCH'
     )
     expect(await responseStatus(send())).toBe(200)
-    await request(
-      `/guilds/${GUILD}/members/${BOT}/roles/${assigned}`,
-      undefined,
-      'DELETE'
-    )
+    // The bot has no MANAGE_ROLES in this human-owned guild, so the role routes
+    // would reject the change; use the fixture service for membership edits.
+    expect(removeMemberRole(fixture.db, GUILD, BOT, assigned)).toBe(true)
     expect(await responseStatus(send())).toBe(403)
-    await request(
-      `/guilds/${GUILD}/members/${BOT}/roles/${assigned}`,
-      undefined,
-      'PUT'
-    )
+    expect(addMemberRole(fixture.db, GUILD, BOT, assigned)).toBe(true)
     expect(await responseStatus(send())).toBe(200)
     await request(`/guilds/${GUILD}/roles/${assigned}`, undefined, 'DELETE')
     expect(await responseStatus(send())).toBe(403)
