@@ -219,3 +219,32 @@ export const gatewayBus = new TypedGatewayBus()
 // sessions).
 // eslint-disable-next-line unicorn/no-top-level-side-effects -- one-time setup on the module's own singleton, not a shared/exported binding mutation.
 gatewayBus.setMaxListeners(50)
+
+/** Database whose service is synchronously emitting a role event, if any. */
+let roleEmitDatabase: Database | undefined
+
+/**
+ * Emits a role event while recording the producing database. Role events carry
+ * no delivery scope of their own, so scoped test captures use this to ignore
+ * dispatches produced by another app database. The payload and delivery are
+ * unchanged; listeners run synchronously inside this call.
+ * @param db - Database whose service produced the event
+ * @param event - Role event name
+ * @param payload - Event payload
+ */
+export function emitRoleEvent<
+  K extends 'guild.role.create' | 'guild.role.update' | 'guild.role.delete',
+>(db: Database, event: K, payload: GatewayBusEvents[K]): void {
+  const previous = roleEmitDatabase
+  roleEmitDatabase = db
+  try {
+    gatewayBus.emit(event, payload)
+  } finally {
+    roleEmitDatabase = previous
+  }
+}
+
+/** Returns the database producing the role event being dispatched, if known. */
+export function currentRoleEmitDatabase(): Database | undefined {
+  return roleEmitDatabase
+}

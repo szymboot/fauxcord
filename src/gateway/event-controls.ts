@@ -6,12 +6,16 @@ import type { GatewayPayload } from './protocol'
 import { encodePayload } from './protocol'
 import { deliverDispatch, writeDispatch } from './dispatch'
 import { sendReconnect } from './server'
+import { currentRoleEmitDatabase } from './bus'
 
 /** Native dispatches supported by the narrow test capture control. */
 export const CONTROL_EVENTS = [
   'GUILD_MEMBER_UPDATE',
   'GUILD_BAN_ADD',
   'GUILD_BAN_REMOVE',
+  'GUILD_ROLE_CREATE',
+  'GUILD_ROLE_UPDATE',
+  'GUILD_ROLE_DELETE',
   'MESSAGE_CREATE',
   'MESSAGE_DELETE',
   'MESSAGE_DELETE_BULK',
@@ -34,6 +38,26 @@ export const MEMBER_SCOPED_EVENTS = [
   'VOICE_STATE_UPDATE',
   'INTERACTION_CREATE',
 ] as const
+
+/**
+ * Dispatches that describe one guild role and can be narrowed by `role_id`
+ * (`d.role.id` for create/update, `d.role_id` for delete).
+ */
+export const ROLE_SCOPED_EVENTS = [
+  'GUILD_ROLE_CREATE',
+  'GUILD_ROLE_UPDATE',
+  'GUILD_ROLE_DELETE',
+] as const
+
+/** Reads the subject role ID of a role dispatch, if it has one. */
+export function roleScopedRoleId(
+  event: string | null | undefined,
+  data: unknown
+): unknown {
+  if (!data || typeof data !== 'object') return undefined
+  const payload = data as { role?: { id?: unknown }; role_id?: unknown }
+  return event === 'GUILD_ROLE_DELETE' ? payload.role_id : payload.role?.id
+}
 
 /** Reads the subject user ID of a member-scoped dispatch, if it has one. */
 export function memberScopedUserId(
@@ -72,6 +96,12 @@ export interface EventControlRequest {
    * Other users pass through.
    */
   member_id?: string
+  /**
+   * Optional exact role selector; every listed event must be one of
+   * {@link ROLE_SCOPED_EVENTS}. The role need not exist when arming. Other
+   * roles' dispatches pass through.
+   */
+  role_id?: string
   /** Requires explicit consuming-client acknowledgements for delivery barriers. */
   application_ack?: boolean
   events: string[]
@@ -124,6 +154,7 @@ function policyKey(request: EventControlRequest): string {
   return JSON.stringify({
     events: request.events.toSorted((left, right) => left.localeCompare(right)),
     member_id: request.member_id ?? null,
+    role_id: request.role_id ?? null,
     application_ack: request.application_ack ?? false,
     hold: request.hold,
     allow_original_sequence: request.allow_original_sequence,
@@ -393,6 +424,9 @@ export class GatewayEventControls {
             (control.member_id === undefined ||
               request.member_id === undefined ||
               control.member_id === request.member_id) &&
+            (control.role_id === undefined ||
+              request.role_id === undefined ||
+              control.role_id === request.role_id) &&
             control.events.some((event) => request.events.includes(event))
         )
     )
@@ -476,6 +510,17 @@ export class GatewayEventControls {
     envelope: GatewayPayload<unknown>
   ): boolean {
     this.prune()
+    // Role dispatches have no delivery scope: ignore those produced by
+    // another app database, which never belong to this app's guild.
+    const producer = currentRoleEmitDatabase()
+    if (
+      producer !== undefined &&
+      producer !== this.db &&
+      ROLE_SCOPED_EVENTS.includes(
+        envelope.t as (typeof ROLE_SCOPED_EVENTS)[number]
+      )
+    )
+      return false
     const data = envelope.d as { guild_id?: unknown } | null
     // Creation rejects overlapping selectors, so at most one control matches.
     const control = this.controls
@@ -486,7 +531,9 @@ export class GatewayEventControls {
           candidate.guild_id === data?.guild_id &&
           candidate.events.includes(envelope.t ?? '') &&
           (candidate.member_id === undefined ||
-            candidate.member_id === memberScopedUserId(envelope.t, data))
+            candidate.member_id === memberScopedUserId(envelope.t, data)) &&
+          (candidate.role_id === undefined ||
+            candidate.role_id === roleScopedRoleId(envelope.t, data))
       )
     if (!control) return false
     const serialized = encodePayload(envelope)
@@ -527,6 +574,7 @@ export class GatewayEventControls {
           session_id: control.session_id,
           events: control.events,
           member_id: control.member_id,
+          role_id: control.role_id,
           application_ack: control.application_ack ?? false,
           awaiting_resume: control.awaiting_resume,
           pause_resume: control.pause_resume,

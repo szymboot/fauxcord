@@ -4,6 +4,7 @@ import { isAuditOwnershipKey } from '../validators/audit-log-response'
 import {
   CONTROL_EVENTS,
   MEMBER_SCOPED_EVENTS,
+  ROLE_SCOPED_EVENTS,
   type EventControlRequest,
   type EventControlOwnership,
   type EventControlSessionScope,
@@ -26,6 +27,22 @@ function memberSelectorError(events: unknown): string | undefined {
     : undefined
 }
 
+/** Message returned when `role_id` is combined with a non-role event. */
+const ROLE_SELECTOR_MESSAGE = `role_id requires every event to be one of ${ROLE_SCOPED_EVENTS.join(', ')}`
+
+/** Explains why a role selector cannot narrow the requested event list. */
+function roleSelectorError(events: unknown): string | undefined {
+  return Array.isArray(events) &&
+    events.some(
+      (event: unknown) =>
+        !ROLE_SCOPED_EVENTS.includes(
+          event as (typeof ROLE_SCOPED_EVENTS)[number]
+        )
+    )
+    ? ROLE_SELECTOR_MESSAGE
+    : undefined
+}
+
 /** Validates exact numeric scope IDs and the bounded capture policy. */
 function validateControl(value: unknown): EventControlRequest | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -37,6 +54,7 @@ function validateControl(value: unknown): EventControlRequest | undefined {
     session_id: sessionId,
     events,
     member_id: memberId,
+    role_id: roleId,
   } = data
   if (
     typeof guildId !== 'string' ||
@@ -49,6 +67,8 @@ function validateControl(value: unknown): EventControlRequest | undefined {
       (typeof sessionId !== 'string' || !/^[\da-f]{32}$/.test(sessionId))) ||
     (memberId !== undefined &&
       (typeof memberId !== 'string' || !/^[1-9]\d{0,19}$/.test(memberId))) ||
+    (roleId !== undefined &&
+      (typeof roleId !== 'string' || !/^[1-9]\d{0,19}$/.test(roleId))) ||
     !Array.isArray(events) ||
     events.length === 0 ||
     events.length > CONTROL_EVENTS.length ||
@@ -60,7 +80,8 @@ function validateControl(value: unknown): EventControlRequest | undefined {
         )
     ) ||
     new Set(events).size !== events.length ||
-    (memberId !== undefined && memberSelectorError(events) !== undefined)
+    (memberId !== undefined && memberSelectorError(events) !== undefined) ||
+    (roleId !== undefined && roleSelectorError(events) !== undefined)
   )
     return undefined
   const applicationAck =
@@ -93,6 +114,7 @@ function validateControl(value: unknown): EventControlRequest | undefined {
         session_id: sessionId,
         events,
         member_id: memberId,
+        role_id: roleId,
         application_ack: applicationAck,
         hold,
         allow_original_sequence: allowOriginalSequence,
@@ -101,22 +123,32 @@ function validateControl(value: unknown): EventControlRequest | undefined {
       }
 }
 
-/** Names a member selector mismatch; any other invalid policy stays generic. */
+/** Names a member/role selector mismatch; other invalid policy stays generic. */
 function invalidControlMessage(body: unknown): string {
   if (!body || typeof body !== 'object' || Array.isArray(body))
     return '400: Bad Request'
-  const { member_id: memberId, events } = body as Record<string, unknown>
-  const selectorError =
-    typeof memberId === 'string' &&
-    /^[1-9]\d{0,19}$/.test(memberId) &&
+  const {
+    member_id: memberId,
+    role_id: roleId,
+    events,
+  } = body as Record<string, unknown>
+  const knownEvents =
     Array.isArray(events) &&
     events.length > 0 &&
     events.every((event: unknown) =>
       CONTROL_EVENTS.includes(event as (typeof CONTROL_EVENTS)[number])
     )
+  const memberError =
+    typeof memberId === 'string' && /^[1-9]\d{0,19}$/.test(memberId)
       ? memberSelectorError(events)
       : undefined
-  return selectorError ?? '400: Bad Request'
+  const roleError =
+    typeof roleId === 'string' && /^[1-9]\d{0,19}$/.test(roleId)
+      ? roleSelectorError(events)
+      : undefined
+  return (
+    (knownEvents ? (memberError ?? roleError) : undefined) ?? '400: Bad Request'
+  )
 }
 
 /** Validates discovery scope without collapsing duplicate query values. */
