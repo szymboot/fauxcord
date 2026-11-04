@@ -24,6 +24,12 @@ describe('appeal selectors', () => {
     ['POST', '/interactions/444/callback'],
     ['GET', '/interactions/444/messages/@original'],
     ['PATCH', '/interactions/444/messages/@original'],
+    ['DELETE', '/interactions/444/messages/@original'],
+    [
+      'DELETE',
+      '/interactions/444/messages/@original',
+      { mode: 'rate_limit', status: 429, retry_after: 1 },
+    ],
     [
       'PATCH',
       '/interactions/444/messages/@original',
@@ -53,8 +59,13 @@ describe('appeal selectors', () => {
     ['POST', '/interactions/444/secret-token/callback'],
     ['POST', '/interactions/abc/callback'],
     ['GET', '/interactions/444/callback'],
-    ['DELETE', '/interactions/444/messages/@original'],
     ['POST', '/interactions/444/messages/@original'],
+    ['DELETE', '/interactions/444/messages/@original', { guild_id: '222' }],
+    ['DELETE', '/interactions/444/messages/@original', { query: {} }],
+    ['DELETE', '/interactions/444/messages/@original', { recipient_id: '1' }],
+    ['DELETE', '/interactions/444/secret-token/messages/@original'],
+    ['DELETE', '/interactions/abc/messages/@original'],
+    ['DELETE', '/webhooks/111/secret-token/messages/@original'],
     ['GET', '/interactions/444/messages/@original', { guild_id: '222' }],
     ['PATCH', '/interactions/444/messages/@original', { query: {} }],
     ['GET', '/webhooks/111/secret-token/messages/@original'],
@@ -72,5 +83,11 @@ describe('appeal selectors', () => {
     expect(
       parseRestFaultInteractionSelector('GET', '/interactions/4/callback')
     ).toBeUndefined()
+    expect(
+      parseRestFaultInteractionSelector(
+        'DELETE',
+        '/interactions/4/messages/@original'
+      )
+    ).toBe('4')
   })
 })

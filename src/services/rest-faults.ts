@@ -564,10 +564,9 @@ export function resolveInteractionFaultTarget(
     method === 'POST'
       ? /^\/interactions\/([^/]+)\/([^/]+)\/callback$/.exec(path)
       : null
-  const original =
-    method === 'GET' || method === 'PATCH'
-      ? /^\/webhooks\/([^/]+)\/([^/]+)\/messages\/@original$/.exec(path)
-      : null
+  const original = ['GET', 'PATCH', 'DELETE'].includes(method)
+    ? /^\/webhooks\/([^/]+)\/([^/]+)\/messages\/@original$/.exec(path)
+    : null
   const match = callback ?? original
   if (!match) return undefined
   const row = db

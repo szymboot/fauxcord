@@ -1081,6 +1081,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `POST`   | `/interactions/{interactionId}/callback`            | Interaction callback        |
 | `GET`    | `/interactions/{interactionId}/messages/@original`  | Original response read      |
 | `PATCH`  | `/interactions/{interactionId}/messages/@original`  | Original response edit      |
+| `DELETE` | `/interactions/{interactionId}/messages/@original`  | Original response deletion  |
 | `GET`    | `/guilds/{guildId}/members/{userId}`                | Member reads                |
 | `GET`    | `/guilds/{guildId}/voice-states/{userId}`           | Member voice state reads    |
 | `GET`    | `/users/{userId}`                                   | Global user reads           |
@@ -1309,10 +1310,10 @@ token, not a Bot token, so they sit outside bot authentication yet still pass
 through the fault middleware (a request with no armed control behaves exactly as
 before). Their selectors carry **only the interaction ID**, not the secret token:
 
-| Native request                                                      | Selector `path`                                    |
-| ------------------------------------------------------------------- | -------------------------------------------------- |
-| `POST /interactions/{id}/{token}/callback`                          | `/interactions/{id}/callback`                      |
-| `GET`/`PATCH /webhooks/{applicationId}/{token}/messages/@original`  | `/interactions/{id}/messages/@original`            |
+| Native request                                                              | Selector `path`                         |
+| --------------------------------------------------------------------------- | --------------------------------------- |
+| `POST /interactions/{id}/{token}/callback`                                  | `/interactions/{id}/callback`           |
+| `GET`/`PATCH`/`DELETE /webhooks/{applicationId}/{token}/messages/@original` | `/interactions/{id}/messages/@original` |
 
 The token stays out of selectors because interaction IDs are unique, and because
 the control API echoes `path` back on inspection and is auth-exempt; credentials
@@ -1320,7 +1321,8 @@ would otherwise leak into evidence. The token is still checked at request time: 
 native request consumes the control only when its ID and token (callback), or its
 application ID and token (`@original`), identify that stored interaction, so
 requests with a wrong token, another interaction, a real webhook with a similar
-path, or other `@original` methods follow their ordinary route (`404` for unknown
+path, `DELETE /webhooks/{id}/{token}/messages/{messageId}`, or other
+`@original` methods follow their ordinary route (`404` for unknown
 credentials). Selectors containing a token (`/interactions/{id}/{token}/callback`,
 `/webhooks/...`) are rejected (`400`).
 
@@ -1361,8 +1363,13 @@ validation, so `GET /_test/interactions/{id}/callback` still reports
 `responded: false`, no original response is created, and a retry is accepted
 natively (`204`, then `responded: true`). A faulted `PATCH .../@original` leaves
 the message content, embeds and components unchanged and emits no `MESSAGE_UPDATE`;
-a faulted `GET` returns no message. `GET` and `PATCH` for the same interaction are
-separate controls; `POST` callback faults do not affect `@original`. Coverage is in
+a faulted `GET` returns no message; a faulted `DELETE .../@original` fails before
+the native route, so the original message is not deleted (no `MESSAGE_DELETE`) and
+stays readable, and a later `DELETE` once the fault is spent or cancelled removes
+it (`204`). Use an HTTP-error fault such as `401` with code `50027` (Invalid
+Webhook Token), `404` with `10008` (Unknown Message) or a `5xx` to exercise a bot
+that clears its previous response. `GET`, `PATCH` and `DELETE` for the same
+interaction are separate controls; `POST` callback faults do not affect `@original`. Coverage is in
 `src/rest-appeal-faults.test.ts` (full `buildApp` routes over a real HTTP socket),
 `src/gateway/interaction-event-controls.test.ts` (held modal submission → fault →
 release over a real Gateway socket) and `src/validators/rest-fault.test.ts`.

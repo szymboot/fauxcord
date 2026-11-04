@@ -40,7 +40,7 @@ export function isRestFaultGuildChannelCreatePath(path: string): boolean {
 
 /**
  * Extracts the interaction ID from the token-free interaction selectors:
- * `POST /interactions/{id}/callback` and `GET|PATCH
+ * `POST /interactions/{id}/callback` and `GET|PATCH|DELETE
  * /interactions/{id}/messages/@original`. The secret interaction token is
  * deliberately not part of a selector; the middleware matches it against the
  * stored interaction at request time.
@@ -52,7 +52,8 @@ export function parseRestFaultInteractionSelector(
   const match =
     method === 'POST'
       ? /^\/interactions\/(\d{1,20})\/callback$/.exec(path)
-      : method === 'GET' || method === 'PATCH'
+      : typeof method === 'string' &&
+          ['GET', 'PATCH', 'DELETE'].includes(method)
         ? /^\/interactions\/(\d{1,20})\/messages\/@original$/.exec(path)
         : null
   return match?.[1]
