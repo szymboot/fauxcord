@@ -749,7 +749,8 @@ The existing 250-role limit (including `@everyone`) applies: a full guild return
 Rejected requests store nothing and emit no events.
 
 Successful creation emits the usual `GUILD_ROLE_CREATE` through the Gateway for
-subscribed clients with the `GUILDS` intent. Its role snapshot, native
+subscribed clients with the `GUILDS` intent (it can be captured or held, see
+[role selectors](#role-selectors)). Its role snapshot, native
 `GET /guilds/:guildId/roles`, native guild responses, later `GUILD_CREATE`
 snapshots and `GUILD_ROLE_UPDATE` snapshots all report the stored `managed`
 boolean. Native routes work under `/api/v10`, `/api`, and bare paths.
@@ -3562,7 +3563,8 @@ the newly resolved session.
 `MESSAGE_DELETE`,
 `MESSAGE_DELETE_BULK`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
 `MESSAGE_REACTION_REMOVE_ALL`, `MESSAGE_REACTION_REMOVE_EMOJI`,
-`GUILD_MEMBER_UPDATE`, `GUILD_BAN_ADD`, `GUILD_BAN_REMOVE`, and
+`GUILD_MEMBER_UPDATE`, `GUILD_BAN_ADD`, `GUILD_BAN_REMOVE`,
+`GUILD_ROLE_CREATE`, `GUILD_ROLE_UPDATE`, `GUILD_ROLE_DELETE`, and
 `INTERACTION_CREATE`. Only events that the native producer actually emits are
 captured. Message creation (including
 human messages via `POST /_test/channels/:channelId/messages`), single deletion,
@@ -3578,6 +3580,30 @@ produce no ban envelope to capture. Ban events require Guild Moderation intent
 and retain the guild's owning-bot, exact setup-token and app-database scope.
 Add `member_id` to match `d.user.id`, including users who are no longer members
 or never joined (see [member selectors](#member-selectors)).
+
+For roles, select `GUILD_ROLE_CREATE`, `GUILD_ROLE_UPDATE` and/or
+`GUILD_ROLE_DELETE`. Native producers are `POST /guilds/:guildId/roles`,
+`PATCH /guilds/:guildId/roles/:roleId`, `PATCH /guilds/:guildId/roles` (the bulk
+position update; every role it actually updates emits its own
+`GUILD_ROLE_UPDATE`, and each is captured independently),
+`DELETE /guilds/:guildId/roles/:roleId` and the managed-role fixture
+`POST /_test/guilds/:guildId/roles`, which emits `GUILD_ROLE_CREATE`. Rejected
+requests, unknown roles in a bulk update and no-op deletes emit nothing to
+capture. Role events require the Guilds intent and are captured only for the
+selected session of the guild's registered bot (exact setup token, same app
+database); other sessions, guilds, bots and apps keep their ordinary delivery. A
+control never captures role dispatches produced by another Fauxcord app database.
+Add `role_id` to match one role (see [role selectors](#role-selectors)).
+
+Role snapshots are copied when captured. Release/replay delivers them even after
+the role was changed again or deleted, and never reads current role records,
+re-applies the captured change or reverts a later one. Held role originals
+consume their native sequence but do not enter RESUME history; release/replay
+with `sequence: "new"` adds a fresh sequence to history, while opted-in
+`sequence: "original"` writes the captured envelope without adding history. This
+makes out-of-order handling testable: hold role update A, `PATCH` the same role
+again so update B is delivered, then release A with `sequence: "original"`
+(see the [example](#role-selectors)).
 
 For interactions, select `INTERACTION_CREATE`. Native producers are
 `POST /_test/interactions` and `POST /_test/interactions/:interactionId/modal-submit`
@@ -3674,7 +3700,7 @@ Capture/hold happens after the SQLite deletion. Release/replay delivers the
 native snapshot even after source-message deletion and never restores reactions.
 
 Capture runs after native intent filtering: missing Guild Messages / Guild
-Message Reactions / Guild Voice States / Guild Members / Guild Moderation intent
+Message Reactions / Guild Voice States / Guild Members / Guild Moderation / Guilds intent
 means no corresponding capture or delivery. Unrelated event types, guilds, bots and other sessions keep their
 existing delivery behavior. `hold` defaults to `false`: observe while delivering
 normally. With
@@ -3696,7 +3722,8 @@ normal protocol delivery running. Check both skipped counters when complete
 observation matters. There are at most
 32 controls per assembled Gateway. Global capacity returns `429`. Overlapping
 event selectors for the same guild/session return `409` (see
-[member selectors](#member-selectors) for how `member_id` affects overlap). Invalid policy,
+[member selectors](#member-selectors) and [role selectors](#role-selectors) for how
+`member_id` and `role_id` affect overlap). Invalid policy,
 malformed JSON and explicit null policy values return `400`.
 
 When count/byte capacity is reached, subsequent matching events **pass through
@@ -4020,6 +4047,70 @@ and has its own `limit`, byte budget, operation budget and TTL. `member_id` is
 part of the ownership-key policy: retrying a keyed creation with a different
 selector returns `409`. Release, replay, sequence modes, acknowledgements,
 disconnect/resume gating, inspection by ID or key and cleanup are unchanged.
+
+### Role selectors
+
+`role_id` narrows a control to one guild role. It uses the same positive 1–20
+digit string format as the scope IDs; null/malformed selectors return `400`. It is
+valid only when **every selected event is `GUILD_ROLE_CREATE`,
+`GUILD_ROLE_UPDATE` or `GUILD_ROLE_DELETE`**; any other event type (including
+member-scoped events) together with `role_id` returns `400` with
+`{"message":"role_id requires every event to be one of GUILD_ROLE_CREATE, GUILD_ROLE_UPDATE, GUILD_ROLE_DELETE","code":0}`.
+`member_id` and `role_id` cannot be combined. The role need not exist when
+arming (a role's ID is unknown before it is created), and is not rechecked on
+capture, release or replay. The selector matches the subject role of each event:
+
+| Event               | Matched field |
+| ------------------- | ------------- |
+| `GUILD_ROLE_CREATE` | `d.role.id`   |
+| `GUILD_ROLE_UPDATE` | `d.role.id`   |
+| `GUILD_ROLE_DELETE` | `d.role_id`   |
+
+Without `role_id`, the capture covers every role of the selected guild. Other
+roles' dispatches are not captured, not held, and are delivered immediately with
+their ordinary native sequence, exactly as if no control existed.
+
+**Overlap.** For the same guild and session, a new control conflicts (`409`) with
+an existing one when they share at least one event type and either has no
+`role_id` or both select the same role. Controls with different `role_id` values
+for the same event type coexist, as do controls for the same role with disjoint
+event types; an unscoped role control overlaps every scoped one for the same
+event type. `role_id` is part of the ownership-key policy: retrying a keyed
+creation with a different selector returns `409`. Inspection returns `role_id`.
+
+Example: hold role update A, let update B of the same role be delivered, then
+release A with its original (earlier) sequence:
+
+```bash
+# Arm: hold only the first update of one role; later matches pass through.
+curl -X POST http://localhost:3000/_test/gateway-event-controls \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "guild_id": "222222222222222222",
+    "bot_id": "111111111111111111",
+    "events": ["GUILD_ROLE_UPDATE"],
+    "role_id": "333333333333333333",
+    "hold": true,
+    "limit": 1,
+    "allow_original_sequence": true
+  }'
+
+# Update A is captured and held; update B exceeds `limit` (so `skipped` is 1)
+# and is delivered at once with the next native sequence.
+curl -X PATCH http://localhost:3000/guilds/222222222222222222/roles/333333333333333333 \
+  -H 'Authorization: Bot TOKEN' -H 'Content-Type: application/json' -d '{"name":"A"}'
+curl -X PATCH http://localhost:3000/guilds/222222222222222222/roles/333333333333333333 \
+  -H 'Authorization: Bot TOKEN' -H 'Content-Type: application/json' -d '{"name":"B"}'
+
+# Release A after B with its original sequence. The bot sees B, then the stale A.
+curl -X POST http://localhost:3000/_test/gateway-event-controls/CONTROL_ID/release \
+  -H 'Content-Type: application/json' \
+  -d '{"event_ids":["HELD_EVENT_ID"],"sequence":"original"}'
+```
+
+To hold both updates instead, omit `limit` and release B (default
+`sequence: "new"`) before A with `"original"`. The database keeps B throughout:
+releasing A neither reapplies nor reverts anything.
 
 ### Native member updates and cache preparation
 

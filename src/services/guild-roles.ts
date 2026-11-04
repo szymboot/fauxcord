@@ -7,7 +7,7 @@
 import type { Database } from '../db'
 // Used for compile-time type drift detection.
 import type { APIRole } from 'discord-api-types/v10'
-import { gatewayBus } from '../gateway/bus'
+import { emitRoleEvent } from '../gateway/bus'
 
 /**
  * Compile-time guard: ensures the safe-field subset of RoleObject is
@@ -195,7 +195,7 @@ function insertRole(
     .get(params.roleId) as RoleRow
   const role = toRoleObject(row)
 
-  gatewayBus.emit('guild.role.create', {
+  emitRoleEvent(db, 'guild.role.create', {
     guildId: params.guildId,
     role: role as unknown as Record<string, unknown>,
   })
@@ -306,7 +306,7 @@ export function updateRole(
     .get(roleId) as RoleRow
   const role = toRoleObject(row)
 
-  gatewayBus.emit('guild.role.update', {
+  emitRoleEvent(db, 'guild.role.update', {
     guildId,
     role: role as unknown as Record<string, unknown>,
   })
@@ -332,7 +332,7 @@ export function deleteRole(
   const deleted = result.changes > 0
 
   if (deleted) {
-    gatewayBus.emit('guild.role.delete', { guildId, roleId })
+    emitRoleEvent(db, 'guild.role.delete', { guildId, roleId })
   }
 
   return deleted
