@@ -261,6 +261,15 @@ describe('appeal REST fault selectors', () => {
       foreignStatus: 404,
       ok: 200,
     },
+    {
+      name: 'original response delete',
+      method: 'DELETE',
+      selector: () => `/interactions/${interaction.id}/messages/@original`,
+      call: (prefix = '') => original(interaction, 'DELETE', prefix),
+      foreign: () => original(interaction, 'DELETE', '', 'wrong-token'),
+      foreignStatus: 404,
+      ok: 204,
+    },
   ]
 
   describe.each(scenarios)('$name', (scenario) => {
@@ -831,6 +840,103 @@ describe('appeal REST fault selectors', () => {
       expect(edited.status).toBe(200)
       await expect(edited.json()).resolves.toMatchObject({ content: 'edited' })
       expect(originalContent(interaction)).toBe('edited')
+    })
+
+    it('keeps the message readable when a delete is faulted, then deletes it', async () => {
+      const fault = await arm(
+        'DELETE',
+        `/interactions/${interaction.id}/messages/@original`,
+        { status: 401, code: 50_027, message: 'Invalid Webhook Token' }
+      )
+      const failed = await original(interaction, 'DELETE')
+      expect(failed.status).toBe(401)
+      await expect(failed.json()).resolves.toEqual({
+        code: 50_027,
+        message: 'Invalid Webhook Token',
+      })
+      expect(originalContent(interaction)).toBe('original')
+      const read = await original(interaction, 'GET')
+      expect(read.status).toBe(200)
+      await expect(read.json()).resolves.toMatchObject({ content: 'original' })
+      expect(await inspect(fault.id)).toMatchObject({
+        remaining: 0,
+        consumed: 1,
+      })
+      expect(await code(original(interaction, 'DELETE'))).toBe(204)
+      expect(originalContent(interaction)).toBeUndefined()
+      expect(await code(original(interaction, 'GET'))).toBe(404)
+    })
+
+    it('fails a delete with Unknown Message while the message survives', async () => {
+      await arm(
+        'DELETE',
+        `/interactions/${interaction.id}/messages/@original`,
+        {
+          status: 404,
+          code: 10_008,
+          message: 'Unknown Message',
+        }
+      )
+      const failed = await original(interaction, 'DELETE')
+      expect(failed.status).toBe(404)
+      await expect(failed.json()).resolves.toEqual({
+        code: 10_008,
+        message: 'Unknown Message',
+      })
+      expect(originalContent(interaction)).toBe('original')
+    })
+
+    it('deletes natively once the control is cancelled', async () => {
+      const fault = await arm(
+        'DELETE',
+        `/interactions/${interaction.id}/messages/@original`,
+        { times: 5 }
+      )
+      expect(await code(original(interaction, 'DELETE'))).toBe(503)
+      expect(await status(`/_test/rest-faults/${fault.id}`, 'DELETE')).toBe(204)
+      expect(originalContent(interaction)).toBe('original')
+      expect(await code(original(interaction, 'DELETE'))).toBe(204)
+      expect(originalContent(interaction)).toBeUndefined()
+    })
+
+    it('is consumed only by the selected interaction and exact route', async () => {
+      expect(await code(callback(otherInteraction))).toBe(204)
+      const fault = await arm(
+        'DELETE',
+        `/interactions/${interaction.id}/messages/@original`
+      )
+      const read = await arm(
+        'GET',
+        `/interactions/${interaction.id}/messages/@original`
+      )
+      const patch = await arm(
+        'PATCH',
+        `/interactions/${interaction.id}/messages/@original`
+      )
+      // Another interaction's original, with its own token, is untouched.
+      expect(await code(original(otherInteraction, 'DELETE'))).toBe(204)
+      // GET and PATCH keep their own selectors.
+      expect(await code(original(interaction, 'GET'))).toBe(503)
+      expect(await code(original(interaction, 'PATCH'))).toBe(503)
+      // A wrong token or a followup message route never consumes the control.
+      expect(await code(original(interaction, 'DELETE', '', 'wrong'))).toBe(404)
+      expect(
+        await status(
+          `/webhooks/${interaction.application_id}/${interaction.token}/messages/123456789012345678`,
+          'DELETE',
+          undefined,
+          null
+        )
+      ).toBe(404)
+      expect(await inspect(fault.id)).toMatchObject({
+        remaining: 1,
+        consumed: 0,
+      })
+      expect(await inspect(read.id)).toMatchObject({ consumed: 1 })
+      expect(await inspect(patch.id)).toMatchObject({ consumed: 1 })
+      expect(originalContent(interaction)).toBe('original')
+      expect(await code(original(interaction, 'DELETE'))).toBe(503)
+      expect(originalContent(interaction)).toBe('original')
     })
 
     it('fails reads and edits through independent controls', async () => {
