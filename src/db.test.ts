@@ -7,6 +7,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { getGuildMember, updateGuildMember } from './services/guild-members'
+import { isInteractionTokenExpired } from './services/interactions'
 import { prepareMemberDateFixture } from './services/test-control'
 import {
   createInteraction,
@@ -961,6 +962,41 @@ describe('application commands / interactions tables', () => {
           .get()
       ).toBe('pl')
       reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('adds the token expiry column to legacy interactions using created_at', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-interaction-expiry-'))
+    const dbPath = path.join(dir, 'legacy.db')
+    try {
+      const legacy = initializeDatabase(dbPath)
+      legacy.exec('ALTER TABLE interactions DROP COLUMN token_expires_at')
+      const insert = legacy.prepare(
+        `INSERT INTO interactions (id, application_id, token, type, user_id, created_at)
+         VALUES (?, 'app', ?, 2, 'user', datetime('now', ?))`
+      )
+      insert.run('fresh', 'fresh-token', '-1 minutes')
+      insert.run('stale', 'stale-token', '-16 minutes')
+      legacy.close()
+
+      const migrated = initializeDatabase(dbPath)
+      expect(
+        migrated
+          .prepare('SELECT id, token_expires_at FROM interactions ORDER BY id')
+          .all()
+      ).toEqual([
+        { id: 'fresh', token_expires_at: null },
+        { id: 'stale', token_expires_at: null },
+      ])
+      expect(isInteractionTokenExpired(migrated, 'app', 'fresh-token')).toBe(
+        false
+      )
+      expect(isInteractionTokenExpired(migrated, 'app', 'stale-token')).toBe(
+        true
+      )
+      migrated.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

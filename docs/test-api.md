@@ -3093,8 +3093,9 @@ Gateway message events. Other callback types retain the mock's existing scope;
 types 6/7 acknowledge without creating an original response. Type 9 (`MODAL`)
 records the modal so a test can read and
 [submit it](#post-_testinteractionsinteractionidmodal-submit--submit-a-shown-modal).
-Token expiry, component rendering, and uploaded response attachments are not
-modeled here.
+Component rendering and uploaded response attachments are not modeled here.
+Interaction tokens expire after 15 minutes (see
+[Interaction token expiry](#post-_testinteractionsinteractionidexpire-token--expire-an-interaction-token)).
 
 ---
 
@@ -3216,8 +3217,9 @@ Missing/empty `application_id` or `X-Interaction-Token` returns `400`
 mismatch of interaction ID, application ID, or token return the same `404`
 (`{"message":"404: Not Found","code":0}`). No token is returned in success or
 error bodies. Keep the token out of URLs, diagnostic output, and logs, including
-HTTP header dumps. Tokens follow the existing interaction lifetime (expiry is
-not modeled). This Fauxcord-specific route has no Discord OpenAPI manifest entry.
+HTTP header dumps. The observation keeps working after the token expired (it is
+test control, not a token-authorized Discord route). This Fauxcord-specific route
+has no Discord OpenAPI manifest entry.
 
 ---
 
@@ -3385,6 +3387,77 @@ first attempt). The original interaction's observation is unchanged.
 
 Reset (`POST /_test/reset`) and setup deletion remove interactions and their
 modals. This Fauxcord-specific route has no Discord OpenAPI manifest entry.
+
+---
+
+## `POST /_test/interactions/:interactionId/expire-token` — Expire an interaction token
+
+Discord interaction tokens are valid for **15 minutes**
+([Receiving and Responding](https://discord.com/developers/docs/interactions/receiving-and-responding)).
+Fauxcord models the same lifetime: a token stops being accepted **15 minutes after the
+interaction was created**, measured with Fauxcord's own clock (`Date.now()`), and this
+route expires one interaction's token immediately so a test does not have to wait.
+
+After expiry, every webhook route authorized by that interaction token answers
+`401` with Discord's body:
+
+```json
+{ "message": "Invalid Webhook Token", "code": 50027 }
+```
+
+The affected routes are `GET`/`PATCH`/`DELETE
+/webhooks/{applicationId}/{token}/messages/@original`, `POST
+/webhooks/{applicationId}/{token}` (followups, with or without `?wait`) and
+`GET`/`PATCH`/`DELETE /webhooks/{applicationId}/{token}/messages/{messageId}`,
+under `/api/v10`, `/api`, and bare paths. The check runs before the body is
+parsed or validated. Real webhook tokens and unknown tokens are unaffected.
+
+```bash
+curl -X POST http://localhost:3000/_test/interactions/123456789/expire-token \
+  -H "Content-Type: application/json" \
+  -H "X-Interaction-Token: <interaction token>" \
+  -d '{"application_id": "111111111111111111"}'
+```
+
+Like the callback observation and modal submission it is addressed by the interaction
+ID, the owning `application_id` (body) and the interaction token (`X-Interaction-Token`
+header, never in the URL). **Response**: `200` with `Cache-Control: no-store`:
+
+```json
+{
+  "interaction_id": "123456789",
+  "application_id": "111111111111111111",
+  "token_expires_at": "2026-01-01T12:00:00.000Z"
+}
+```
+
+The route is idempotent: expiring again (or after the 15 minutes passed) keeps the
+earliest `token_expires_at`. Only that interaction is affected.
+
+| Status | Body                                       | Cause                                                         |
+| ------ | ------------------------------------------ | ------------------------------------------------------------- |
+| `400`  | `{"message": "400: Bad Request", "code": 0}` | Missing `application_id` or `X-Interaction-Token`            |
+| `404`  | `{"message": "404: Not Found", "code": 0}`   | Unknown interaction ID, or a mismatched application ID/token |
+
+**What expiry does not do**
+
+- Messages are not deleted: an expired original or followup stays in the channel and
+  stays readable and editable through Bot-authorized channel routes (an ephemeral
+  response remains stored, though Fauxcord only serves it by its token, as before).
+- New interactions are unaffected: a button click made after expiry
+  (`POST /_test/interactions` with `type: 3`) creates a new interaction with a fresh
+  token.
+- The initial callback (`POST /interactions/{id}/{token}/callback`) keeps its existing
+  behavior and is not rejected after expiry. Discord documents a separate 3-second
+  deadline for it, which Fauxcord does not model either.
+- An armed [REST fault](#post-_testrest-faults--fail-bounded-exact-rest-attempts) selector for a route
+  still runs before the native route (the existing middleware order); expiry is native
+  route behavior, so a faulted request returns the injected failure and, once the
+  control is exhausted, the `401`.
+- `POST /_test/reset` and setup deletion remove interactions, and with them their
+  expiry state.
+
+This Fauxcord-specific route has no Discord OpenAPI manifest entry.
 
 ---
 

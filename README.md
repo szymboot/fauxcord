@@ -11,6 +11,7 @@ Run integration tests for Discord bots and applications without connecting to th
 - **Rate Limit headers** — Discord-compatible headers attached to responses (dummy values)
 - **Snowflake IDs** — Automatically generates Discord-compatible IDs
 - **File attachments** — Supports file uploads via multipart/form-data
+- **Interaction token expiry** — Interaction tokens stop working 15 minutes after creation (webhook routes answer `401` / `50027 Invalid Webhook Token`); tests can expire one immediately via `POST /_test/interactions/:id/expire-token` (see [docs/test-api.md](./docs/test-api.md))
 - **Modals** — Bots can show modals (callback type `9`) made of Labels with Text Inputs / String Selects, legacy Action Rows, and Text Display components (including confirmation modals with no inputs), and tests submit them via `POST /_test/interactions/:id/modal-submit` (see [docs/test-api.md](./docs/test-api.md))
 - **Gateway (WebSocket)** — Identify / Heartbeat / Resume handshake and Dispatch events for messages, reactions, guilds, guild emoji, channels, members, and roles
 

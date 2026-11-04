@@ -6,7 +6,7 @@
 
 import type { MessageComponents } from '../validators/message-components'
 
-import { Hono } from 'hono'
+import { Hono, type MiddlewareHandler } from 'hono'
 import type { Database } from '../db'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { generateSnowflake } from '../snowflake'
@@ -26,7 +26,10 @@ import {
   createMessage,
 } from '../services/messages'
 import { getChannel } from '../services/channels'
-import { getInteractionFollowupTarget } from '../services/interactions'
+import {
+  getInteractionFollowupTarget,
+  isInteractionTokenExpired,
+} from '../services/interactions'
 import {
   validateWebhookExecute,
   validateWebhookUpdate,
@@ -119,6 +122,31 @@ function getOriginalMessageId(
 }
 
 /**
+ * Rejects interaction-token webhook routes once the token's 15-minute
+ * lifetime is over, like Discord (401 `Invalid Webhook Token`). Runs before
+ * body parsing and validation because the token is the credential. Messages
+ * the interaction produced are untouched; only token-authorized access ends.
+ * Real webhooks and unknown tokens fall through to the route's own handling.
+ * @param db - Database
+ * @returns Hono middleware
+ */
+function rejectExpiredInteractionToken(db: Database): MiddlewareHandler {
+  return async (c, next) => {
+    const webhookId = c.req.param('webhookId') ?? ''
+    const token = c.req.param('token') ?? ''
+    if (isInteractionTokenExpired(db, webhookId, token)) {
+      const err = discordError(
+        DiscordErrorCode.INVALID_WEBHOOK_TOKEN,
+        'Invalid Webhook Token',
+        401
+      )
+      return c.json(err.body, 401)
+    }
+    await next()
+  }
+}
+
+/**
  * Creates the Webhooks API routes.
  * @param db - Database
  * @param baseUrl - Base URL
@@ -126,6 +154,12 @@ function getOriginalMessageId(
  */
 export function createWebhookRoutes(db: Database, baseUrl: string): Hono {
   const app = new Hono()
+
+  // Interaction-token routes: followup execution and every message route
+  // (including @original). Defined first so expiry wins over the handlers.
+  const rejectExpired = rejectExpiredInteractionToken(db)
+  app.post('/webhooks/:webhookId/:token', rejectExpired)
+  app.use('/webhooks/:webhookId/:token/messages/:messageId', rejectExpired)
 
   // GET /webhooks/:webhookId — Retrieve a webhook by ID
   app.get('/webhooks/:webhookId', (c) => {

@@ -16,6 +16,9 @@ import { getGuildMember } from './guild-members'
 import { getUser } from './users'
 import { createMessage, MESSAGE_FLAGS, type MessageObject } from './messages'
 
+/** How long an interaction token stays valid, as documented by Discord. */
+export const INTERACTION_TOKEN_TTL_MS = 15 * 60 * 1000
+
 /** Interaction object for API responses and Gateway dispatch */
 export interface InteractionObject {
   id: string
@@ -54,6 +57,7 @@ interface InteractionRow {
   initial_response_message_id: string | null
   modal_json: string | null
   message_json: string | null
+  token_expires_at: number | null
   created_at: string
 }
 
@@ -142,8 +146,8 @@ export function createInteraction(
 ): InteractionObject {
   db.prepare(
     `INSERT INTO interactions
-       (id, application_id, token, type, locale, guild_id, channel_id, command_id, data, user_id, message_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (id, application_id, token, type, locale, guild_id, channel_id, command_id, data, user_id, message_json, token_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     params.interactionId,
     params.applicationId,
@@ -155,7 +159,8 @@ export function createInteraction(
     params.commandId ?? null,
     JSON.stringify(params.data ?? {}),
     params.userId,
-    params.message ? JSON.stringify(params.message) : null
+    params.message ? JSON.stringify(params.message) : null,
+    Date.now() + INTERACTION_TOKEN_TTL_MS
   )
 
   const row = db
@@ -209,6 +214,91 @@ export function getInteractionFollowupTarget(
         initialResponseMessageId: row.initial_response_message_id,
       }
     : null
+}
+
+/**
+ * Computes when an interaction's token stops being valid. Rows created
+ * before expiry was recorded fall back to 15 minutes after `created_at`
+ * (SQLite stores it as UTC without a zone designator); an unparsable
+ * `created_at` counts as already expired.
+ * @param row - Interaction expiry columns
+ * @returns Expiry as epoch milliseconds
+ */
+function tokenExpiresAt(
+  row: Pick<InteractionRow, 'token_expires_at' | 'created_at'>
+): number {
+  if (row.token_expires_at !== null) return row.token_expires_at
+  const expiresAt =
+    Date.parse(`${row.created_at.replace(' ', 'T')}Z`) +
+    INTERACTION_TOKEN_TTL_MS
+  // An unparsable created_at (hand-edited or imported DB) fails closed.
+  return Number.isFinite(expiresAt) ? expiresAt : 0
+}
+
+/**
+ * Reports whether a webhook-style `(application_id, token)` pair names an
+ * interaction whose 15-minute token has expired (naturally or through test
+ * control). Unknown pairs are not expired: they are simply not interactions.
+ * @param db - Database
+ * @param applicationId - Application ID (used as the pseudo-webhook ID)
+ * @param token - Interaction token (used as the pseudo-webhook token)
+ * @returns True only for a known interaction whose token expired
+ */
+export function isInteractionTokenExpired(
+  db: Database,
+  applicationId: string,
+  token: string
+): boolean {
+  const row = db
+    .prepare(
+      'SELECT token_expires_at, created_at FROM interactions WHERE application_id = ? AND token = ?'
+    )
+    .get(applicationId, token) as
+    Pick<InteractionRow, 'token_expires_at' | 'created_at'> | undefined
+  return row !== undefined && tokenExpiresAt(row) <= Date.now()
+}
+
+/** Result of expiring an interaction token through test control. */
+export interface ExpireInteractionTokenResult {
+  interaction_id: string
+  application_id: string
+  /** ISO 8601 instant the token stopped (or will stop) being valid. */
+  token_expires_at: string
+}
+
+/**
+ * Expires one interaction's token immediately. Idempotent: a token that is
+ * already expired keeps its earlier expiry instant. Only the token is
+ * affected; messages the interaction produced stay.
+ * @param db - Database
+ * @param interactionId - Exact interaction ID
+ * @param applicationId - Exact application ID owning the interaction
+ * @param token - Interaction token credential
+ * @returns The recorded expiry, or null for unknown or mismatched credentials
+ */
+export function expireInteractionToken(
+  db: Database,
+  interactionId: string,
+  applicationId: string,
+  token: string
+): ExpireInteractionTokenResult | null {
+  const row = db
+    .prepare(
+      'SELECT token_expires_at, created_at FROM interactions WHERE id = ? AND application_id = ? AND token = ?'
+    )
+    .get(interactionId, applicationId, token) as
+    Pick<InteractionRow, 'token_expires_at' | 'created_at'> | undefined
+  if (!row) return null
+  const expiresAt = Math.min(tokenExpiresAt(row), Date.now())
+  db.prepare('UPDATE interactions SET token_expires_at = ? WHERE id = ?').run(
+    expiresAt,
+    interactionId
+  )
+  return {
+    interaction_id: interactionId,
+    application_id: applicationId,
+    token_expires_at: new Date(expiresAt).toISOString(),
+  }
 }
 
 /** Durable initial callback state; never includes the interaction token. */
