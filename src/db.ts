@@ -251,6 +251,21 @@ function migrateInteractionMessage(db: Database): void {
   }
 }
 
+/**
+ * Adds the interaction token expiry (epoch milliseconds). Rows without a
+ * value fall back to 15 minutes after `created_at`, so existing rows expire
+ * like newly created ones.
+ * @param db - Database instance
+ */
+function migrateInteractionTokenExpiry(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(interactions)').all() as {
+    name: string
+  }[]
+  if (columns.every((column) => column.name !== 'token_expires_at')) {
+    db.exec('ALTER TABLE interactions ADD COLUMN token_expires_at INTEGER')
+  }
+}
+
 /** Preserves legacy controls while admitting bot-scoped user route selectors. */
 function migrateRestFaultSelectors(db: Database): void {
   db.transaction(() => {
@@ -807,6 +822,7 @@ export function initializeDatabase(dbPath: string): Database {
       initial_response_message_id TEXT,
       modal_json                  TEXT,
       message_json                TEXT,
+      token_expires_at            INTEGER,
       created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_interactions_app ON interactions(application_id);
@@ -1196,6 +1212,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateInteractionCallbackType(db)
   migrateInteractionModal(db)
   migrateInteractionMessage(db)
+  migrateInteractionTokenExpiry(db)
   migrateRestFaultSelectors(db)
   migrateReactionTypes(db)
   recoverRestFaultOutcomes(db)

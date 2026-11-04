@@ -49,7 +49,10 @@ import type {
   TestInteractionRequest,
 } from '../services/test-control'
 import { getChannelWebhooks } from '../services/webhooks'
-import { getInteractionCallbackObservation } from '../services/interactions'
+import {
+  expireInteractionToken,
+  getInteractionCallbackObservation,
+} from '../services/interactions'
 import {
   createTestComponentInteraction,
   type TestComponentInteractionRequest,
@@ -994,6 +997,30 @@ export function createTestRoutes(
         return c.json({ message: '404: Not Found', code: 0 }, 404)
       }
     }
+  })
+
+  // POST /_test/interactions/:interactionId/expire-token — Expire the token of
+  // an interaction immediately, as if its 15 minutes had passed.
+  app.post('/_test/interactions/:interactionId/expire-token', async (c) => {
+    const token = c.req.header('X-Interaction-Token')
+    const raw: unknown = await c.req.json().catch(() => null)
+    const applicationId =
+      typeof raw === 'object' && raw !== null
+        ? (raw as { application_id?: unknown }).application_id
+        : undefined
+    if (typeof applicationId !== 'string' || !applicationId || !token) {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
+    const result = expireInteractionToken(
+      db,
+      c.req.param('interactionId'),
+      applicationId,
+      token
+    )
+    c.header('Cache-Control', 'no-store')
+    return result
+      ? c.json(result)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
   })
 
   // POST /_test/polls/:messageId/votes — Inject a poll vote for testing
