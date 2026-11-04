@@ -773,15 +773,16 @@ the existing managed flag.
 
 This fixture represents the flag only: it does not create an integration, bot
 association, role tags (`tags` remains `{}`), or automatic membership/lifecycle.
-The documented [member-role add/remove](https://docs.discord.com/developers/resources/guild#add-guild-member-role),
-role edit and [role delete](https://docs.discord.com/developers/resources/guild#delete-guild-role)
-endpoints specify permissions but do not define managed-specific rejection
-conditions or error responses. Fauxcord deliberately retains its existing
-behavior for these operations, including `PATCH` member role lists:
-managed roles can still be assigned, removed, edited and deleted. It does not
-guess a blanket `403` or managed-role immutability rule. These operations are
-not suitable for testing Discord's integration-role enforcement; use the fixture
-to test applications that inspect `managed` themselves.
+The documented [role edit](https://docs.discord.com/developers/resources/guild#modify-guild-role)
+and [role delete](https://docs.discord.com/developers/resources/guild#delete-guild-role)
+endpoints do not define managed-specific rejection conditions, so Fauxcord
+retains its existing behavior for them, including `PATCH` member role lists:
+managed roles can still be edited, deleted and set through a member `roles`
+list. The single-role routes `PUT`/`DELETE
+/guilds/:guildId/members/:userId/roles/:roleId` do reject managed roles with
+`403`/`50013` (`Missing Permissions`), the failure Discord libraries document
+for adding or removing a managed role; see
+[Member role permissions](#member-role-permissions).
 
 ---
 
@@ -5577,6 +5578,65 @@ enforce feature-specific send permissions such as TTS, attachments, replies,
 stickers or polls. It supplies Fauxcord prerequisites for bot integration tests;
 the bot harness and end-to-end handler coverage remain downstream work.
 
+## Member role permissions
+
+`PUT` and `DELETE /guilds/:guildId/members/:userId/roles/:roleId` (also `/api`
+and `/api/v10`) enforce Discord's role rules, so a shop role above the bot's
+highest role, or a bot without Manage Roles, fails like on Discord with
+**`403`** `{"message":"Missing Permissions","code":50013}`. The check uses the
+caller's persisted roles (the same resolution as message sends and voice
+moderation) and runs before any write: a rejected request changes no role and
+emits no `GUILD_MEMBER_UPDATE`.
+
+| Caller / role                                             | Result                                                                  |
+| --------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Managed role (`managed: true`)                            | `403` / `50013` for everyone, including the owner and Administrators   |
+| Guild owner                                               | Allowed (after the managed check), regardless of hierarchy             |
+| No `MANAGE_ROLES` (`@everyone` and held roles combined)   | `403` / `50013`                                                         |
+| `ADMINISTRATOR` (implies `MANAGE_ROLES`)                  | Allowed only for roles strictly below the caller's highest role         |
+| `MANAGE_ROLES`, role strictly below the highest role      | `204`                                                                   |
+| `MANAGE_ROLES`, role equal to or above the highest role   | `403` / `50013`                                                         |
+| OAuth2 Bearer user                                        | `403` / `50013` (no guild permissions are evaluated for Bearer users)  |
+
+Roles are compared by `position`; roles with the same position are ordered by
+ID, where the lower (older) ID ranks higher. Only the target **role** is
+compared; the target member's own roles are irrelevant. Check order: unknown
+guild (`10004`), the `@everyone` role (`400`/`50028`, unchanged), unknown role
+(`10011`), then permissions (`403`), then unknown member (`10007`). REST fault
+selectors still run before all of it, so an armed fault wins and is consumed
+without reaching the native route.
+
+Sources: [Add](https://docs.discord.com/developers/resources/guild#add-guild-member-role)
+and [Remove Guild Member Role](https://docs.discord.com/developers/resources/guild#remove-guild-member-role)
+(requires `MANAGE_ROLES`), [Permission Hierarchy](https://docs.discord.com/developers/topics/permissions#permission-hierarchy)
+(only roles lower than the highest role may be granted), and the discord.js
+guide on [extended permissions](https://discordjs.guide/legacy/popular-topics/permissions-extended)
+(role hierarchy and managed roles both raise `Missing Permissions`, and
+`Administrator` does not skip any hierarchical check).
+
+**Compatibility.** The default `POST /_test/setup` bot owns its guilds, so
+existing setups need no change. Roles created through `POST /guilds/:guildId/roles`
+or `POST /_test/guilds/:guildId/roles` are positioned above all earlier roles. To
+exercise the failures, use `owner_id` to select a human owner, then give the bot
+a role: with `MANAGE_ROLES` and a position above the roles it assigns, assignments
+succeed; with a lower position, or without `MANAGE_ROLES`, they fail. Two
+callers are deliberately not restricted. A bot that holds **no role at all**
+(apart from `@everyone`) is unrestricted. This is a compatibility choice: the
+discord-bot harness gives a human-owned guild's bot its first role, and seeds
+other members' roles, through this route. Fauxcord creates no bot role at setup,
+and `POST /_test/guilds/:guildId/bot` only accepts `roles` for a bot that is not
+yet in the guild. Give the bot any role to leave this state, or start strict:
+prepare the guild with `bot_present: false` and add the bot with that control and
+`roles`. A caller that is **not a member** of the guild (a detached or
+never-joined bot) keeps the existence-only behavior of the other detached-guild
+routes (see
+[Fixture lifetime versus bot membership](#fixture-lifetime-versus-bot-membership)),
+so seeding human members' roles before the bot joins still works; managed roles
+are still rejected for it. With
+`DISABLE_AUTH=true` and an unregistered token, the dummy bot has no stored
+permissions and skips these checks. `PATCH
+/guilds/:guildId/members/:userId` with `roles` keeps its unchecked behavior.
+
 ## Server voice moderation through Modify Guild Member
 
 `PATCH /guilds/:guildId/members/:userId` (also `/api` and `/api/v10`) applies
@@ -5641,8 +5701,13 @@ The guild owner and members with guild-level `ADMINISTRATOR` bypass all checks.
 **The default `POST /_test/setup` bot owns its guilds, so existing setups need no
 extra grants.** If `guilds[].owner_id` selects a human owner (or another setup
 takes over ownership), grant the bot a role with the bits above (or
-`ADMINISTRATOR`) through `POST /guilds/:guildId/roles` and
-`PUT /guilds/:guildId/members/:botId/roles/:roleId`; the default `@everyone`
+`ADMINISTRATOR`) through `POST /guilds/:guildId/roles` and a role assignment.
+`PUT /guilds/:guildId/members/:botId/roles/:roleId` is unrestricted while the
+bot holds no role yet and follows the
+[Member role permissions](#member-role-permissions) rules afterwards, so grant
+all needed bits in one role, or use `PATCH /guilds/:guildId/members/:botId` with
+`roles` (unchecked), or, for a guild prepared with `bot_present: false`,
+`POST /_test/guilds/:guildId/bot` with `roles`; the default `@everyone`
 permissions (`1071698660929`) include `VIEW_CHANNEL` and `CONNECT` but none of
 the moderation bits. Only the voice fields are permission-checked; `nick`,
 `roles` and `communication_disabled_until` keep their unchecked behavior. With

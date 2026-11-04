@@ -13,7 +13,8 @@ import {
   getGuildBotUserId,
   removeGuildFromBot,
 } from '../services/guilds'
-import { getRole } from '../services/guild-roles'
+import { getRole, type RoleObject } from '../services/guild-roles'
+import { checkMemberRoleChange } from '../services/member-role-permissions'
 import {
   getGuildMember,
   getGuildMembers,
@@ -32,6 +33,7 @@ import {
   parseJsonBody,
 } from '../lib/route-helpers'
 import type { AppEnv } from '../middleware/auth'
+import type { Context } from 'hono'
 import {
   checkVoiceModeration,
   hasVoiceChange,
@@ -60,6 +62,40 @@ const VOICE_MODERATION_ERRORS: Record<
     'Missing Permissions',
     403,
   ],
+}
+
+/**
+ * Evaluates Discord's permission and role-hierarchy rules for adding or
+ * removing a role on a member and builds the 403 response when denied.
+ * An OAuth2 Bearer user has no guild permissions to evaluate, so it is always
+ * denied; a dummy DISABLE_AUTH bot (unregistered token) and callers without
+ * any authentication context (route-only unit tests) are not evaluated.
+ * @param c - Hono context
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param role - Existing, non-`@everyone` target role
+ * @returns A 403 Response when denied, otherwise null
+ */
+function denyMemberRoleChange(
+  c: Context<AppEnv>,
+  db: Database,
+  guildId: string,
+  role: RoleObject
+): Response | null {
+  const bot = c.get('bot')
+  let denied = false
+  if (!bot) {
+    denied = c.get('accessToken') !== undefined
+  } else if (db.prepare('SELECT 1 FROM bots WHERE token = ?').get(bot.token)) {
+    denied = checkMemberRoleChange(db, guildId, bot.user_id, role) !== null
+  }
+  if (!denied) return null
+  const err = discordError(
+    DiscordErrorCode.MISSING_PERMISSIONS,
+    'Missing Permissions',
+    403
+  )
+  return c.json(err.body, 403)
 }
 
 /**
@@ -265,7 +301,8 @@ export function createGuildMemberRoutes(
       return c.json(err.body, 400)
     }
 
-    if (!getRole(db, guildId, roleId)) {
+    const role = getRole(db, guildId, roleId)
+    if (!role) {
       const err = discordError(
         DiscordErrorCode.UNKNOWN_ROLE,
         'Unknown Role',
@@ -273,6 +310,10 @@ export function createGuildMemberRoutes(
       )
       return c.json(err.body, 404)
     }
+
+    // Permission and hierarchy come before member lookup and any write.
+    const denied = denyMemberRoleChange(c, db, guildId, role)
+    if (denied) return denied
 
     const ok = addMemberRole(db, guildId, userId, roleId)
     if (!ok) {
@@ -307,7 +348,8 @@ export function createGuildMemberRoutes(
       return c.json(err.body, 400)
     }
 
-    if (!getRole(db, guildId, roleId)) {
+    const role = getRole(db, guildId, roleId)
+    if (!role) {
       const err = discordError(
         DiscordErrorCode.UNKNOWN_ROLE,
         'Unknown Role',
@@ -315,6 +357,10 @@ export function createGuildMemberRoutes(
       )
       return c.json(err.body, 404)
     }
+
+    // Permission and hierarchy come before member lookup and any write.
+    const denied = denyMemberRoleChange(c, db, guildId, role)
+    if (denied) return denied
 
     const ok = removeMemberRole(db, guildId, userId, roleId)
     if (!ok) {
