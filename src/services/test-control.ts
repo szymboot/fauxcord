@@ -12,7 +12,7 @@ import { pruneClosedDms, resetClosedDms } from './closed-dms'
 import { randomBytes } from 'node:crypto'
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
-import { toDiscordTimestamp } from '../timestamp'
+import { formatStoredTimestamp, toDiscordTimestamp } from '../timestamp'
 import { gatewayBus } from '../gateway/bus'
 import { buildGuildCreatePayload, isValidAfkChannel } from './guilds'
 import { listVoiceRegions } from './catalog'
@@ -27,7 +27,11 @@ import {
 } from '../validators/channel'
 import { validateGuildAfk } from '../validators/guild'
 import type { ValidationErrors } from '../validators/common'
-import { getGuildMember, type GuildMemberObject } from './guild-members'
+import {
+  getGuildMember,
+  publishGuildMemberUpdate,
+  type GuildMemberObject,
+} from './guild-members'
 import { deleteGuildMembership } from './member-removal'
 import { getChannel, isVoiceCapableChannelType } from './channels'
 import { getUser, type UserObject } from './users'
@@ -970,6 +974,63 @@ export function prepareMemberDateFixture(
       return prepared
     }
   )()
+}
+
+/** Result of a live boost change for an existing guild member. */
+export type LiveMemberPremiumResult =
+  GuildMemberObject | 'UNKNOWN_GUILD' | 'UNKNOWN_MEMBER' | 'BOT_MEMBER'
+
+/**
+ * Stores a human member's boost start and emits one native
+ * GUILD_MEMBER_UPDATE after commit. An unchanged stored value emits nothing,
+ * matching Discord. Guild boost counts, tier and the boost system message are
+ * not modelled.
+ * @param db - Database
+ * @param guildId - Existing guild ID
+ * @param userId - Existing non-bot member's user ID
+ * @param premiumSince - Validated timestamp, or null when the boost ended
+ * @returns Stored member, or an error reason with no mutation or emission
+ */
+export function setMemberPremiumSince(
+  db: Database,
+  guildId: string,
+  userId: string,
+  premiumSince: string | null
+): LiveMemberPremiumResult {
+  // Normalize before starting any write.
+  const normalized =
+    premiumSince === null ? null : toDiscordTimestamp(new Date(premiumSince))
+  const { result, changed } = db.transaction(
+    (): {
+      result: LiveMemberPremiumResult
+      changed: boolean
+    } => {
+      if (!db.prepare('SELECT id FROM guilds WHERE id = ?').get(guildId)) {
+        return { result: 'UNKNOWN_GUILD', changed: false }
+      }
+      const member = getGuildMember(db, guildId, userId)
+      if (!member) return { result: 'UNKNOWN_MEMBER', changed: false }
+      if (member.user.bot) return { result: 'BOT_MEMBER', changed: false }
+      // Compare instants: legacy stored values may use other notations.
+      const stored = member.premium_since
+      const sameInstant =
+        (stored === null ? null : formatStoredTimestamp(stored)) === normalized
+      if (member.premium_since === normalized) {
+        return { result: member, changed: false }
+      }
+      db.prepare(
+        'UPDATE guild_members SET premium_since = ? WHERE guild_id = ? AND user_id = ?'
+      ).run(normalized, guildId, userId)
+      const updated = getGuildMember(db, guildId, userId)
+      if (!updated) throw new Error('Updated member could not be retrieved')
+      // An unchanged instant is canonicalized silently, without an event.
+      return { result: updated, changed: !sameInstant }
+    }
+  )()
+  if (changed && typeof result !== 'string') {
+    publishGuildMemberUpdate(db, guildId, result)
+  }
+  return result
 }
 
 /**

@@ -2323,6 +2323,63 @@ availability timestamp; this control prepares `GUILD_CREATE.members`.
 
 ---
 
+## `POST /_test/guilds/:guildId/members/:userId/premium` — Start or end a live boost
+
+Changes a human member's boost start (`premium_since`) **while the Bot is
+connected** and emits a native `GUILD_MEMBER_UPDATE`. The silent
+[member-dates `PATCH`](#patch-_testguildsguildidmembersuserid--prepare-member-dates)
+is unchanged and still emits nothing; use it to prepare state before the Bot
+connects. No Authorization header is required.
+
+```bash
+# The member starts boosting
+curl -X POST http://localhost:3000/_test/guilds/222222222222222222/members/555555555555555555/premium \
+  -H "Content-Type: application/json" \
+  -d '{"premium_since":"2020-02-29T14:00:00.123+02:00"}'
+
+# The member stops boosting
+curl -X POST http://localhost:3000/_test/guilds/222222222222222222/members/555555555555555555/premium \
+  -H "Content-Type: application/json" \
+  -d '{"premium_since":null}'
+```
+
+The body is a JSON object whose only field, `premium_since`, is **required**:
+a timestamp string starts or changes the boost and `null` ends it. Timestamps
+are parsed, validated and normalized exactly like the member-dates `PATCH`
+(timezone required, 1–6 fractional digits, stored as UTC with six fractional
+digits and `+00:00`, e.g. `2020-02-29T12:00:00.123000+00:00`). Bots cannot boost,
+so the member must be a non-bot.
+
+**Response**: `200 OK` with the stored Guild member object, which the same
+member GETs, paginated lists, the scoped OAuth member read and the next
+`GUILD_CREATE.members` also return. The change is persisted and committed
+first; only then exactly one `GUILD_MEMBER_UPDATE` is emitted with the full
+member payload (including the new `premium_since`) through the same path as
+nickname `PATCH` updates: addressed to the owning app/database and the guild's
+registered bot setup token, with the Guild Members intent. Missing intent
+produces no event. Event-capture controls for `GUILD_MEMBER_UPDATE` (including
+`member_id`) hold, release and replay it like a nickname update, using the
+immutable snapshot.
+
+**No-op**: if the normalized value equals the stored one (for example ending a
+boost that is already `null`, or repeating the same instant), the response is
+`200` with the member and **no event** is emitted, as Discord emits nothing for
+an unchanged member.
+
+**Errors** (no state changes or events; the body is validated before any
+write): `404` / `10004` for an unknown Guild; `404` / `10007` for an unknown
+membership (including users only in another Guild); `400` / `0` with
+`{"message":"Bot members cannot boost","code":0}` for a bot member; `400` / `0`
+for malformed JSON, a missing body or a non-object body; `400` / `50035` with
+field errors for a missing or invalid `premium_since` or any other field.
+
+**Not modelled**: this control only changes the member. Guild
+`premium_tier` / `premium_subscription_count` and the boost system message
+(message type 8) are untouched and no related events are produced. Set the
+tier at setup with `premium_tier`.
+
+---
+
 ## `POST /_test/guilds/:guildId/members/:userId` — Join a non-bot user to a Guild
 
 Joins an already registered non-bot user (typically created by `POST /_test/users`)
@@ -4202,7 +4259,8 @@ Use the production `PATCH /guilds/:guildId/members/:userId` with `{"nick":"New"}
 or `{"nick":null}`. Unchanged nickname PATCHes also emit a native update, as does
 clearing an already-null nickname. The existing `/api/v10` and `/api` prefixes
 and `PATCH .../members/@me` work too. Rejected PATCHes produce no capture.
-Native member updates (including role mutations) are addressed to the originating
+Native member updates (including role mutations and the live
+[`premium` boost control](#post-_testguildsguildidmembersuseridpremium--start-or-end-a-live-boost)) are addressed to the originating
 app/database and the guild's registered bot setup token, with Guild Members
 intent. Another session for the same setup receives its own ordinary dispatch;
 only the selected session is held. Missing Guild Members intent produces no
