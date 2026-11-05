@@ -69,6 +69,8 @@ import { validateTestUserGlobalName } from '../validators/test-user-global-name'
 import { validateRestFault } from '../validators/rest-fault'
 import { createClosedDmRoutes } from './test-closed-dms'
 import { createDmChannelRoutes } from './test-dm-channels'
+import { createTestInviteRoutes } from './test-invites'
+import { validateTestJoinInviteCode } from '../validators/test-invite'
 import { createTestGuildBotRoutes } from './test-guild-bot'
 import { createTestRole, getGuildRoles } from '../services/guild-roles'
 import { getGuild } from '../services/guilds'
@@ -162,6 +164,7 @@ export function createTestRoutes(
   app.route('/', createTestVoiceStateRoutes(db))
   app.route('/', createClosedDmRoutes(db))
   app.route('/', createDmChannelRoutes(db))
+  app.route('/', createTestInviteRoutes(db))
   app.route('/', createTestGuildBotRoutes(db))
 
   app.post('/_test/guilds/:guildId/roles', async (c) => {
@@ -510,7 +513,10 @@ export function createTestRoutes(
       return c.json({ message: '400: Bad Request', code: 0 }, 400)
     }
     const payload = parsed as Record<string, unknown>
-    const errors = validateGuildMemberUpdate(payload)
+    const errors = {
+      ...validateGuildMemberUpdate(payload),
+      ...validateTestJoinInviteCode(payload),
+    }
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
     }
@@ -519,9 +525,17 @@ export function createTestRoutes(
       db,
       guildId,
       userId,
-      typeof payload.nick === 'string' ? payload.nick : null
+      typeof payload.nick === 'string' ? payload.nick : null,
+      typeof payload.invite_code === 'string' ? payload.invite_code : undefined
     )
     switch (result) {
+      case 'UNKNOWN_INVITE': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_INVITE, 'Unknown Invite', 404)
+            .body,
+          404
+        )
+      }
       case 'UNKNOWN_GUILD': {
         return c.json(
           discordError(DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild', 404)

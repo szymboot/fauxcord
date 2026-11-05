@@ -2343,6 +2343,7 @@ curl -X POST http://localhost:3000/_test/guilds/222222222222222222/members/55555
 | `guildId` (path)   | ✅       | Existing Guild ID.                                                                                                       |
 | `userId` (path)    | ✅       | Existing non-bot user ID. No profile is created or overwritten.                                                          |
 | `nick` (JSON body) | —        | Guild nickname, at most 32 characters. Defaults to `null`; explicit `null` is accepted. The body may be omitted or `{}`. |
+| `invite_code` (JSON body) | — | Join through this invite; see [Joining through an invite](#joining-through-an-invite). Must be a non-empty string when present (`null` is rejected, not treated as absent). |
 
 **Response**: `201 Created` with the actual Guild member object, identical to
 `GET /guilds/:guildId/members/:userId`. It contains the stored `user`, `nick`,
@@ -2364,7 +2365,57 @@ when the event arrives. Joining does not emit `GUILD_CREATE`.
 | `409`  | `0`     | The user is already a member; their nickname and join time are preserved. |
 | `400`  | `0`     | The user is a Bot rather than a non-bot account.                          |
 | `400`  | `0`     | Malformed JSON or a body that is not a JSON object.                       |
-| `400`  | `50035` | Invalid nickname type or a nickname longer than 32 characters.            |
+| `400`  | `50035` | Invalid nickname type, a nickname longer than 32 characters, or an `invite_code` that is not a non-empty string. |
+| `404`  | `10006` | Unknown Invite (only with `invite_code`; see below).                      |
+
+### Joining through an invite
+
+With `invite_code`, the join is attributed to that invite, so a bot that lists
+`GET /guilds/:guildId/invites` before and after the join sees the invite's `uses`
+grow. Example (the code comes from the [human invite fixture](#post-_testchannelschannelidinvites--create-an-invite-as-a-human)
+or from a native `POST /channels/:channelId/invites`):
+
+```bash
+curl -X POST http://localhost:3000/_test/guilds/222222222222222222/members/555555555555555555 \
+  -H "Content-Type: application/json" \
+  -d '{"invite_code": "AbCd1234"}'
+```
+
+The invite must exist, belong to this Guild, not be expired and not be
+exhausted. Otherwise the response is `404` / `10006` (`Unknown Invite`) — the
+same answer for unknown, other-Guild, expired and exhausted invites — with no
+membership, no `uses` change and no event.
+
+- **Expiry** counts `max_age` seconds from the invite's `created_at` on
+  Fauxcord's own clock (the one that stamps `created_at`, `expires_at` and
+  `joined_at`); `max_age: 0` never expires. An invite is unusable from the
+  instant `now >= created_at + max_age`. Expired invites are *not* removed from
+  listings or `GET /invites/:code` (unchanged behaviour); they just stop
+  accepting joins.
+- **`max_uses`**: when a join makes `uses` reach `max_uses` (> 0), the invite is
+  deleted in the same transaction, as on Discord. It is then absent from
+  `GET /guilds/:id/invites`, `GET /channels/:id/invites` and
+  `GET /invites/:code` (`404` / `10006`), and further joins get `10006`.
+  `max_uses: 0` is unlimited.
+- **Atomicity**: the `uses` increment (and the deletion at `max_uses`) and the
+  membership insert happen in one transaction. If either fails neither persists.
+  The single `guild.member.add` / `GUILD_MEMBER_ADD` is emitted only after the
+  commit, exactly as for a join without `invite_code`, so a bot that lists
+  invites while handling the event already sees the new `uses`.
+- **Precedence**: guild, user, already-member (`409`) and bot (`400`) checks run
+  first, exactly as without `invite_code`; an already-member `409` therefore
+  never consumes a use.
+- Without `invite_code` nothing about the join changes and no invite is touched.
+
+`uses` appears on every invite object (guild list, channel list,
+`GET /invites/:code`). `with_counts` is accepted but, as before, has no effect:
+Fauxcord does not return `approximate_*_count` on invites.
+
+**Not modelled**: Fauxcord emits no `INVITE_CREATE` / `INVITE_DELETE` Gateway
+events (it models neither for native invites either), including for the fixture
+and for `max_uses` removal. A `temporary` invite is recorded and echoed
+(`temporary: true`), but joiners are *not* kicked on disconnect. Invite target
+users (`/invites/:code/target-users`) are not enforced when joining.
 
 To test leaving and returning, use the existing authenticated member DELETE:
 
@@ -2382,6 +2433,55 @@ disconnect when the member was connected; see
 [Member removal disconnects voice](#member-removal-disconnects-voice)). The user profile remains
 registered, so the next test join returns `201` and emits a new `GUILD_MEMBER_ADD`.
 This endpoint operates on current state; event replay is not provided.
+
+---
+
+## `POST /_test/channels/:channelId/invites` — Create an invite as a human
+
+Creates an ordinary invite whose `inviter` is a registered **human** (non-bot)
+Guild member, instead of the calling bot. No Authorization header is required.
+It stores the invite through the same code path as
+`POST /channels/:channelId/invites`, so it is listed by
+`GET /guilds/:guildId/invites`, `GET /channels/:channelId/invites` and
+`GET /invites/:code` like any other invite, and can be used with
+[`invite_code` joins](#joining-through-an-invite).
+
+```bash
+curl -X POST http://localhost:3000/_test/channels/333333333333333333/invites \
+  -H "Content-Type: application/json" \
+  -d '{"inviter_id": "555555555555555555", "max_uses": 5}'
+```
+
+**Fields**
+
+| Field                | Required | Description                                                                                                  |
+| -------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
+| `channelId` (path)   | ✅       | Existing Guild channel ID.                                                                                   |
+| `inviter_id`         | ✅       | ID (string) of an existing non-bot user who is a member of the channel's Guild.                              |
+| `max_age`            | —        | Seconds until expiry, integer `0`–`5184000`; `0` never expires. Default `86400`. `null` means the default.   |
+| `max_uses`           | —        | Integer `0`–`100`; `0` is unlimited. Default `0`. `null` means the default.                                  |
+| `temporary`          | —        | Boolean. Default `false`. Recorded only; temporary membership is not modelled.                               |
+
+**Response**: `201 Created` with the same invite object as the native route
+(`code`, `inviter` = that human, `uses: 0`, `max_age`, `max_uses`, `temporary`,
+`created_at`, `expires_at`, `guild`, `channel`, …). No Gateway event is emitted.
+
+**Errors** (no state changes or events):
+
+| Status | Code    | Cause                                                                   |
+| ------ | ------- | ----------------------------------------------------------------------- |
+| `404`  | `10003` | Unknown Channel.                                                        |
+| `400`  | `50024` | The channel is not a Guild channel (e.g. a DM).                         |
+| `404`  | `10013` | Unknown User.                                                           |
+| `400`  | `0`     | The inviter is a Bot (`User must not be a bot`).                        |
+| `404`  | `10007` | The inviter is not a member of the channel's Guild (Unknown Member).    |
+| `400`  | `50035` | Missing/non-string `inviter_id`, or invalid `max_age`/`max_uses`/`temporary`. |
+| `400`  | `0`     | Malformed JSON or a body that is not a JSON object.                     |
+
+Typical attribution test: create the invite with this control, record
+`GET /guilds/:guildId/invites`, join a user with `invite_code`, and observe
+`GUILD_MEMBER_ADD`; the invite's `uses` has grown and `inviter` is the human.
+`POST /_test/reset` clears invites as before.
 
 ---
 
