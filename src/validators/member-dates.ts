@@ -1,4 +1,4 @@
-import { typeError, type ValidationErrors } from './common'
+import { requiredError, typeError, type ValidationErrors } from './common'
 import { normalizeMemberJoinDate } from './member-join-date'
 
 /** ISO 8601 datetimes with a timezone and a valid time of day. */
@@ -55,5 +55,35 @@ export function validateMemberDateFixture(
       ],
     }
   }
+  return errors
+}
+
+/**
+ * Validates a live boost change body: `premium_since` is required (null ends
+ * the boost) and parsed exactly like the member-date fixture.
+ * @param payload - Parsed JSON object
+ * @returns Field errors, empty when valid
+ */
+export function validateMemberPremiumUpdate(
+  payload: Record<string, unknown>
+): ValidationErrors {
+  const errors = Object.create(null) as ValidationErrors
+  for (const field of Object.keys(payload)) {
+    if (field !== 'premium_since') {
+      errors[field] = {
+        _errors: [
+          { code: 'UNKNOWN_FIELD', message: 'Unsupported fixture field.' },
+        ],
+      }
+    }
+  }
+  if (payload.premium_since === undefined) {
+    errors.premium_since = { _errors: [requiredError()] }
+    return errors
+  }
+  Object.assign(
+    errors,
+    validateMemberDateFixture({ premium_since: payload.premium_since })
+  )
   return errors
 }

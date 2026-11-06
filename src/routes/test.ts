@@ -36,6 +36,7 @@ import {
   prepareTestUserGlobalName,
   joinTestGuildMember,
   prepareMemberDateFixture,
+  setMemberPremiumSince,
   injectTestMessage,
   editTestMessage,
   injectTestReaction,
@@ -64,7 +65,10 @@ import {
 import { injectPollVote } from '../services/polls'
 import { DiscordErrorCode, discordError, validationError } from '../errors'
 import { GUILD_LIMITS, validateGuildMemberUpdate } from '../validators/guild'
-import { validateMemberDateFixture } from '../validators/member-dates'
+import {
+  validateMemberDateFixture,
+  validateMemberPremiumUpdate,
+} from '../validators/member-dates'
 import { validateTestUserGlobalName } from '../validators/test-user-global-name'
 import { validateRestFault } from '../validators/rest-fault'
 import { createClosedDmRoutes } from './test-closed-dms'
@@ -594,6 +598,52 @@ export function createTestRoutes(
           404
         )
       : c.json(result)
+  })
+
+  // POST /_test/guilds/:guildId/members/:userId/premium — Live boost change
+  app.post('/_test/guilds/:guildId/members/:userId/premium', async (c) => {
+    const parsed: unknown = await c.req.json().catch(() => undefined)
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    }
+    const payload = parsed as Record<string, unknown>
+    const errors = validateMemberPremiumUpdate(payload)
+    if (Object.keys(errors).length > 0) {
+      return c.json(validationError(errors).body, 400)
+    }
+    const { guildId, userId } = c.req.param()
+    const result = setMemberPremiumSince(
+      db,
+      guildId,
+      userId,
+      payload.premium_since as string | null
+    )
+    switch (result) {
+      case 'UNKNOWN_GUILD': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_GUILD, 'Unknown Guild', 404)
+            .body,
+          404
+        )
+      }
+      case 'UNKNOWN_MEMBER': {
+        return c.json(
+          discordError(DiscordErrorCode.UNKNOWN_MEMBER, 'Unknown Member', 404)
+            .body,
+          404
+        )
+      }
+      case 'BOT_MEMBER': {
+        return c.json({ message: 'Bot members cannot boost', code: 0 }, 400)
+      }
+      default: {
+        return c.json(result)
+      }
+    }
   })
 
   // POST /_test/reset — Reset test data (messages, etc.)
