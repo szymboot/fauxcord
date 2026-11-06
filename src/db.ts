@@ -212,6 +212,44 @@ function migrateInviteDeleteEvent(db: Database): void {
 }
 
 /**
+ * Generalises the audit-log entry table, created for MESSAGE_DELETE only, to
+ * hold other action types: `action_type`, `reason` and a JSON `changes` array
+ * are added, and `target_id`, `channel_id` and `count` become nullable (an
+ * INVITE_DELETE entry has no target ID and no options). SQLite cannot drop a
+ * NOT NULL constraint in place, so older tables are rebuilt with their rows.
+ * @param db - Database instance
+ */
+function migrateAuditLogEntryTypes(db: Database): void {
+  const columns = db
+    .prepare('PRAGMA table_info(guild_audit_log_entries)')
+    .all() as { name: string }[]
+  if (columns.some((column) => column.name === 'action_type')) return
+  db.transaction(() => {
+    db.exec(`
+      ALTER TABLE guild_audit_log_entries RENAME TO guild_audit_log_entries_old;
+      CREATE TABLE guild_audit_log_entries (
+        id          TEXT PRIMARY KEY,
+        guild_id    TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+        user_id     TEXT NOT NULL,
+        target_id   TEXT,
+        channel_id  TEXT,
+        count       TEXT,
+        action_type INTEGER NOT NULL DEFAULT 72,
+        reason      TEXT,
+        changes     TEXT
+      );
+      INSERT INTO guild_audit_log_entries
+        (id, guild_id, user_id, target_id, channel_id, count)
+        SELECT id, guild_id, user_id, target_id, channel_id, count
+        FROM guild_audit_log_entries_old;
+      DROP TABLE guild_audit_log_entries_old;
+      CREATE INDEX IF NOT EXISTS guild_audit_log_entries_guild
+        ON guild_audit_log_entries(guild_id);
+    `)
+  })()
+}
+
+/**
  * Adds the invoking user's locale to existing interactions, including a
  * default for rows and callers created before locale support.
  * @param db - Database instance
@@ -414,12 +452,15 @@ export function initializeDatabase(dbPath: string): Database {
     );
 
     CREATE TABLE IF NOT EXISTS guild_audit_log_entries (
-      id         TEXT PRIMARY KEY,
-      guild_id   TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
-      user_id    TEXT NOT NULL,
-      target_id  TEXT NOT NULL,
-      channel_id TEXT NOT NULL,
-      count      TEXT NOT NULL
+      id          TEXT PRIMARY KEY,
+      guild_id    TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+      user_id     TEXT NOT NULL,
+      target_id   TEXT,
+      channel_id  TEXT,
+      count       TEXT,
+      action_type INTEGER NOT NULL DEFAULT 72,
+      reason      TEXT,
+      changes     TEXT
     );
     CREATE INDEX IF NOT EXISTS guild_audit_log_entries_guild
       ON guild_audit_log_entries(guild_id);
@@ -1223,6 +1264,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateMemberTimeout(db)
   migrateMemberPremiumSince(db)
   migrateInviteDeleteEvent(db)
+  migrateAuditLogEntryTypes(db)
   migrateChannelsThreadColumns(db)
   migrateChannelsFeatureColumns(db)
   migrateGuildAfkColumns(db)

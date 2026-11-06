@@ -538,6 +538,22 @@ export function registerGatewaySubscriptions(
       payload.scope.token
     )
   }
+  const onGuildAuditLogEntryCreate: Parameters<
+    typeof gatewayBus.on<'guild.audit.log.entry.create'>
+  >[1] = (payload) => {
+    if (payload.scope.db !== db) return
+    // Discord requires VIEW_AUDIT_LOG to receive this event. Fauxcord does not
+    // model that permission, so it follows the guild's registered bot token
+    // like GUILD_BAN_ADD.
+    broadcastToBot(
+      manager,
+      payload.scope.botId,
+      'GUILD_AUDIT_LOG_ENTRY_CREATE',
+      { ...payload.entry, guild_id: payload.guildId },
+      GatewayIntentBits.GuildModeration,
+      payload.scope.token
+    )
+  }
   const onInviteDelete: Parameters<typeof gatewayBus.on<'invite.delete'>>[1] = (
     payload
   ) => {
@@ -642,6 +658,7 @@ export function registerGatewaySubscriptions(
   gatewayBus.on('guild.ban.add', onGuildBanAdd)
   gatewayBus.on('guild.ban.remove', onGuildBanRemove)
   gatewayBus.on('invite.delete', onInviteDelete)
+  gatewayBus.on('guild.audit.log.entry.create', onGuildAuditLogEntryCreate)
   gatewayBus.on('guild.role.create', onGuildRoleCreate)
   gatewayBus.on('guild.role.update', onGuildRoleUpdate)
   gatewayBus.on('guild.role.delete', onGuildRoleDelete)
@@ -670,6 +687,7 @@ export function registerGatewaySubscriptions(
     gatewayBus.off('guild.ban.add', onGuildBanAdd)
     gatewayBus.off('guild.ban.remove', onGuildBanRemove)
     gatewayBus.off('invite.delete', onInviteDelete)
+    gatewayBus.off('guild.audit.log.entry.create', onGuildAuditLogEntryCreate)
     gatewayBus.off('guild.role.create', onGuildRoleCreate)
     gatewayBus.off('guild.role.update', onGuildRoleUpdate)
     gatewayBus.off('guild.role.delete', onGuildRoleDelete)

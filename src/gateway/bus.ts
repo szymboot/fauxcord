@@ -3,6 +3,7 @@ import type { Database } from '../db'
 import type { GatewayVoiceStateUpdateDispatchData } from 'discord-api-types/v10'
 import type { ReactionEmoji } from '../services/reaction-emoji'
 import type { EmojiObject } from '../services/guild-emojis'
+import type { StoredAuditEntry } from '../services/audit-logs'
 
 /** Mapping of event names to their payloads exchanged over gatewayBus */
 export interface GatewayBusEvents {
@@ -143,6 +144,13 @@ export interface GatewayBusEvents {
   'guild.ban.remove': {
     guildId: string
     user: Record<string, unknown>
+    scope: { db: Database; botId: string; token: string }
+  }
+  'guild.audit.log.entry.create': {
+    guildId: string
+    /** Audit log entry object as returned by the audit log endpoint. */
+    entry: StoredAuditEntry
+    /** Exact setup scope of the entry's guild. */
     scope: { db: Database; botId: string; token: string }
   }
   'invite.delete': {

@@ -694,7 +694,7 @@ curl -X POST http://localhost:3000/_test/reset \
 
 What gets deleted: messages, webhooks, invites, reactions, pins, embeds, attachments,
 retained attachment files and download metadata (including deleted-message uploads),
-voice-state fixtures, audit-log fixtures, audit response controls, and all REST fault controls (including exhausted controls and consumption history).
+voice-state fixtures, audit-log fixtures and recorded invite-deletion entries, audit response controls, and all REST fault controls (including exhausted controls and consumption history).
 
 ### Reset only a specific Bot's data
 
@@ -707,7 +707,7 @@ curl -X POST http://localhost:3000/_test/reset \
 Only messages sent by that Bot and Webhooks/Invites belonging to that Bot's Guilds are deleted.
 REST fault controls in that Bot's Guilds are also deleted, including controls targeting
 human-authored messages, global user reads, and DM channel creation.
-Audit-log fixtures are cleared by the target Guild's Bot token,
+Audit-log fixtures and recorded entries are cleared by the target Guild's Bot token,
 regardless of their actor or target author. Voice states in that Bot's Guilds are also cleared. Other Bots' Guilds keep their controls and audit history.
 
 ---
@@ -788,6 +788,10 @@ for adding or removing a managed role; see
 
 ## `POST /_test/guilds/:guildId/audit-logs` — Create a deletion audit fixture
 
+> Fixtures are always silent: this control never emits
+> `GUILD_AUDIT_LOG_ENTRY_CREATE`. Only entries created by an action do; see
+> [Invite deletion audit entries](#invite-deletion-audit-entries).
+
 Create an audit entry independently of messages and Gateway events. This operation
 neither deletes a message nor emits an event. Register the actor and target author
 first with `/_test/setup` or `POST /_test/users`; the channel must belong to the
@@ -825,9 +829,12 @@ Read entries through authenticated `GET /api/v10/guilds/:guildId/audit-logs`
 (also `/api` and bare paths). Existing Guild access checks apply. It returns only
 that Guild's entries and deduplicated referenced actor/target users, plus empty
 arrays for other referenced entity types. History is empty until fixtures are
-created. Message deletion does not automatically create audit entries.
+created. Message deletion does not automatically create audit entries; the only
+entries Fauxcord creates by itself are the
+[`INVITE_DELETE` entries](#invite-deletion-audit-entries) of manual invite deletions.
 
-Supported filters are `action_type`, actor `user_id`, `target_id` (also present in
+Supported filters are `action_type` (any value of Discord's action types; fixtures
+and recorded entries match their own type), actor `user_id`, `target_id` (also present in
 the committed OpenAPI spec), strict `before`/`after` Snowflake cursors, and `limit`
 (`1`–`100`, default `50`). Results are newest first by default and with `before`;
 `after` returns oldest first, as documented by
@@ -843,6 +850,97 @@ empty history, create no fixture or call `/_test/reset`. Fixtures persist until
 reset or Guild/setup deletion; there is no automatic 45-day retention purge.
 Channel deletion leaves historical audit entries intact. Bot-scoped reset follows
 the fixture's Guild, even when its actor is another Bot or a human.
+
+### Invite deletion audit entries
+
+Discord writes an `INVITE_DELETE` (`42`) audit log entry when an invite is
+deleted manually, and dispatches `GUILD_AUDIT_LOG_ENTRY_CREATE` for it. An invite
+removed because its last use was consumed, or one that expired, gets **no**
+entry. Fauxcord reproduces this:
+
+| Cause                                                         | Audit entry | `GUILD_AUDIT_LOG_ENTRY_CREATE` |
+| ------------------------------------------------------------- | ----------- | ------------------------------ |
+| `DELETE /invites/:code` that deletes an invite (also under `/api` and `/api/v10`) | Yes, actor = the requesting bot user | Yes |
+| A join with `invite_code` that makes `uses` reach `max_uses`  | No          | No                             |
+| Expiry (`max_age`)                                            | No (expired invites are not removed) | No           |
+| Unknown invite (`404` / `10006`)                              | No          | No                             |
+| `POST /_test/guilds/:guildId/audit-logs` fixtures             | Created as requested (`72` only) | No (fixtures are silent) |
+| `/_test/reset`, `DELETE /_test/setup/:token`, guild deletion  | Entries are cleared | No (cleanup stays silent) |
+
+The entry, shaped as in Discord's
+[audit log documentation](https://docs.discord.com/developers/resources/audit-log)
+and `discord-api-types`:
+
+```json
+{
+  "id": "1334871234567890123",
+  "action_type": 42,
+  "user_id": "111111111111111111",
+  "target_id": null,
+  "reason": "cleanup",
+  "changes": [
+    { "key": "code", "old_value": "AbCd1234" },
+    { "key": "channel_id", "old_value": "333333333333333333" },
+    { "key": "inviter_id", "old_value": "555555555555555555" },
+    { "key": "uses", "old_value": 0 },
+    { "key": "max_uses", "old_value": 5 },
+    { "key": "max_age", "old_value": 3600 },
+    { "key": "temporary", "old_value": false }
+  ]
+}
+```
+
+- `user_id` is the actor: the bot user of the token that called
+  `DELETE /invites/:code`. An OAuth2 Bearer token is attributed to its user, or to
+  the guild's bot user when it has none (such as client credentials).
+- `target_id` is `null`. An invite has no snowflake, so Discord identifies it only
+  through its `code` change.
+- `changes` holds the invite as it was before deletion, using `old_value` only
+  (there is no `new_value`). Per Discord's invite exceptions the channel is the
+  `channel_id` key; `inviter_id` is omitted when the invite has no inviter.
+  Fauxcord emits exactly these seven keys (Discord's `code`, `channel_id`,
+  `inviter_id`, `uses`, `max_uses`, `max_age`, `temporary` invite keys) and
+  none of the other invite fields (for example `created_at` or `flags`).
+- `reason` is the `X-Audit-Log-Reason` request header, stored exactly as sent
+  (not URL-decoded, like the ban routes' header handling), and omitted when the
+  header is absent or empty. A client that percent-encodes the header, as real
+  Discord libraries do, therefore sees the encoded text in `reason`.
+- `GET /guilds/:guildId/audit-logs` lists these entries together with fixtures.
+  `action_type=42` selects them (`action_type=72` selects only message-delete
+  fixtures), and `user_id`, `before`, `after` and `limit` behave as for every
+  entry. `target_id` never matches them. `users` holds the entry's actor and, when
+  registered, the invite's inviter (referenced from `changes`), deduplicated.
+- `/_test/reset` (all data, or one bot's guilds), `DELETE /_test/setup/:token`
+  and guild deletion remove them like fixtures. Audit response controls
+  (`/_test/audit-log-responses`) are unchanged and still replace the entries of a
+  matching read.
+
+#### `GUILD_AUDIT_LOG_ENTRY_CREATE` Gateway event
+
+Fauxcord emits `GUILD_AUDIT_LOG_ENTRY_CREATE` (Gateway intent Guild Moderation,
+`1 << 2`) for every audit entry **created by an action**, never for fixtures. The
+payload is the entry object above plus `guild_id`, as documented in
+[Discord's Gateway events](https://docs.discord.com/developers/events/gateway-events#guild-audit-log-entry-create):
+`{ "id", "action_type": 42, "user_id", "target_id": null, "changes", "reason"?, "guild_id" }`.
+
+Delivery follows the guild's own bot, like `GUILD_BAN_ADD`: only sessions of the
+bot setup (exact token) that owns the guild's database, holding the Guild
+Moderation intent, receive it. Other bots, other apps and other guilds do not,
+and nothing is delivered (or sequenced) while the owning bot is detached from the
+guild. Discord only sends this event to bots with `VIEW_AUDIT_LOG`; Fauxcord
+does not model that permission for any event, so the check is not modelled here
+either.
+
+Order for a REST deletion (Fauxcord's own choice; Discord does not document
+it): `DELETE /invites/:code` commits the deletion, dispatches `INVITE_DELETE`,
+then commits the audit entry and dispatches `GUILD_AUDIT_LOG_ENTRY_CREATE`, with
+consecutive sequence numbers. Both events follow their commits, and the entry is
+written in the same synchronous step as the deletion, so a bot that reads the
+audit log while handling either event already sees it. A deletion that matched
+no invite dispatches neither.
+
+`GUILD_AUDIT_LOG_ENTRY_CREATE` is not yet supported by the Gateway event
+capture/hold controls (it cannot be selected in `events`).
 
 ---
 
@@ -2583,8 +2681,10 @@ Invites created through the production route
 `POST /channels/:channelId/invites` always emit on exhaustion.
 
 `INVITE_DELETE` is not yet supported by the Gateway event capture/hold
-controls (it cannot be selected in `events`), and Fauxcord adds no audit log
-entry for invite deletion. When a [`GUILD_MEMBER_ADD` capture](#native-member-joins)
+controls (it cannot be selected in `events`). `DELETE /invites/:code` also records an
+`INVITE_DELETE` [audit log entry](#invite-deletion-audit-entries) and dispatches
+`GUILD_AUDIT_LOG_ENTRY_CREATE` right after `INVITE_DELETE`; exhaustion and expiry
+create neither. When a [`GUILD_MEMBER_ADD` capture](#native-member-joins)
 holds the exhausting join's member add, `INVITE_DELETE` is still delivered
 immediately, so the bot sees the invite deleted before the held join; releasing
 the capture later delivers the join. The invite is already deleted in the

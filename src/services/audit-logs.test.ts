@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { closeDatabase, initializeDatabase, type Database } from '../db'
 import { seedBot, seedChannel, seedGuild } from '../test-helpers'
 import { createTestUser, deleteTestSetup, resetTestData } from './test-control'
-import { createAuditLogEntry, listAuditLogs } from './audit-logs'
+import {
+  createAuditLogEntry,
+  listAuditLogs,
+  recordInviteDeleteAuditEntry,
+} from './audit-logs'
+import { createInvite, deleteInvite } from './invites'
 import { snowflakeToTimestamp } from '../snowflake'
 
 describe('controlled audit logs', () => {
@@ -199,5 +204,60 @@ describe('controlled audit logs', () => {
     })
     resetTestData(db)
     expect(listAuditLogs(db, newGuild).audit_log_entries).toEqual([])
+  })
+
+  describe('recordInviteDeleteAuditEntry', () => {
+    it('records a human actor and omits an empty reason', () => {
+      const human = createTestUser(db, { username: 'Moderator' }).id
+      const invite = createInvite(db, {
+        channelId,
+        guildId,
+        inviterId: targetId,
+        maxUses: 3,
+        maxAge: 60,
+      })
+      expect(deleteInvite(db, invite.code)).not.toBeNull()
+      const entry = recordInviteDeleteAuditEntry(db, {
+        guildId,
+        actorId: human,
+        invite,
+        reason: '',
+      })
+      expect(entry).toEqual({
+        id: expect.stringMatching(/^\d+$/) as string,
+        action_type: 42,
+        user_id: human,
+        target_id: null,
+        changes: [
+          { key: 'code', old_value: invite.code },
+          { key: 'channel_id', old_value: channelId },
+          { key: 'inviter_id', old_value: targetId },
+          { key: 'uses', old_value: 0 },
+          { key: 'max_uses', old_value: 3 },
+          { key: 'max_age', old_value: 60 },
+          { key: 'temporary', old_value: false },
+        ],
+      })
+      const page = listAuditLogs(db, guildId, { action_type: 42 })
+      expect(page.audit_log_entries).toEqual([entry])
+      expect(page.users.map((user) => user.id)).toEqual([human, targetId])
+      expect(
+        listAuditLogs(db, guildId, { target_id: targetId }).audit_log_entries
+      ).toEqual([])
+    })
+
+    it('refuses to run inside an open transaction', () => {
+      const invite = createInvite(db, { channelId, guildId, inviterId: null })
+      expect(() =>
+        db.transaction(() =>
+          recordInviteDeleteAuditEntry(db, {
+            guildId,
+            actorId,
+            invite,
+          })
+        )()
+      ).toThrow('open transaction')
+      expect(listAuditLogs(db, guildId).audit_log_entries).toEqual([])
+    })
   })
 })

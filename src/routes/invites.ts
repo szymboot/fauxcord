@@ -21,6 +21,9 @@ import {
   SNOWFLAKE_PATTERN,
 } from '../validators/invite-target-users'
 import { requireEntity } from '../lib/route-helpers'
+import { recordInviteDeleteAuditEntry } from '../services/audit-logs'
+import { getGuildDispatchScope } from '../services/voice-state-publisher'
+import type { AppEnv } from '../middleware/auth'
 
 /**
  * Extracts the raw `user_ids` array entries from a JSON request body as
@@ -58,8 +61,8 @@ function invalidUserIdsError(field: 'user_id' | 'user_ids') {
  * @param db - Database
  * @returns Hono router instance
  */
-export function createInviteRoutes(db: Database): Hono {
-  const app = new Hono()
+export function createInviteRoutes(db: Database): Hono<AppEnv> {
+  const app = new Hono<AppEnv>()
 
   // GET /invites/:code — Retrieve invite information by code
   app.get('/invites/:code', (c) => {
@@ -84,6 +87,25 @@ export function createInviteRoutes(db: Database): Hono {
         404
       )
       return c.json(err.body, 404)
+    }
+    // Only this manual deletion is audited; exhaustion and expiry never are.
+    // INVITE_DELETE was published by deleteInvite, so the audit event follows.
+    // Bot tokens act as their bot user. An OAuth2 token without a user (such as
+    // client credentials) falls back to the guild's own bot user, so every
+    // successful deletion is audited.
+    const actorId =
+      c.get('bot')?.user_id ??
+      c.get('accessToken')?.user_id ??
+      (invite.guild_id === null
+        ? undefined
+        : getGuildDispatchScope(db, invite.guild_id)?.botId)
+    if (actorId && invite.guild_id !== null) {
+      recordInviteDeleteAuditEntry(db, {
+        guildId: invite.guild_id,
+        actorId,
+        invite,
+        reason: c.req.header('X-Audit-Log-Reason'),
+      })
     }
     return c.json(invite)
   })
