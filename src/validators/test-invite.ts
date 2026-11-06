@@ -8,7 +8,8 @@ import { requiredError, typeError } from './common'
 /**
  * Validates a human-created invite fixture body. max_age/max_uses share the
  * native invite limits; inviter_id must be a string (Snowflakes lose precision
- * as JSON numbers) and temporary a boolean when present.
+ * as JSON numbers); temporary and delete_event_on_exhaustion must be
+ * booleans when present.
  * @param payload - Parsed JSON object (untrusted)
  * @returns Field-keyed error map (empty when valid)
  */
@@ -33,6 +34,13 @@ export function validateTestInvite(
     typeof payload.temporary !== 'boolean'
   ) {
     errors.temporary = { _errors: [typeError('boolean')] }
+  }
+  if (
+    payload.delete_event_on_exhaustion !== undefined &&
+    payload.delete_event_on_exhaustion !== null &&
+    typeof payload.delete_event_on_exhaustion !== 'boolean'
+  ) {
+    errors.delete_event_on_exhaustion = { _errors: [typeError('boolean')] }
   }
   return errors
 }

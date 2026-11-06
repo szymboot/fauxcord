@@ -9,7 +9,12 @@ import {
   seedInvite,
   seedMember,
 } from '../test-helpers'
-import { consumeInviteUse, createInvite, getInvite } from './invites'
+import {
+  consumeInviteUse,
+  createInvite,
+  deleteInvite,
+  getInvite,
+} from './invites'
 import {
   createTestInvite,
   createTestUser,
@@ -110,6 +115,35 @@ describe('invite joins (service)', () => {
       joinTestGuildMember(db, guildId, joinerId, null, invite.code)
       expect(getInvite(db, invite.code)).toBeNull()
       expect(db.prepare('SELECT * FROM invite_target_users').all()).toEqual([])
+    })
+  })
+
+  describe('INVITE_DELETE publication inside an outer transaction', () => {
+    it('refuses deleteInvite and keeps the invite and the bus silent', () => {
+      const invite = createInvite(db, { channelId, guildId, inviterId })
+      const emit = vi.spyOn(gatewayBus, 'emit')
+      expect(() =>
+        db.transaction(() => deleteInvite(db, invite.code))()
+      ).toThrow('open transaction')
+      expect(getInvite(db, invite.code)).not.toBeNull()
+      expect(emit).not.toHaveBeenCalled()
+    })
+
+    it('refuses an invite join and leaves uses, membership and the bus untouched', () => {
+      const invite = createInvite(db, {
+        channelId,
+        guildId,
+        inviterId,
+        maxUses: 1,
+      })
+      const emit = vi.spyOn(gatewayBus, 'emit')
+      expect(() =>
+        db.transaction(() =>
+          joinTestGuildMember(db, guildId, joinerId, null, invite.code)
+        )()
+      ).toThrow('open transaction')
+      expect(usesOf(invite.code)).toBe(0)
+      expect(emit).not.toHaveBeenCalled()
     })
   })
 

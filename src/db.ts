@@ -196,6 +196,22 @@ function migrateMemberPremiumSince(db: Database): void {
 }
 
 /**
+ * Adds the per-invite INVITE_DELETE-on-exhaustion switch to databases created
+ * before the event existed; existing invites keep emitting (the default).
+ * @param db - Database instance
+ */
+function migrateInviteDeleteEvent(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(invites)').all() as {
+    name: string
+  }[]
+  if (columns.every((column) => column.name !== 'delete_event_on_exhaustion')) {
+    db.exec(
+      'ALTER TABLE invites ADD COLUMN delete_event_on_exhaustion INTEGER NOT NULL DEFAULT 1'
+    )
+  }
+}
+
+/**
  * Adds the invoking user's locale to existing interactions, including a
  * default for rows and callers created before locale support.
  * @param db - Database instance
@@ -759,7 +775,8 @@ export function initializeDatabase(dbPath: string): Database {
       max_uses    INTEGER NOT NULL DEFAULT 0,
       temporary   INTEGER NOT NULL DEFAULT 0,
       uses        INTEGER NOT NULL DEFAULT 0,
-      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      delete_event_on_exhaustion INTEGER NOT NULL DEFAULT 1
     );
 
     CREATE INDEX IF NOT EXISTS idx_invites_channel ON invites(channel_id);
@@ -1205,6 +1222,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateCustomReactionKeys(db)
   migrateMemberTimeout(db)
   migrateMemberPremiumSince(db)
+  migrateInviteDeleteEvent(db)
   migrateChannelsThreadColumns(db)
   migrateChannelsFeatureColumns(db)
   migrateGuildAfkColumns(db)

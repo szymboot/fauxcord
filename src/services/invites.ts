@@ -7,6 +7,8 @@
 import type { Database } from '../db'
 import { getUser, type UserObject } from './users'
 import { toDiscordTimestamp } from '../timestamp'
+import { gatewayBus } from '../gateway/bus'
+import { getGuildDispatchScope } from './voice-state-publisher'
 import { TARGET_USERS_CSV_HEADER } from '../validators/invite-target-users'
 // Used for compile-time type drift detection.
 import type { APIInvite } from 'discord-api-types/v10'
@@ -31,6 +33,7 @@ interface InviteRow {
   temporary: number
   uses: number
   created_at: string
+  delete_event_on_exhaustion: number
 }
 
 /** Guild object nested within an invite (InviteGuildResponse) */
@@ -254,6 +257,18 @@ export interface InviteCreateParams {
   maxAge?: number
   maxUses?: number
   temporary?: boolean
+  /**
+   * Whether the invite's deletion by `max_uses` exhaustion emits
+   * INVITE_DELETE. Defaults to true; false keeps the deletion silent.
+   */
+  deleteEventOnExhaustion?: boolean
+}
+
+/** A committed invite deletion awaiting its INVITE_DELETE dispatch. */
+export interface PendingInviteDelete {
+  guildId: string
+  channelId: string
+  code: string
 }
 
 /**
@@ -270,8 +285,8 @@ export function createInvite(
   // created_at comes from Fauxcord's JS clock (not SQLite's datetime('now')),
   // so invite expiry follows the same clock as every other Fauxcord timestamp.
   db.prepare(
-    `INSERT INTO invites (code, channel_id, guild_id, inviter_id, max_age, max_uses, temporary, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO invites (code, channel_id, guild_id, inviter_id, max_age, max_uses, temporary, created_at, delete_event_on_exhaustion)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     code,
     params.channelId,
@@ -280,7 +295,8 @@ export function createInvite(
     params.maxAge ?? 86_400,
     params.maxUses ?? 0,
     params.temporary ? 1 : 0,
-    toSqliteTimestamp(new Date())
+    toSqliteTimestamp(new Date()),
+    params.deleteEventOnExhaustion === false ? 0 : 1
   )
 
   const row = db
@@ -304,18 +320,26 @@ export function createInvite(
  * and an invite that reaches `max_uses` is deleted (as Discord does), together
  * with its target-users data. Nothing is changed on failure.
  *
+ * When the deletion should emit INVITE_DELETE (the invite's
+ * `delete_event_on_exhaustion` is on and it belongs to a guild), a
+ * PendingInviteDelete is appended to `pendingDeletes`; the caller publishes it
+ * with publishInviteDelete only after the transaction commits.
+ *
  * Must run inside the caller's transaction so the use is committed atomically
  * with the membership it pays for.
  * @param db - Database (a transaction must be open)
  * @param guildId - Guild the member is joining
  * @param code - Invite code
+ * @param pendingDeletes - Collector for a deletion that must emit INVITE_DELETE
+ * after commit
  * @returns true when a use was consumed, false when the invite is unusable
  * (unknown, foreign, expired or exhausted)
  */
 export function consumeInviteUse(
   db: Database,
   guildId: string,
-  code: string
+  code: string,
+  pendingDeletes?: PendingInviteDelete[]
 ): boolean {
   if (!db.inTransaction) {
     throw new Error('consumeInviteUse requires an open transaction')
@@ -332,8 +356,27 @@ export function consumeInviteUse(
   db.prepare('UPDATE invites SET uses = uses + 1 WHERE code = ?').run(code)
   if (row.max_uses > 0 && row.uses + 1 >= row.max_uses) {
     db.prepare('DELETE FROM invites WHERE code = ?').run(code)
+    if (row.delete_event_on_exhaustion === 1) {
+      pendingDeletes?.push({ guildId, channelId: row.channel_id, code })
+    }
   }
   return true
+}
+
+/**
+ * Publishes INVITE_DELETE for a committed invite deletion. Must be called
+ * after the deleting transaction has committed. Nothing is published for an
+ * invite whose guild has no registered bot.
+ * @param db - Database
+ * @param deleted - The deleted invite's identifiers
+ */
+export function publishInviteDelete(
+  db: Database,
+  deleted: PendingInviteDelete
+): void {
+  const scope = getGuildDispatchScope(db, deleted.guildId)
+  if (!scope) return
+  gatewayBus.emit('invite.delete', { ...deleted, scope })
 }
 
 /**
@@ -349,18 +392,37 @@ export function getInvite(db: Database, code: string): InviteObject | null {
 }
 
 /**
- * Deletes an invite by its code.
- * @param db - Database
+ * Deletes an invite by its code and publishes INVITE_DELETE after the delete
+ * commits. Nothing is published when no invite was deleted, or when the invite
+ * has no guild. Must not run inside an open transaction: the event could
+ * otherwise escape a later rollback of the outer transaction.
+ * @param db - Database (no transaction may be open)
  * @param code - Invite code
  * @returns The deleted invite object, or null if it did not exist
  */
 export function deleteInvite(db: Database, code: string): InviteObject | null {
-  const row = db.prepare('SELECT * FROM invites WHERE code = ?').get(code) as
-    InviteRow | undefined
-  if (!row) return null
-  const invite = toInviteObject(db, row)
-  db.prepare('DELETE FROM invites WHERE code = ?').run(code)
-  return invite
+  if (db.inTransaction) {
+    throw new Error('deleteInvite must not run inside an open transaction')
+  }
+  const deleted = db.transaction(() => {
+    const row = db.prepare('SELECT * FROM invites WHERE code = ?').get(code) as
+      InviteRow | undefined
+    if (!row) return null
+    const invite = toInviteObject(db, row)
+    const { changes } = db
+      .prepare('DELETE FROM invites WHERE code = ?')
+      .run(code)
+    return changes > 0 ? { row, invite } : null
+  })()
+  if (!deleted) return null
+  if (deleted.row.guild_id !== null) {
+    publishInviteDelete(db, {
+      guildId: deleted.row.guild_id,
+      channelId: deleted.row.channel_id,
+      code,
+    })
+  }
+  return deleted.invite
 }
 
 /**

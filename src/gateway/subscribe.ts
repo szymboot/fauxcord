@@ -538,6 +538,26 @@ export function registerGatewaySubscriptions(
       payload.scope.token
     )
   }
+  const onInviteDelete: Parameters<typeof gatewayBus.on<'invite.delete'>>[1] = (
+    payload
+  ) => {
+    if (payload.scope.db !== db) return
+    // Discord only sends invite events to bots with MANAGE_CHANNELS on the
+    // channel. Fauxcord does not model that permission for other events, so
+    // the event follows the guild's registered bot token like ban events.
+    broadcastToBot(
+      manager,
+      payload.scope.botId,
+      'INVITE_DELETE',
+      {
+        channel_id: payload.channelId,
+        guild_id: payload.guildId,
+        code: payload.code,
+      },
+      GatewayIntentBits.GuildInvites,
+      payload.scope.token
+    )
+  }
   const onGuildDelete: Parameters<typeof gatewayBus.on<'guild.delete'>>[1] = (
     payload
   ) => {
@@ -621,6 +641,7 @@ export function registerGatewaySubscriptions(
   gatewayBus.on('guild.delete', onGuildDelete)
   gatewayBus.on('guild.ban.add', onGuildBanAdd)
   gatewayBus.on('guild.ban.remove', onGuildBanRemove)
+  gatewayBus.on('invite.delete', onInviteDelete)
   gatewayBus.on('guild.role.create', onGuildRoleCreate)
   gatewayBus.on('guild.role.update', onGuildRoleUpdate)
   gatewayBus.on('guild.role.delete', onGuildRoleDelete)
@@ -648,6 +669,7 @@ export function registerGatewaySubscriptions(
     gatewayBus.off('guild.delete', onGuildDelete)
     gatewayBus.off('guild.ban.add', onGuildBanAdd)
     gatewayBus.off('guild.ban.remove', onGuildBanRemove)
+    gatewayBus.off('invite.delete', onInviteDelete)
     gatewayBus.off('guild.role.create', onGuildRoleCreate)
     gatewayBus.off('guild.role.update', onGuildRoleUpdate)
     gatewayBus.off('guild.role.delete', onGuildRoleDelete)

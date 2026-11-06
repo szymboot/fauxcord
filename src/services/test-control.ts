@@ -35,7 +35,13 @@ import {
 import { deleteGuildMembership } from './member-removal'
 import { getChannel, isVoiceCapableChannelType } from './channels'
 import { getUser, type UserObject } from './users'
-import { consumeInviteUse, createInvite, type InviteObject } from './invites'
+import {
+  consumeInviteUse,
+  createInvite,
+  publishInviteDelete,
+  type InviteObject,
+  type PendingInviteDelete,
+} from './invites'
 import { resetAuditLogResponses } from './audit-log-responses'
 import { resetRestFaults } from './rest-faults'
 import {
@@ -1050,7 +1056,11 @@ export function setMemberPremiumSince(
  * the same transaction as the membership (see consumeInviteUse); an unknown,
  * foreign, expired or exhausted invite yields UNKNOWN_INVITE with no mutation.
  * Checked after the existing guild/user/conflict/bot rejections, so an
- * already-member 409 never consumes a use.
+ * already-member 409 never consumes a use. A join that exhausts the invite
+ * (`uses` reaching `max_uses`) publishes INVITE_DELETE right before
+ * GUILD_MEMBER_ADD, unless the invite was created with
+ * `delete_event_on_exhaustion: false`. Joining through an invite must not run
+ * inside an open transaction (the events publish right after the join commits).
  * @returns Stored member, or an error reason with no mutation or emission
  */
 export function joinTestGuildMember(
@@ -1060,6 +1070,14 @@ export function joinTestGuildMember(
   nick: string | null = null,
   inviteCode?: string
 ): JoinTestGuildMemberResult {
+  if (inviteCode !== undefined && db.inTransaction) {
+    // INVITE_DELETE is published right after the join commits; inside an outer
+    // transaction it could escape that transaction's rollback.
+    throw new Error(
+      'joinTestGuildMember with an invite must not run inside an open transaction'
+    )
+  }
+  const inviteDeletes: PendingInviteDelete[] = []
   const join = db.transaction((): JoinTestGuildMemberResult => {
     if (!db.prepare('SELECT id FROM guilds WHERE id = ?').get(guildId)) {
       return 'UNKNOWN_GUILD'
@@ -1072,7 +1090,7 @@ export function joinTestGuildMember(
     if (user.bot === 1) return 'BOT_USER'
     if (
       inviteCode !== undefined &&
-      !consumeInviteUse(db, guildId, inviteCode)
+      !consumeInviteUse(db, guildId, inviteCode, inviteDeletes)
     ) {
       return 'UNKNOWN_INVITE'
     }
@@ -1088,6 +1106,9 @@ export function joinTestGuildMember(
 
   const result = join()
   if (typeof result !== 'string') {
+    // Fauxcord's chosen order (Discord documents none): an exhausted invite's
+    // INVITE_DELETE immediately precedes the join's GUILD_MEMBER_ADD.
+    for (const deleted of inviteDeletes) publishInviteDelete(db, deleted)
     emitMemberAddEvent(db, {
       guildId,
       member: result as unknown as Record<string, unknown>,
@@ -1102,6 +1123,8 @@ export interface TestInviteRequest {
   max_age?: number | null
   max_uses?: number | null
   temporary?: boolean | null
+  /** Emit INVITE_DELETE when `max_uses` exhaustion deletes it (default true). */
+  delete_event_on_exhaustion?: boolean | null
 }
 
 /** Rejection reasons for a human-created invite fixture. */
@@ -1143,6 +1166,8 @@ export function createTestInvite(
           maxAge: request.max_age ?? undefined,
           maxUses: request.max_uses ?? undefined,
           temporary: request.temporary ?? undefined,
+          deleteEventOnExhaustion:
+            request.delete_event_on_exhaustion ?? undefined,
         })
       : 'NOT_MEMBER'
   })()
