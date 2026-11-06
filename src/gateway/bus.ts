@@ -145,6 +145,13 @@ export interface GatewayBusEvents {
     user: Record<string, unknown>
     scope: { db: Database; botId: string; token: string }
   }
+  'invite.delete': {
+    guildId: string
+    channelId: string
+    code: string
+    /** Exact setup scope of the invite's guild. */
+    scope: { db: Database; botId: string; token: string }
+  }
   'guild.delete': {
     guildId: string
     /** The bot (and exact setup token) that lost access to the guild. */

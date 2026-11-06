@@ -492,6 +492,38 @@ describe('initializeDatabase', () => {
     }
   })
 
+  it('migrates legacy invites to emit INVITE_DELETE on exhaustion by default', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-invite-db-'))
+    const dbPath = path.join(dir, 'legacy.db')
+    try {
+      db = initializeDatabase(dbPath)
+      const token = testHelpers.seedBot(db)
+      const guildId = testHelpers.seedGuild(db, token)
+      const channelId = testHelpers.seedChannel(db, guildId)
+      testHelpers.seedInvite(db, channelId, guildId, null, 'legacy01')
+      db.exec('ALTER TABLE invites DROP COLUMN delete_event_on_exhaustion')
+      closeDatabase(db)
+      db = initializeDatabase(dbPath)
+      closeDatabase(db)
+      db = initializeDatabase(dbPath)
+      expect(
+        db
+          .prepare(
+            'SELECT delete_event_on_exhaustion AS flag FROM invites WHERE code = ?'
+          )
+          .get('legacy01')
+      ).toEqual({ flag: 1 })
+      expect(
+        (
+          db.prepare('PRAGMA table_info(invites)').all() as { name: string }[]
+        ).filter((column) => column.name === 'delete_event_on_exhaustion')
+      ).toHaveLength(1)
+    } finally {
+      closeDatabase(db)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('migrates legacy user profiles and preserves global names on reopening', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-user-db-'))
     const dbPath = path.join(dir, 'legacy.db')

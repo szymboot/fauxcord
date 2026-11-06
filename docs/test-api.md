@@ -2456,11 +2456,16 @@ membership, no `uses` change and no event.
   `GET /guilds/:id/invites`, `GET /channels/:id/invites` and
   `GET /invites/:code` (`404` / `10006`), and further joins get `10006`.
   `max_uses: 0` is unlimited.
+  The deletion publishes [`INVITE_DELETE`](#invite_delete-gateway-event) after the commit
+  unless the invite was created with `delete_event_on_exhaustion: false`; see
+  [`INVITE_DELETE` Gateway event](#invite_delete-gateway-event).
 - **Atomicity**: the `uses` increment (and the deletion at `max_uses`) and the
   membership insert happen in one transaction. If either fails neither persists.
   The single `guild.member.add` / `GUILD_MEMBER_ADD` is emitted only after the
   commit, exactly as for a join without `invite_code`, so a bot that lists
-  invites while handling the event already sees the new `uses`.
+  invites while handling the event already sees the new `uses`. When the join
+  exhausts the invite, `INVITE_DELETE` is emitted right before it, also after
+  the commit.
 - **Precedence**: guild, user, already-member (`409`) and bot (`400`) checks run
   first, exactly as without `invite_code`; an already-member `409` therefore
   never consumes a use.
@@ -2470,9 +2475,9 @@ membership, no `uses` change and no event.
 `GET /invites/:code`). `with_counts` is accepted but, as before, has no effect:
 Fauxcord does not return `approximate_*_count` on invites.
 
-**Not modelled**: Fauxcord emits no `INVITE_CREATE` / `INVITE_DELETE` Gateway
-events (it models neither for native invites either), including for the fixture
-and for `max_uses` removal. A `temporary` invite is recorded and echoed
+**Not modelled**: Fauxcord emits no `INVITE_CREATE` Gateway event (neither for
+native invites nor for the fixture); `INVITE_DELETE` is the only invite event
+it emits (see below). A `temporary` invite is recorded and echoed
 (`temporary: true`), but joiners are *not* kicked on disconnect. Invite target
 users (`/invites/:code/target-users`) are not enforced when joining.
 
@@ -2520,10 +2525,12 @@ curl -X POST http://localhost:3000/_test/channels/333333333333333333/invites \
 | `max_age`            | —        | Seconds until expiry, integer `0`–`5184000`; `0` never expires. Default `86400`. `null` means the default.   |
 | `max_uses`           | —        | Integer `0`–`100`; `0` is unlimited. Default `0`. `null` means the default.                                  |
 | `temporary`          | —        | Boolean. Default `false`. Recorded only; temporary membership is not modelled.                               |
+| `delete_event_on_exhaustion` | — | Boolean. Default `true`; `null` means the default. Whether the deletion caused by a join that makes `uses` reach `max_uses` publishes `INVITE_DELETE`. `false` keeps that deletion silent. See [`INVITE_DELETE` Gateway event](#invite_delete-gateway-event). Has no effect on `DELETE /invites/:code`, which always publishes. |
 
 **Response**: `201 Created` with the same invite object as the native route
 (`code`, `inviter` = that human, `uses: 0`, `max_age`, `max_uses`, `temporary`,
-`created_at`, `expires_at`, `guild`, `channel`, …). No Gateway event is emitted.
+`created_at`, `expires_at`, `guild`, `channel`, …; `delete_event_on_exhaustion` is
+not part of the response). No Gateway event is emitted.
 
 **Errors** (no state changes or events):
 
@@ -2534,13 +2541,54 @@ curl -X POST http://localhost:3000/_test/channels/333333333333333333/invites \
 | `404`  | `10013` | Unknown User.                                                           |
 | `400`  | `0`     | The inviter is a Bot (`User must not be a bot`).                        |
 | `404`  | `10007` | The inviter is not a member of the channel's Guild (Unknown Member).    |
-| `400`  | `50035` | Missing/non-string `inviter_id`, or invalid `max_age`/`max_uses`/`temporary`. |
+| `400`  | `50035` | Missing/non-string `inviter_id`, or invalid `max_age`/`max_uses`/`temporary`/`delete_event_on_exhaustion`. |
 | `400`  | `0`     | Malformed JSON or a body that is not a JSON object.                     |
 
 Typical attribution test: create the invite with this control, record
 `GET /guilds/:guildId/invites`, join a user with `invite_code`, and observe
 `GUILD_MEMBER_ADD`; the invite's `uses` has grown and `inviter` is the human.
 `POST /_test/reset` clears invites as before.
+
+### `INVITE_DELETE` Gateway event
+
+Fauxcord emits `INVITE_DELETE` (Gateway intent Guild Invites, `1 << 6`) when an
+invite is deleted:
+
+| Cause                                                                 | Emits `INVITE_DELETE`                                      |
+| --------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `DELETE /invites/:code` (also under `/api` and `/api/v10`)            | Yes, after the deletion commits, only if an invite was deleted. |
+| A join with `invite_code` that makes `uses` reach `max_uses` (> 0)    | Yes by default; no when the invite has `delete_event_on_exhaustion: false`. |
+| Unknown invite (`404` / `10006`), failed join, non-exhausting join    | No.                                                        |
+| Expiry (`max_age`)                                                    | No. Discord sends none either ([discord-api-docs#7249](https://github.com/discord/discord-api-docs/issues/7249)); Fauxcord leaves expired invites in place. |
+| `/_test/reset`, `DELETE /_test/setup/:token`, guild deletion          | No (cleanup stays silent).                                 |
+
+The payload is exactly as documented for the
+[Invite Delete Gateway event](https://docs.discord.com/developers/events/gateway-events#invite-delete):
+`{ "channel_id", "guild_id", "code" }`.
+
+Delivery follows the guild's own bot, like `GUILD_BAN_REMOVE`: only sessions
+of the bot setup (exact token) that owns the guild's database, holding the
+Guild Invites intent, receive it. Other bots, other apps and other guilds do
+not, and nothing is delivered (or sequenced) while the owning bot is detached
+from the guild. Discord only sends invite events to bots with `MANAGE_CHANNELS`
+on the channel; Fauxcord does not model that permission for any event, so the
+check is not modelled here either.
+
+Exhaustion by a join: Discord does not document whether, or in which order,
+`INVITE_DELETE` is sent when the last use of an invite consumes it, hence the
+per-invite switch above. With the default (`true`), the join dispatches
+`INVITE_DELETE` immediately before that join's single `GUILD_MEMBER_ADD` (both
+after the commit). This order is Fauxcord's own choice, not Discord's.
+Invites created through the production route
+`POST /channels/:channelId/invites` always emit on exhaustion.
+
+`INVITE_DELETE` is not yet supported by the Gateway event capture/hold
+controls (it cannot be selected in `events`), and Fauxcord adds no audit log
+entry for invite deletion. When a [`GUILD_MEMBER_ADD` capture](#native-member-joins)
+holds the exhausting join's member add, `INVITE_DELETE` is still delivered
+immediately, so the bot sees the invite deleted before the held join; releasing
+the capture later delivers the join. The invite is already deleted in the
+database at that point, as `uses` and the membership are.
 
 ---
 
@@ -4431,6 +4479,12 @@ the order of the requested `event_ids` (pass them in capture order for native
 order); omitted ones stay held. Limits, TTL, byte budget, ownership keys,
 `sequence: "original"`, `application_ack`, disconnect/resume gating and cleanup
 behave exactly as for `GUILD_MEMBER_UPDATE`.
+
+A join through an invite that reaches `max_uses` also publishes
+[`INVITE_DELETE`](#invite_delete-gateway-event) right before its
+`GUILD_MEMBER_ADD`. Only the `GUILD_MEMBER_ADD` dispatch is capturable;
+`INVITE_DELETE` is not (invite events cannot be captured yet), so it is
+delivered immediately even while the join's member add is held.
 
 ```bash
 # Arm before the user joins.

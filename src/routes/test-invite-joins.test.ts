@@ -389,7 +389,11 @@ describe('Human-created invites and invite-based joins', () => {
 
       const emit = vi.spyOn(gatewayBus, 'emit')
       expect(await joinStatus('555555555555555558', invite.code)).toBe(201)
-      expect(emit).toHaveBeenCalledTimes(1)
+      // The exhausting join publishes INVITE_DELETE, then its single member add.
+      expect(emit.mock.calls.map(([event]) => event)).toEqual([
+        'invite.delete',
+        'guild.member.add',
+      ])
 
       expect(await guildInvites()).toEqual([])
       const channelList = await context.app.request(
