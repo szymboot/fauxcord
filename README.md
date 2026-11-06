@@ -170,6 +170,11 @@ then call `POST /_test/guilds/:guildId/members/:userId` (optionally with
 intent. See the [test API documentation](./docs/test-api.md) for errors and
 the leave/rejoin flow using the existing member DELETE.
 
+To test invite attribution, create an invite as a human with
+`POST /_test/channels/:channelId/invites` (`{"inviter_id": "..."}`), then join a
+user with `{"invite_code": "..."}`: the invite's `uses` is incremented in the
+same transaction as the membership, and an invite reaching `max_uses` is removed.
+
 To test a server administrator adding the already-connected bot to an existing
 Guild, prepare the Guild without the bot (`"bot_present": false` on the Guild
 in `POST /_test/setup`), seed its humans, roles and channels, then call

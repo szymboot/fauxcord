@@ -31,6 +31,7 @@ import { getGuildMember, type GuildMemberObject } from './guild-members'
 import { deleteGuildMembership } from './member-removal'
 import { getChannel, isVoiceCapableChannelType } from './channels'
 import { getUser, type UserObject } from './users'
+import { consumeInviteUse, createInvite, type InviteObject } from './invites'
 import { resetAuditLogResponses } from './audit-log-responses'
 import { resetRestFaults } from './rest-faults'
 import {
@@ -910,7 +911,12 @@ export function prepareTestUserGlobalName(
 
 /** Result of joining a registered non-bot user to an existing guild. */
 export type JoinTestGuildMemberResult =
-  GuildMemberObject | 'UNKNOWN_GUILD' | 'UNKNOWN_USER' | 'BOT_USER' | 'CONFLICT'
+  | GuildMemberObject
+  | 'UNKNOWN_GUILD'
+  | 'UNKNOWN_USER'
+  | 'BOT_USER'
+  | 'CONFLICT'
+  | 'UNKNOWN_INVITE'
 
 /** Validated member-date fixture input for an existing membership. */
 export interface MemberDateFixtureRequest {
@@ -979,13 +985,19 @@ export function prepareMemberDateFixture(
  * @param guildId - Existing guild ID
  * @param userId - Registered non-bot user ID
  * @param nick - Guild nickname (null by default)
+ * @param inviteCode - Optional invite to join through. Its use is consumed in
+ * the same transaction as the membership (see consumeInviteUse); an unknown,
+ * foreign, expired or exhausted invite yields UNKNOWN_INVITE with no mutation.
+ * Checked after the existing guild/user/conflict/bot rejections, so an
+ * already-member 409 never consumes a use.
  * @returns Stored member, or an error reason with no mutation or emission
  */
 export function joinTestGuildMember(
   db: Database,
   guildId: string,
   userId: string,
-  nick: string | null = null
+  nick: string | null = null,
+  inviteCode?: string
 ): JoinTestGuildMemberResult {
   const join = db.transaction((): JoinTestGuildMemberResult => {
     if (!db.prepare('SELECT id FROM guilds WHERE id = ?').get(guildId)) {
@@ -997,6 +1009,12 @@ export function joinTestGuildMember(
     if (!user) return 'UNKNOWN_USER'
     if (getGuildMember(db, guildId, userId)) return 'CONFLICT'
     if (user.bot === 1) return 'BOT_USER'
+    if (
+      inviteCode !== undefined &&
+      !consumeInviteUse(db, guildId, inviteCode)
+    ) {
+      return 'UNKNOWN_INVITE'
+    }
 
     // Keep an explicit UTC offset so member serialization is timezone independent.
     db.prepare(
@@ -1015,6 +1033,58 @@ export function joinTestGuildMember(
     })
   }
   return result
+}
+
+/** Validated input for a human-created invite fixture. */
+export interface TestInviteRequest {
+  inviter_id: string
+  max_age?: number | null
+  max_uses?: number | null
+  temporary?: boolean | null
+}
+
+/** Rejection reasons for a human-created invite fixture. */
+export type TestInviteError =
+  | 'UNKNOWN_CHANNEL'
+  | 'NOT_GUILD_CHANNEL'
+  | 'UNKNOWN_USER'
+  | 'BOT_USER'
+  | 'NOT_MEMBER'
+
+/**
+ * Creates an ordinary invite whose inviter is an existing non-bot guild
+ * member, through the same createInvite path as the native route. Emits no
+ * Gateway events (Fauxcord does not model INVITE_CREATE).
+ * @param db - Database
+ * @param channelId - Guild channel ID
+ * @param request - Validated fixture input
+ * @returns The created invite, or a rejection reason with no mutation
+ */
+export function createTestInvite(
+  db: Database,
+  channelId: string,
+  request: TestInviteRequest
+): InviteObject | TestInviteError {
+  return db.transaction((): InviteObject | TestInviteError => {
+    const channel = getChannel(db, channelId)
+    if (!channel) return 'UNKNOWN_CHANNEL'
+    if (!channel.guild_id) return 'NOT_GUILD_CHANNEL'
+    const user = db
+      .prepare('SELECT bot FROM users WHERE id = ?')
+      .get(request.inviter_id) as { bot: number } | undefined
+    if (!user) return 'UNKNOWN_USER'
+    if (user.bot === 1) return 'BOT_USER'
+    return getGuildMember(db, channel.guild_id, request.inviter_id)
+      ? createInvite(db, {
+          channelId,
+          guildId: channel.guild_id,
+          inviterId: request.inviter_id,
+          maxAge: request.max_age ?? undefined,
+          maxUses: request.max_uses ?? undefined,
+          temporary: request.temporary ?? undefined,
+        })
+      : 'NOT_MEMBER'
+  })()
 }
 
 /** Request payload for injecting a message authored by a pre-registered user */

@@ -99,6 +99,16 @@ function toIso(value: string): string {
 }
 
 /**
+ * Formats a Date as a SQLite datetime string ("YYYY-MM-DD HH:MM:SS", UTC),
+ * the storage format of `invites.created_at`.
+ * @param date - Date to format
+ * @returns SQLite datetime string truncated to whole seconds
+ */
+function toSqliteTimestamp(date: Date): string {
+  return date.toISOString().slice(0, 19).replace('T', ' ')
+}
+
+/**
  * Computes the expiry timestamp from creation time and max_age.
  * @param createdAt - SQLite datetime string
  * @param maxAge - Seconds until expiry (0 means never)
@@ -257,9 +267,11 @@ export function createInvite(
   params: InviteCreateParams
 ): InviteObject {
   const code = generateInviteCode(db)
+  // created_at comes from Fauxcord's JS clock (not SQLite's datetime('now')),
+  // so invite expiry follows the same clock as every other Fauxcord timestamp.
   db.prepare(
-    `INSERT INTO invites (code, channel_id, guild_id, inviter_id, max_age, max_uses, temporary)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO invites (code, channel_id, guild_id, inviter_id, max_age, max_uses, temporary, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     code,
     params.channelId,
@@ -267,7 +279,8 @@ export function createInvite(
     params.inviterId,
     params.maxAge ?? 86_400,
     params.maxUses ?? 0,
-    params.temporary ? 1 : 0
+    params.temporary ? 1 : 0,
+    toSqliteTimestamp(new Date())
   )
 
   const row = db
@@ -280,6 +293,47 @@ export function createInvite(
     throw new Error('Failed to build invite object after creation')
   }
   return invite
+}
+
+/**
+ * Consumes one use of an invite on behalf of a member joining a guild.
+ *
+ * The invite must exist, belong to `guildId`, not be expired (`max_age` counted
+ * from `created_at` on Fauxcord's clock; 0 never expires) and not be exhausted
+ * (`max_uses` > 0 and `uses` >= `max_uses`). On success `uses` is incremented,
+ * and an invite that reaches `max_uses` is deleted (as Discord does), together
+ * with its target-users data. Nothing is changed on failure.
+ *
+ * Must run inside the caller's transaction so the use is committed atomically
+ * with the membership it pays for.
+ * @param db - Database (a transaction must be open)
+ * @param guildId - Guild the member is joining
+ * @param code - Invite code
+ * @returns true when a use was consumed, false when the invite is unusable
+ * (unknown, foreign, expired or exhausted)
+ */
+export function consumeInviteUse(
+  db: Database,
+  guildId: string,
+  code: string
+): boolean {
+  if (!db.inTransaction) {
+    throw new Error('consumeInviteUse requires an open transaction')
+  }
+  const row = db.prepare('SELECT * FROM invites WHERE code = ?').get(code) as
+    InviteRow | undefined
+  if (row?.guild_id !== guildId) return false
+  if (row.max_age > 0) {
+    const created = new Date(`${row.created_at.replace(' ', 'T')}Z`).getTime()
+    if (Date.now() >= created + row.max_age * 1000) return false
+  }
+  if (row.max_uses > 0 && row.uses >= row.max_uses) return false
+
+  db.prepare('UPDATE invites SET uses = uses + 1 WHERE code = ?').run(code)
+  if (row.max_uses > 0 && row.uses + 1 >= row.max_uses) {
+    db.prepare('DELETE FROM invites WHERE code = ?').run(code)
+  }
+  return true
 }
 
 /**
