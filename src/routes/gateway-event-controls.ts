@@ -3,6 +3,7 @@ import { bodyLimit } from 'hono/body-limit'
 import { isAuditOwnershipKey } from '../validators/audit-log-response'
 import {
   CONTROL_EVENTS,
+  INVITE_SCOPED_EVENTS,
   MEMBER_SCOPED_EVENTS,
   ROLE_SCOPED_EVENTS,
   type EventControlRequest,
@@ -43,6 +44,25 @@ function roleSelectorError(events: unknown): string | undefined {
     : undefined
 }
 
+/** Message returned when `invite_code` is combined with a non-invite event. */
+const INVITE_SELECTOR_MESSAGE = `invite_code requires every event to be one of ${INVITE_SCOPED_EVENTS.join(', ')}`
+
+/** Explains why an invite selector cannot narrow the requested event list. */
+function inviteSelectorError(events: unknown): string | undefined {
+  return Array.isArray(events) &&
+    events.some(
+      (event: unknown) =>
+        !INVITE_SCOPED_EVENTS.includes(
+          event as (typeof INVITE_SCOPED_EVENTS)[number]
+        )
+    )
+    ? INVITE_SELECTOR_MESSAGE
+    : undefined
+}
+
+/** Invite codes are short URL-safe tokens; the invite need not exist. */
+const INVITE_CODE_PATTERN = /^[\w-]{1,64}$/
+
 /** Validates exact numeric scope IDs and the bounded capture policy. */
 function validateControl(value: unknown): EventControlRequest | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -55,6 +75,7 @@ function validateControl(value: unknown): EventControlRequest | undefined {
     events,
     member_id: memberId,
     role_id: roleId,
+    invite_code: inviteCode,
   } = data
   if (
     typeof guildId !== 'string' ||
@@ -69,6 +90,9 @@ function validateControl(value: unknown): EventControlRequest | undefined {
       (typeof memberId !== 'string' || !/^[1-9]\d{0,19}$/.test(memberId))) ||
     (roleId !== undefined &&
       (typeof roleId !== 'string' || !/^[1-9]\d{0,19}$/.test(roleId))) ||
+    (inviteCode !== undefined &&
+      (typeof inviteCode !== 'string' ||
+        !INVITE_CODE_PATTERN.test(inviteCode))) ||
     !Array.isArray(events) ||
     events.length === 0 ||
     events.length > CONTROL_EVENTS.length ||
@@ -81,7 +105,8 @@ function validateControl(value: unknown): EventControlRequest | undefined {
     ) ||
     new Set(events).size !== events.length ||
     (memberId !== undefined && memberSelectorError(events) !== undefined) ||
-    (roleId !== undefined && roleSelectorError(events) !== undefined)
+    (roleId !== undefined && roleSelectorError(events) !== undefined) ||
+    (inviteCode !== undefined && inviteSelectorError(events) !== undefined)
   )
     return undefined
   const applicationAck =
@@ -115,6 +140,7 @@ function validateControl(value: unknown): EventControlRequest | undefined {
         events,
         member_id: memberId,
         role_id: roleId,
+        invite_code: inviteCode,
         application_ack: applicationAck,
         hold,
         allow_original_sequence: allowOriginalSequence,
@@ -123,13 +149,14 @@ function validateControl(value: unknown): EventControlRequest | undefined {
       }
 }
 
-/** Names a member/role selector mismatch; other invalid policy stays generic. */
+/** Names a member/role/invite selector mismatch; other invalid policy stays generic. */
 function invalidControlMessage(body: unknown): string {
   if (!body || typeof body !== 'object' || Array.isArray(body))
     return '400: Bad Request'
   const {
     member_id: memberId,
     role_id: roleId,
+    invite_code: inviteCode,
     events,
   } = body as Record<string, unknown>
   const knownEvents =
@@ -146,8 +173,13 @@ function invalidControlMessage(body: unknown): string {
     typeof roleId === 'string' && /^[1-9]\d{0,19}$/.test(roleId)
       ? roleSelectorError(events)
       : undefined
+  const inviteError =
+    typeof inviteCode === 'string' && INVITE_CODE_PATTERN.test(inviteCode)
+      ? inviteSelectorError(events)
+      : undefined
   return (
-    (knownEvents ? (memberError ?? roleError) : undefined) ?? '400: Bad Request'
+    (knownEvents ? (memberError ?? roleError ?? inviteError) : undefined) ??
+    '400: Bad Request'
   )
 }
 

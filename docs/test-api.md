@@ -939,8 +939,10 @@ written in the same synchronous step as the deletion, so a bot that reads the
 audit log while handling either event already sees it. A deletion that matched
 no invite dispatches neither.
 
-`GUILD_AUDIT_LOG_ENTRY_CREATE` is not yet supported by the Gateway event
-capture/hold controls (it cannot be selected in `events`).
+`GUILD_AUDIT_LOG_ENTRY_CREATE` can be observed, held, released and replayed with
+the Gateway event capture controls (see
+[native invite events](#native-invite-events)); add `invite_code` to hold only
+the entry of one invite's deletion (`action_type: 42` with a `code` change).
 
 ---
 
@@ -2688,15 +2690,18 @@ after the commit). This order is Fauxcord's own choice, not Discord's.
 Invites created through the production route
 `POST /channels/:channelId/invites` always emit on exhaustion.
 
-`INVITE_DELETE` is not yet supported by the Gateway event capture/hold
-controls (it cannot be selected in `events`). `DELETE /invites/:code` also records an
+`INVITE_DELETE` can be observed, held, released and replayed with the Gateway
+event capture controls (see [native invite events](#native-invite-events)).
+`DELETE /invites/:code` also records an
 `INVITE_DELETE` [audit log entry](#invite-deletion-audit-entries) and dispatches
 `GUILD_AUDIT_LOG_ENTRY_CREATE` right after `INVITE_DELETE`; exhaustion and expiry
-create neither. When a [`GUILD_MEMBER_ADD` capture](#native-member-joins)
-holds the exhausting join's member add, `INVITE_DELETE` is still delivered
-immediately, so the bot sees the invite deleted before the held join; releasing
-the capture later delivers the join. The invite is already deleted in the
-database at that point, as `uses` and the membership are.
+create neither. Without a capture of `INVITE_DELETE`, a
+[`GUILD_MEMBER_ADD` capture](#native-member-joins) that holds the exhausting
+join's member add leaves `INVITE_DELETE` to be delivered immediately, so the bot
+sees the invite deleted before the held join; releasing the capture later
+delivers the join. Arm a second capture for `INVITE_DELETE` to control both
+orders. The invite is already deleted in the database at that point, as `uses`
+and the membership are.
 
 ---
 
@@ -3960,7 +3965,8 @@ the newly resolved session.
 `MESSAGE_DELETE_BULK`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
 `MESSAGE_REACTION_REMOVE_ALL`, `MESSAGE_REACTION_REMOVE_EMOJI`,
 `GUILD_MEMBER_ADD`, `GUILD_MEMBER_UPDATE`, `GUILD_BAN_ADD`, `GUILD_BAN_REMOVE`,
-`GUILD_ROLE_CREATE`, `GUILD_ROLE_UPDATE`, `GUILD_ROLE_DELETE`, and
+`GUILD_ROLE_CREATE`, `GUILD_ROLE_UPDATE`, `GUILD_ROLE_DELETE`,
+`INVITE_DELETE`, `GUILD_AUDIT_LOG_ENTRY_CREATE` and
 `INTERACTION_CREATE`. Only events that the native producer actually emits are
 captured. Message creation (including
 human messages via `POST /_test/channels/:channelId/messages`), single deletion,
@@ -4004,6 +4010,10 @@ with `sequence: "new"` adds a fresh sequence to history, while opted-in
 makes out-of-order handling testable: hold role update A, `PATCH` the same role
 again so update B is delivered, then release A with `sequence: "original"`
 (see the [example](#role-selectors)).
+
+For invites, select `INVITE_DELETE` and/or `GUILD_AUDIT_LOG_ENTRY_CREATE` (see
+[native invite events](#native-invite-events)). Add `invite_code` to match one
+invite (see [invite selectors](#invite-selectors)).
 
 For interactions, select `INTERACTION_CREATE`. Native producers are
 `POST /_test/interactions` and `POST /_test/interactions/:interactionId/modal-submit`
@@ -4100,7 +4110,8 @@ Capture/hold happens after the SQLite deletion. Release/replay delivers the
 native snapshot even after source-message deletion and never restores reactions.
 
 Capture runs after native intent filtering: missing Guild Messages / Guild
-Message Reactions / Guild Voice States / Guild Members / Guild Moderation / Guilds intent
+Message Reactions / Guild Voice States / Guild Members / Guild Moderation /
+Guild Invites / Guilds intent
 means no corresponding capture or delivery. Unrelated event types, guilds, bots and other sessions keep their
 existing delivery behavior. `hold` defaults to `false`: observe while delivering
 normally. With
@@ -4122,8 +4133,9 @@ normal protocol delivery running. Check both skipped counters when complete
 observation matters. There are at most
 32 controls per assembled Gateway. Global capacity returns `429`. Overlapping
 event selectors for the same guild/session return `409` (see
-[member selectors](#member-selectors) and [role selectors](#role-selectors) for how
-`member_id` and `role_id` affect overlap). Invalid policy,
+[member selectors](#member-selectors), [role selectors](#role-selectors) and
+[invite selectors](#invite-selectors) for how `member_id`, `role_id` and
+`invite_code` affect overlap). Invalid policy,
 malformed JSON and explicit null policy values return `400`.
 
 When count/byte capacity is reached, subsequent matching events **pass through
@@ -4515,6 +4527,121 @@ To hold both updates instead, omit `limit` and release B (default
 `sequence: "new"`) before A with `"original"`. The database keeps B throughout:
 releasing A neither reapplies nor reverts anything.
 
+### Invite selectors
+
+`invite_code` narrows a control to one invite. It is a string of 1–64 letters,
+digits, `_` or `-` (the format of Fauxcord's generated invite codes); null,
+empty or malformed values return `400`. It is valid only when **every selected
+event is `INVITE_DELETE` or `GUILD_AUDIT_LOG_ENTRY_CREATE`**; any other event
+type together with `invite_code` returns `400` with
+`{"message":"invite_code requires every event to be one of INVITE_DELETE, GUILD_AUDIT_LOG_ENTRY_CREATE","code":0}`.
+The control API reports every validation failure as `code: 0`, as for
+`member_id` and `role_id`. `member_id` and `role_id` cannot be combined with
+`invite_code` (their event sets are disjoint). The invite need not exist when
+arming: it may already be deleted, or be created later, and is not rechecked on
+capture, release or replay. The selector matches the subject invite of each
+event:
+
+| Event                          | Matched field                                                         |
+| ------------------------------ | --------------------------------------------------------------------- |
+| `INVITE_DELETE`                | `d.code`                                                              |
+| `GUILD_AUDIT_LOG_ENTRY_CREATE` | `d.changes[key = "code"].old_value`, only when `d.action_type` is `42` |
+
+A `GUILD_AUDIT_LOG_ENTRY_CREATE` entry of any other action type, or an
+`INVITE_DELETE` entry without a `code` change, has no subject invite and is
+never matched by a selected control. Without `invite_code`, the capture covers
+every such event of the selected guild (for the audit event, entries of all
+action types). Other invites' dispatches are not captured, not held and spend
+no `limit` or byte budget; they are delivered immediately with their ordinary
+native sequence, exactly as if no control existed.
+
+**Overlap.** For the same guild and session, a new control conflicts (`409`) with
+an existing one when they share at least one event type and either has no
+`invite_code` or both select the same code. Controls with different codes for
+the same event type coexist, as do controls for the same code with disjoint
+event types; a control for `INVITE_DELETE` never overlaps one for
+`GUILD_MEMBER_ADD`. `invite_code` is part of the ownership-key policy: retrying
+a keyed creation with a different selector returns `409`. Inspection returns
+`invite_code`. For release and replay, pick the events by `event_ids`: the
+captured `envelope.d.code` (or the audit entry's `code` change) identifies the
+invite.
+
+### Native invite events
+
+Arm `events: ["INVITE_DELETE"]` and/or `events: ["GUILD_AUDIT_LOG_ENTRY_CREATE"]`
+(optionally with `invite_code`, see [invite selectors](#invite-selectors)) to
+hold, release, replay or merely observe the
+[`INVITE_DELETE`](#invite_delete-gateway-event) dispatch and the dispatch of the
+[audit log entry](#invite-deletion-audit-entries) it creates.
+
+Native producers:
+
+- `DELETE /invites/:code` produces `INVITE_DELETE` and then
+  `GUILD_AUDIT_LOG_ENTRY_CREATE` (`action_type: 42`, `changes` containing
+  `{"key": "code", "old_value": CODE}`). The deletion and the audit entry are
+  committed and readable through REST while the dispatches are held. A deletion
+  that matches no invite produces neither.
+- A join that exhausts an invite (`POST /_test/guilds/:guildId/members/:userId`
+  with an `invite_code` that reaches `max_uses`) produces `INVITE_DELETE`
+  immediately before its `GUILD_MEMBER_ADD`, unless the invite was created with
+  `delete_event_on_exhaustion: false`. It never produces an audit entry. Expiry,
+  seeded fixtures and cleanup produce nothing to capture.
+
+Payloads and emission order are unchanged: `INVITE_DELETE` is
+`{ "channel_id", "guild_id", "code" }` and requires the Guild Invites intent;
+`GUILD_AUDIT_LOG_ENTRY_CREATE` is the audit entry plus `guild_id` and requires
+the Guild Moderation intent. A session without the matching intent receives and
+captures nothing. Both events are delivered only to sessions of the guild's
+registered bot (exact setup token) of the app database that produced them, so a
+control never captures events produced by another Fauxcord app database that
+shares the same guild, bot or invite code. Only the selected session is held;
+other sessions of the same setup receive their own ordinary dispatch
+immediately.
+
+Capture stores an immutable snapshot taken when the event is emitted. Release
+and replay use it even though the invite is long gone, and never touch the
+database or recreate the invite. Held events are sent in the order of the
+requested `event_ids` (capture order is the native order); omitted ones stay
+held. Limits, TTL, byte budget, ownership keys, `sequence: "original"`,
+`application_ack`, disconnect/resume gating and cleanup behave exactly as for
+the other captured events.
+
+**Ordering a join against an invite deletion.** The two events of an exhausting
+join belong to different controls, so a test can hold both and decide which one
+the bot processes first:
+
+```bash
+# Arm both before the join (different events, so the controls never overlap).
+curl -X POST http://localhost:3000/_test/gateway-event-controls \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "guild_id": "222222222222222222",
+    "bot_id": "111111111111111111",
+    "events": ["GUILD_MEMBER_ADD"],
+    "member_id": "555555555555555555",
+    "hold": true
+  }'
+curl -X POST http://localhost:3000/_test/gateway-event-controls \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "guild_id": "222222222222222222",
+    "bot_id": "111111111111111111",
+    "events": ["INVITE_DELETE"],
+    "invite_code": "AbCd1234",
+    "hold": true
+  }'
+
+# The join consumes the last use; both dispatches are held. Release in either order:
+# the native order is INVITE_DELETE then GUILD_MEMBER_ADD, but releasing the join
+# first makes the bot see the member before the invite's deletion.
+curl -X POST http://localhost:3000/_test/guilds/222222222222222222/members/555555555555555555 \
+  -H 'Content-Type: application/json' -d '{"invite_code": "AbCd1234"}'
+curl -X POST http://localhost:3000/_test/gateway-event-controls/MEMBER_CONTROL_ID/release \
+  -H 'Content-Type: application/json' -d '{"event_ids":["HELD_MEMBER_ADD_ID"]}'
+curl -X POST http://localhost:3000/_test/gateway-event-controls/INVITE_CONTROL_ID/release \
+  -H 'Content-Type: application/json' -d '{"event_ids":["HELD_INVITE_DELETE_ID"]}'
+```
+
 ### Native member updates and cache preparation
 
 Arm `events: ["GUILD_MEMBER_UPDATE"]` and optionally `member_id` (see
@@ -4590,9 +4717,11 @@ behave exactly as for `GUILD_MEMBER_UPDATE`.
 
 A join through an invite that reaches `max_uses` also publishes
 [`INVITE_DELETE`](#invite_delete-gateway-event) right before its
-`GUILD_MEMBER_ADD`. Only the `GUILD_MEMBER_ADD` dispatch is capturable;
-`INVITE_DELETE` is not (invite events cannot be captured yet), so it is
-delivered immediately even while the join's member add is held.
+`GUILD_MEMBER_ADD`. A `GUILD_MEMBER_ADD` capture holds only the member add:
+`INVITE_DELETE` is delivered immediately unless a second capture selects it.
+Arm both (two controls, since their events differ they never overlap) to
+control the order the bot processes them in; see
+[native invite events](#native-invite-events).
 
 ```bash
 # Arm before the user joins.

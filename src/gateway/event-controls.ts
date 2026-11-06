@@ -17,6 +17,8 @@ export const CONTROL_EVENTS = [
   'GUILD_ROLE_CREATE',
   'GUILD_ROLE_UPDATE',
   'GUILD_ROLE_DELETE',
+  'INVITE_DELETE',
+  'GUILD_AUDIT_LOG_ENTRY_CREATE',
   'MESSAGE_CREATE',
   'MESSAGE_DELETE',
   'MESSAGE_DELETE_BULK',
@@ -50,6 +52,50 @@ export const ROLE_SCOPED_EVENTS = [
   'GUILD_ROLE_UPDATE',
   'GUILD_ROLE_DELETE',
 ] as const
+
+/**
+ * Dispatches that describe one invite and can be narrowed by `invite_code`:
+ * `INVITE_DELETE` (`d.code`) and the `GUILD_AUDIT_LOG_ENTRY_CREATE` of an
+ * invite deletion (`action_type` 42 with a `code` change).
+ */
+export const INVITE_SCOPED_EVENTS = [
+  'INVITE_DELETE',
+  'GUILD_AUDIT_LOG_ENTRY_CREATE',
+] as const
+
+/** Audit log action type of an invite deletion (`INVITE_DELETE`). */
+const INVITE_DELETE_ACTION_TYPE = 42
+
+/**
+ * Reads the subject invite code of an invite dispatch, if it has one. An
+ * audit entry names its invite only when it is an invite deletion carrying a
+ * `code` change; any other entry has no subject invite and never matches.
+ */
+export function inviteScopedCode(
+  event: string | null | undefined,
+  data: unknown
+): unknown {
+  if (!data || typeof data !== 'object') return undefined
+  const payload = data as {
+    code?: unknown
+    action_type?: unknown
+    changes?: unknown
+  }
+  if (event === 'INVITE_DELETE') return payload.code
+  if (
+    event !== 'GUILD_AUDIT_LOG_ENTRY_CREATE' ||
+    payload.action_type !== INVITE_DELETE_ACTION_TYPE ||
+    !Array.isArray(payload.changes)
+  )
+    return undefined
+  const change = (payload.changes as unknown[]).find(
+    (entry): entry is { old_value?: unknown } =>
+      typeof entry === 'object' &&
+      entry !== null &&
+      (entry as { key?: unknown }).key === 'code'
+  )
+  return change?.old_value
+}
 
 /** Reads the subject role ID of a role dispatch, if it has one. */
 export function roleScopedRoleId(
@@ -108,6 +154,12 @@ export interface EventControlRequest {
    * roles' dispatches pass through.
    */
   role_id?: string
+  /**
+   * Optional exact invite selector; every listed event must be one of
+   * {@link INVITE_SCOPED_EVENTS}. The invite need not exist when arming. Other
+   * invites' dispatches (and audit entries of other actions) pass through.
+   */
+  invite_code?: string
   /** Requires explicit consuming-client acknowledgements for delivery barriers. */
   application_ack?: boolean
   events: string[]
@@ -161,6 +213,7 @@ function policyKey(request: EventControlRequest): string {
     events: request.events.toSorted((left, right) => left.localeCompare(right)),
     member_id: request.member_id ?? null,
     role_id: request.role_id ?? null,
+    invite_code: request.invite_code ?? null,
     application_ack: request.application_ack ?? false,
     hold: request.hold,
     allow_original_sequence: request.allow_original_sequence,
@@ -433,6 +486,9 @@ export class GatewayEventControls {
             (control.role_id === undefined ||
               request.role_id === undefined ||
               control.role_id === request.role_id) &&
+            (control.invite_code === undefined ||
+              request.invite_code === undefined ||
+              control.invite_code === request.invite_code) &&
             control.events.some((event) => request.events.includes(event))
         )
     )
@@ -540,7 +596,9 @@ export class GatewayEventControls {
           (candidate.member_id === undefined ||
             candidate.member_id === memberScopedUserId(envelope.t, data)) &&
           (candidate.role_id === undefined ||
-            candidate.role_id === roleScopedRoleId(envelope.t, data))
+            candidate.role_id === roleScopedRoleId(envelope.t, data)) &&
+          (candidate.invite_code === undefined ||
+            candidate.invite_code === inviteScopedCode(envelope.t, data))
       )
     if (!control) return false
     const serialized = encodePayload(envelope)
@@ -582,6 +640,7 @@ export class GatewayEventControls {
           events: control.events,
           member_id: control.member_id,
           role_id: control.role_id,
+          invite_code: control.invite_code,
           application_ack: control.application_ack ?? false,
           awaiting_resume: control.awaiting_resume,
           pause_resume: control.pause_resume,

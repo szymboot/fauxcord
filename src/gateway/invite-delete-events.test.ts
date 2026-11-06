@@ -413,10 +413,10 @@ describe('INVITE_DELETE gateway event', () => {
       expect(await eventTypes(client)).toEqual(['GUILD_MEMBER_ADD'])
     })
 
-    it('does not support capturing INVITE_DELETE', async () => {
+    it('lets INVITE_DELETE be armed like any other captured event', async () => {
       const client = await connect()
       const response = await arm(client, ['INVITE_DELETE'])
-      expect(response.status).toBe(400)
+      expect(response.status).toBe(201)
     })
   })
 
