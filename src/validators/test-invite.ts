@@ -3,7 +3,7 @@
  */
 
 import { validateInviteCreate } from './channel'
-import { requiredError, typeError } from './common'
+import { maxLengthError, requiredError, typeError } from './common'
 import { normalizeMemberJoinDate } from './member-join-date'
 
 /**
@@ -86,4 +86,37 @@ export function validateTestJoinInviteCode(
   return typeof value !== 'string' || value.length === 0
     ? { invite_code: { _errors: [typeError('string')] } }
     : {}
+}
+
+/** Maximum length of an audit log reason, as on Discord's header. */
+const AUDIT_REASON_MAX_LENGTH = 512
+
+/**
+ * Validates the body of the member invite deletion control. `actor_id` must be
+ * a non-empty string (Snowflakes lose precision as JSON numbers); `reason`
+ * (null means none) must be a string of at most 512 characters.
+ * @param payload - Parsed JSON object (untrusted)
+ * @returns Field-keyed error map (empty when valid)
+ */
+export function validateTestInviteDelete(
+  payload: Record<string, unknown>
+): Record<string, unknown> {
+  const errors: Record<string, unknown> = {}
+  if (payload.actor_id === undefined || payload.actor_id === null) {
+    errors.actor_id = { _errors: [requiredError()] }
+  } else if (
+    typeof payload.actor_id !== 'string' ||
+    payload.actor_id.length === 0
+  ) {
+    errors.actor_id = { _errors: [typeError('string')] }
+  }
+  const { reason } = payload
+  if (reason !== undefined && reason !== null) {
+    if (typeof reason !== 'string') {
+      errors.reason = { _errors: [typeError('string')] }
+    } else if (reason.length > AUDIT_REASON_MAX_LENGTH) {
+      errors.reason = { _errors: [maxLengthError(AUDIT_REASON_MAX_LENGTH)] }
+    }
+  }
+  return errors
 }

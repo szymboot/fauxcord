@@ -861,8 +861,9 @@ entry. Fauxcord reproduces this:
 | Cause                                                         | Audit entry | `GUILD_AUDIT_LOG_ENTRY_CREATE` |
 | ------------------------------------------------------------- | ----------- | ------------------------------ |
 | `DELETE /invites/:code` that deletes an invite (also under `/api` and `/api/v10`) | Yes, actor = the requesting bot user | Yes |
+| [`POST /_test/invites/:code/delete`](#post-_testinvitescodedelete--delete-an-invite-as-a-member) that deletes an invite | Yes, actor = the given member, optional `reason` | Yes |
 | A join with `invite_code` that makes `uses` reach `max_uses`  | No          | No                             |
-| Expiry (`max_age`)                                            | No (expired invites are not removed) | No           |
+| Expiry (`max_age`)                                            | No (expired invites are removed silently) | No      |
 | Unknown invite (`404` / `10006`)                              | No          | No                             |
 | `POST /_test/guilds/:guildId/audit-logs` fixtures             | Created as requested (`72` only) | No (fixtures are silent) |
 | `/_test/reset`, `DELETE /_test/setup/:token`, guild deletion  | Entries are cleared | No (cleanup stays silent) |
@@ -893,6 +894,9 @@ and `discord-api-types`:
 - `user_id` is the actor: the bot user of the token that called
   `DELETE /invites/:code`. An OAuth2 Bearer token is attributed to its user, or to
   the guild's bot user when it has none (such as client credentials).
+  [`POST /_test/invites/:code/delete`](#post-_testinvitescodedelete--delete-an-invite-as-a-member)
+  attributes the deletion to the human member it names (and stores its optional
+  `reason`).
 - `target_id` is `null`. An invite has no snowflake, so Discord identifies it only
   through its `code` change.
 - `changes` holds the invite as it was before deletion, using `old_value` only
@@ -932,7 +936,8 @@ does not model that permission for any event, so the check is not modelled here
 either.
 
 Order for a REST deletion (Fauxcord's own choice; Discord does not document
-it): `DELETE /invites/:code` commits the deletion, dispatches `INVITE_DELETE`,
+it): `DELETE /invites/:code` (and the member deletion control) commits the
+deletion, dispatches `INVITE_DELETE`,
 then commits the audit entry and dispatches `GUILD_AUDIT_LOG_ENTRY_CREATE`, with
 consecutive sequence numbers. Both events follow their commits, and the entry is
 written in the same synchronous step as the deletion, so a bot that reads the
@@ -2663,9 +2668,10 @@ invite is deleted:
 | Cause                                                                 | Emits `INVITE_DELETE`                                      |
 | --------------------------------------------------------------------- | ---------------------------------------------------------- |
 | `DELETE /invites/:code` (also under `/api` and `/api/v10`)            | Yes, after the deletion commits, only if an invite was deleted. |
+| [`POST /_test/invites/:code/delete`](#post-_testinvitescodedelete--delete-an-invite-as-a-member) | Yes, after the deletion commits, only if an invite was deleted. |
 | A join with `invite_code` that makes `uses` reach `max_uses` (> 0)    | Yes by default; no when the invite has `delete_event_on_exhaustion: false`. |
 | Unknown invite (`404` / `10006`), failed join, non-exhausting join    | No.                                                        |
-| Expiry (`max_age`)                                                    | No. Discord sends none either ([discord-api-docs#7249](https://github.com/discord/discord-api-docs/issues/7249)); Fauxcord leaves expired invites in place. |
+| Expiry (`max_age`)                                                    | No. Discord sends none either ([discord-api-docs#7249](https://github.com/discord/discord-api-docs/issues/7249)); Fauxcord removes expired invites without an event. |
 | `/_test/reset`, `DELETE /_test/setup/:token`, guild deletion          | No (cleanup stays silent).                                 |
 
 The payload is exactly as documented for the
@@ -2697,6 +2703,63 @@ holds the exhausting join's member add, `INVITE_DELETE` is still delivered
 immediately, so the bot sees the invite deleted before the held join; releasing
 the capture later delivers the join. The invite is already deleted in the
 database at that point, as `uses` and the membership are.
+
+---
+
+## `POST /_test/invites/:code/delete` — Delete an invite as a member
+
+Reproduces a human moderator deleting an invite in the Discord client.
+`DELETE /invites/:code` authenticates as the bot (or as an OAuth2 Bearer token's
+user) and does not check the caller's permissions, so it cannot stand in for a
+member. This control deletes the invite as a given Guild member instead: it
+needs no Authorization header, takes the actor from `actor_id` and checks that
+member's permissions.
+
+```bash
+curl -X POST http://localhost:3000/_test/invites/AbCd1234/delete \
+  -H "Content-Type: application/json" \
+  -d '{"actor_id": "555555555555555555", "reason": "cleanup"}'
+```
+
+**Fields**
+
+| Field          | Required | Description                                                                                       |
+| -------------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `code` (path)  | ✅       | Code of an existing, unexpired invite of a Guild channel.                                         |
+| `actor_id`     | ✅       | ID (string) of a registered non-bot user who is a current member of the invite's Guild.           |
+| `reason`       | —        | Audit log reason, string of at most `512` characters; `null` or `""` means none.                  |
+
+**Permissions** are checked before anything changes, as Discord does for
+`DELETE /invites/:code`: the actor needs `MANAGE_CHANNELS` on the invite's
+channel (roles and channel permission overwrites are resolved with Fauxcord's
+permission model) **or** `MANAGE_GUILD`. The Guild owner and members with the
+guild-level `ADMINISTRATOR` permission pass. The invite's creator gets no
+special right.
+
+**Effects** (identical to `DELETE /invites/:code` with a bot token, except for
+the actor): the invite is deleted, then `INVITE_DELETE` is dispatched after the
+commit, then an `INVITE_DELETE` (`42`) [audit log entry](#invite-deletion-audit-entries)
+with `user_id` = `actor_id` and the optional `reason` is recorded and
+`GUILD_AUDIT_LOG_ENTRY_CREATE` is dispatched right after `INVITE_DELETE`, with
+consecutive sequence numbers. The entry is listed by
+`GET /guilds/:guildId/audit-logs`.
+
+**Response**: `200` with the deleted invite object, exactly as
+`DELETE /invites/:code` returns it.
+
+**Errors** (no state change, no event, no audit entry):
+
+| Status | Code    | Cause                                                                                   |
+| ------ | ------- | --------------------------------------------------------------------------------------- |
+| `404`  | `10006` | Unknown Invite: unknown, expired or not a Guild invite. An expired invite is treated as absent; a rejected call leaves its row untouched (the next invite read removes it, silently). |
+| `404`  | `10013` | `actor_id` is not a registered user.                                                    |
+| `400`  | `0`     | `actor_id` is a Bot (`User must not be a bot`).                                         |
+| `403`  | `50013` | The actor is not a member of the invite's Guild, or has neither `MANAGE_CHANNELS` on the channel nor `MANAGE_GUILD`. |
+| `400`  | `50035` | Missing or non-string/empty `actor_id`, or a `reason` that is not a string or exceeds 512 characters. |
+| `400`  | `0`     | Malformed JSON or a body that is not a JSON object.                                     |
+
+The body is validated first, then the invite is looked up, then the actor. A
+repeated call answers `404` / `10006` and dispatches nothing.
 
 ---
 

@@ -5,6 +5,8 @@ import type { ChannelOverwriteObject } from './channels'
 /** Discord permission bits used by Fauxcord's enforced checks. */
 export const PermissionBit = {
   ADMINISTRATOR: 1n << 3n,
+  MANAGE_CHANNELS: 1n << 4n,
+  MANAGE_GUILD: 1n << 5n,
   VIEW_CHANNEL: 1n << 10n,
   SEND_MESSAGES: 1n << 11n,
   EMBED_LINKS: 1n << 14n,

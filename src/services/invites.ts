@@ -152,9 +152,10 @@ function isInviteExpired(
  * it must never go through the publishing deletion path. Every public read or
  * write in this module runs it first, so all routes agree on what exists.
  * @param db - Database
+ * @param now - Clock snapshot in epoch milliseconds (defaults to the current
+ * time); callers that validate and then delete pass one snapshot to both
  */
-export function purgeExpiredInvites(db: Database): void {
-  const now = Date.now()
+export function purgeExpiredInvites(db: Database, now = Date.now()): void {
   const candidates = db
     .prepare('SELECT code, created_at, max_age FROM invites WHERE max_age > 0')
     .all() as Pick<InviteRow, 'code' | 'created_at' | 'max_age'>[]
@@ -454,19 +455,43 @@ export function getInvite(db: Database, code: string): InviteObject | null {
 }
 
 /**
+ * Looks up a live invite without any side effect: unlike `getInvite` it does
+ * not purge expired invites, so permission checks that may still refuse the
+ * request leave the database untouched. An expired invite counts as absent.
+ * @param db - Database
+ * @param code - Invite code
+ * @param now - Clock snapshot in epoch milliseconds (defaults to the current time)
+ * @returns The invite object, or null if it is unknown or expired
+ */
+export function peekInvite(
+  db: Database,
+  code: string,
+  now = Date.now()
+): InviteObject | null {
+  const row = db.prepare('SELECT * FROM invites WHERE code = ?').get(code) as
+    InviteRow | undefined
+  return row && !isInviteExpired(row, now) ? toInviteObject(db, row) : null
+}
+
+/**
  * Deletes an invite by its code and publishes INVITE_DELETE after the delete
  * commits. Nothing is published when no invite was deleted, or when the invite
  * has no guild. Must not run inside an open transaction: the event could
  * otherwise escape a later rollback of the outer transaction.
  * @param db - Database (no transaction may be open)
  * @param code - Invite code
+ * @param now - Clock snapshot for the expiry purge (defaults to the current time)
  * @returns The deleted invite object, or null if it did not exist
  */
-export function deleteInvite(db: Database, code: string): InviteObject | null {
+export function deleteInvite(
+  db: Database,
+  code: string,
+  now = Date.now()
+): InviteObject | null {
   if (db.inTransaction) {
     throw new Error('deleteInvite must not run inside an open transaction')
   }
-  purgeExpiredInvites(db)
+  purgeExpiredInvites(db, now)
   const deleted = db.transaction(() => {
     const row = db.prepare('SELECT * FROM invites WHERE code = ?').get(code) as
       InviteRow | undefined
