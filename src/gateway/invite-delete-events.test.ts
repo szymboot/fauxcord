@@ -421,14 +421,15 @@ describe('INVITE_DELETE gateway event', () => {
   })
 
   describe('expiry', () => {
-    it('emits no event and does not remove an expired invite', async () => {
+    it('emits no event when an invite expires and is removed', async () => {
       vi.useFakeTimers({ toFake: ['Date'] })
       vi.setSystemTime(new Date('2031-05-05T10:00:00.000Z'))
       const code = await humanInvite({ max_age: 10, max_uses: 1 })
       const client = await connect()
       vi.setSystemTime(new Date('2031-05-05T10:00:11.000Z'))
       expect(await join(JOINER, code)).toBe(404)
-      expect(getInvite(server.db, code)).not.toBeNull()
+      expect(getInvite(server.db, code)).toBeNull()
+      expect(await status(`/invites/${code}`, 'DELETE', {}, TOKEN)).toBe(404)
       expect(await drain(client)).toEqual([])
     })
   })
