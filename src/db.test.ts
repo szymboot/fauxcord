@@ -492,6 +492,64 @@ describe('initializeDatabase', () => {
     }
   })
 
+  it('migrates legacy audit entries to support other action types', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-audit-db-'))
+    const dbPath = path.join(dir, 'legacy.db')
+    try {
+      db = initializeDatabase(dbPath)
+      const token = testHelpers.seedBot(db)
+      const guildId = testHelpers.seedGuild(db, token)
+      db.exec(`
+        DROP TABLE guild_audit_log_entries;
+        CREATE TABLE guild_audit_log_entries (
+          id         TEXT PRIMARY KEY,
+          guild_id   TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+          user_id    TEXT NOT NULL,
+          target_id  TEXT NOT NULL,
+          channel_id TEXT NOT NULL,
+          count      TEXT NOT NULL
+        );
+        CREATE INDEX guild_audit_log_entries_guild
+          ON guild_audit_log_entries(guild_id);
+      `)
+      db.prepare(
+        'INSERT INTO guild_audit_log_entries VALUES (?, ?, ?, ?, ?, ?)'
+      ).run('500', guildId, '1', '2', '3', '4')
+      closeDatabase(db)
+      db = initializeDatabase(dbPath)
+      closeDatabase(db)
+      db = initializeDatabase(dbPath)
+      expect(db.prepare('SELECT * FROM guild_audit_log_entries').all()).toEqual(
+        [
+          {
+            id: '500',
+            guild_id: guildId,
+            user_id: '1',
+            target_id: '2',
+            channel_id: '3',
+            count: '4',
+            action_type: 72,
+            reason: null,
+            changes: null,
+          },
+        ]
+      )
+      db.prepare(
+        'INSERT INTO guild_audit_log_entries (id, guild_id, user_id, action_type) VALUES (?, ?, ?, 42)'
+      ).run('501', guildId, '1')
+      expect(
+        db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'guild_audit_log_entries_guild'"
+          )
+          .all()
+      ).toHaveLength(1)
+    } finally {
+      closeDatabase(db)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('migrates legacy invites to emit INVITE_DELETE on exhaustion by default', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-invite-db-'))
     const dbPath = path.join(dir, 'legacy.db')
