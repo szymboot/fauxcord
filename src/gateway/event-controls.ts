@@ -6,10 +6,11 @@ import type { GatewayPayload } from './protocol'
 import { encodePayload } from './protocol'
 import { deliverDispatch, writeDispatch } from './dispatch'
 import { sendReconnect } from './server'
-import { currentRoleEmitDatabase } from './bus'
+import { currentEmitDatabase } from './bus'
 
 /** Native dispatches supported by the narrow test capture control. */
 export const CONTROL_EVENTS = [
+  'GUILD_MEMBER_ADD',
   'GUILD_MEMBER_UPDATE',
   'GUILD_BAN_ADD',
   'GUILD_BAN_REMOVE',
@@ -32,6 +33,7 @@ export const CONTROL_EVENTS = [
  * `member_id`, mapped to the payload field carrying that member's user ID.
  */
 export const MEMBER_SCOPED_EVENTS = [
+  'GUILD_MEMBER_ADD',
   'GUILD_MEMBER_UPDATE',
   'GUILD_BAN_ADD',
   'GUILD_BAN_REMOVE',
@@ -73,9 +75,12 @@ export function memberScopedUserId(
   // A guild interaction names its invoking user in `member.user`; one whose
   // user is not a guild member carries no subject and never matches.
   if (event === 'INTERACTION_CREATE') return payload.member?.user?.id
-  return ['GUILD_MEMBER_UPDATE', 'GUILD_BAN_ADD', 'GUILD_BAN_REMOVE'].includes(
-    event ?? ''
-  )
+  return [
+    'GUILD_MEMBER_ADD',
+    'GUILD_MEMBER_UPDATE',
+    'GUILD_BAN_ADD',
+    'GUILD_BAN_REMOVE',
+  ].includes(event ?? '')
     ? payload.user?.id
     : event === 'VOICE_STATE_UPDATE'
       ? payload.user_id
@@ -91,9 +96,10 @@ export interface EventControlRequest {
   session_id?: string
   /**
    * Optional exact member selector; every listed event must be one of
-   * {@link MEMBER_SCOPED_EVENTS}. Ban-only policies allow non-members; member,
-   * voice and interaction events require current membership when arming.
-   * Other users pass through.
+   * {@link MEMBER_SCOPED_EVENTS}. Policies made only of ban and member-add
+   * events allow non-members (a joining user is not a member yet); member
+   * update, voice and interaction events require current membership when
+   * arming. Other users pass through.
    */
   member_id?: string
   /**
@@ -510,15 +516,16 @@ export class GatewayEventControls {
     envelope: GatewayPayload<unknown>
   ): boolean {
     this.prune()
-    // Role dispatches have no delivery scope: ignore those produced by
-    // another app database, which never belong to this app's guild.
-    const producer = currentRoleEmitDatabase()
+    // Role and member-add dispatches have no delivery scope: ignore those
+    // produced by another app database, which never belong to this app's guild.
+    const producer = currentEmitDatabase()
     if (
       producer !== undefined &&
       producer !== this.db &&
-      ROLE_SCOPED_EVENTS.includes(
-        envelope.t as (typeof ROLE_SCOPED_EVENTS)[number]
-      )
+      (envelope.t === 'GUILD_MEMBER_ADD' ||
+        ROLE_SCOPED_EVENTS.includes(
+          envelope.t as (typeof ROLE_SCOPED_EVENTS)[number]
+        ))
     )
       return false
     const data = envelope.d as { guild_id?: unknown } | null

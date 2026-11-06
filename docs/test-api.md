@@ -2411,7 +2411,9 @@ The membership transaction commits before exactly one `guild.member.add` is
 emitted on Fauxcord's event bus. The existing Gateway sends `GUILD_MEMBER_ADD`
 with that member object plus `guild_id` to connected clients with the
 `GUILD_MEMBERS` intent (`2`). Membership is immediately readable through REST
-when the event arrives. Joining does not emit `GUILD_CREATE`.
+when the event arrives. Joining does not emit `GUILD_CREATE`. A
+[Gateway capture](#native-member-joins) of `GUILD_MEMBER_ADD` can hold, release
+and replay this dispatch.
 
 **Errors** (no state changes or events):
 
@@ -3801,7 +3803,7 @@ the newly resolved session.
 `MESSAGE_DELETE`,
 `MESSAGE_DELETE_BULK`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
 `MESSAGE_REACTION_REMOVE_ALL`, `MESSAGE_REACTION_REMOVE_EMOJI`,
-`GUILD_MEMBER_UPDATE`, `GUILD_BAN_ADD`, `GUILD_BAN_REMOVE`,
+`GUILD_MEMBER_ADD`, `GUILD_MEMBER_UPDATE`, `GUILD_BAN_ADD`, `GUILD_BAN_REMOVE`,
 `GUILD_ROLE_CREATE`, `GUILD_ROLE_UPDATE`, `GUILD_ROLE_DELETE`, and
 `INTERACTION_CREATE`. Only events that the native producer actually emits are
 captured. Message creation (including
@@ -3809,6 +3811,10 @@ human messages via `POST /_test/channels/:channelId/messages`), single deletion,
 native bulk deletion through the REST endpoint below, reaction addition (including
 human additions through the control above), single reaction removal, and both
 reaction-clear DELETE endpoints have native producers.
+
+For joins, select `GUILD_MEMBER_ADD` (see
+[native member joins](#native-member-joins)). Add `member_id` to match
+`d.user.id`, including a user who has not joined yet.
 
 For bans, select `GUILD_BAN_ADD` and/or `GUILD_BAN_REMOVE`. Native producers
 are `PUT /guilds/:guildId/bans/:userId`, `POST /guilds/:guildId/bulk-ban`, and
@@ -4248,28 +4254,31 @@ handling. Malformed action JSON, duplicate IDs or invalid sequence mode returns
 
 `member_id` narrows a control to one subject user. It uses the same positive
 1–20 digit string format as the scope IDs; null/malformed selectors return
-`400`. If **every selected event is `GUILD_BAN_ADD` or `GUILD_BAN_REMOVE`**, the
-user need not be a current guild member or exist in the users table. This lets
-a controller arm an unban capture after banning removed the user's membership,
-or select a ban target who never joined. If the control also selects
-`GUILD_MEMBER_UPDATE`, `VOICE_STATE_UPDATE` or `INTERACTION_CREATE`, the user must
-be a current member of that guild **when arming**, otherwise creation returns `404`. Membership is
-not rechecked on capture, release or replay: a ban's events remain capturable
-after membership removal. The selector matches the subject user of each event:
+`400`. If **every selected event is `GUILD_MEMBER_ADD`, `GUILD_BAN_ADD` or
+`GUILD_BAN_REMOVE`**, the user need not be a current guild member or exist in the
+users table. This lets a controller arm a join capture before the user joins
+(the capture is armed before the join it must hold), arm an unban capture after
+banning removed the user's membership, or select a ban target who never joined.
+If the control also selects `GUILD_MEMBER_UPDATE`, `VOICE_STATE_UPDATE` or
+`INTERACTION_CREATE`, the user must be a current member of that guild **when
+arming**, otherwise creation returns `404`. Membership is not rechecked on
+capture, release or replay: a ban's events remain capturable after membership
+removal. The selector matches the subject user of each event:
 
 | Event                 | Matched field |
 | --------------------- | ------------- |
+| `GUILD_MEMBER_ADD`    | `d.user.id`   |
 | `GUILD_MEMBER_UPDATE` | `d.user.id`   |
 | `VOICE_STATE_UPDATE`  | `d.user_id`   |
 | `GUILD_BAN_ADD`       | `d.user.id`   |
 | `GUILD_BAN_REMOVE`    | `d.user.id`   |
 | `INTERACTION_CREATE`  | `d.member.user.id` |
 
-`events` may combine these five events (for example holding a user's ban and
-voice disconnect together). Every listed event must be one of these
-user-scoped events; any other event type (messages, reactions) together with
-`member_id` returns `400` with
-`{"message":"member_id requires every event to be one of GUILD_MEMBER_UPDATE, GUILD_BAN_ADD, GUILD_BAN_REMOVE, VOICE_STATE_UPDATE, INTERACTION_CREATE","code":0}`.
+`events` may combine these six events (for example holding a user's ban and
+voice disconnect together, or a join with the member's later updates). Every
+listed event must be one of these user-scoped events; any other event type
+(messages, reactions) together with `member_id` returns `400` with
+`{"message":"member_id requires every event to be one of GUILD_MEMBER_ADD, GUILD_MEMBER_UPDATE, GUILD_BAN_ADD, GUILD_BAN_REMOVE, VOICE_STATE_UPDATE, INTERACTION_CREATE","code":0}`.
 Dispatches of other users never match a selected control and pass through
 untouched.
 
@@ -4375,6 +4384,72 @@ or the initial `GUILD_CREATE.members` to prepare/assert a client's old cache.
 `GUILD_CREATE` requires Guilds intent. Fauxcord sends its existing member list;
 client cache policies can still exclude members or discard updates. These
 controls do not set a discord-bot cache or run its handlers.
+
+### Native member joins
+
+Arm `events: ["GUILD_MEMBER_ADD"]` (optionally with `member_id`, see
+[member selectors](#member-selectors)) to hold, release, replay or merely
+observe the dispatch of a member joining the guild. Typical use: hold a join so
+that another event (for example an invite change) reaches the bot first, then
+release the join. Because the user is not a member until the join happens,
+`member_id` is not required to be a current member, nor even a registered user,
+when arming a policy made of `GUILD_MEMBER_ADD` and ban events. Combining it
+with `GUILD_MEMBER_UPDATE`, `VOICE_STATE_UPDATE` or `INTERACTION_CREATE` keeps
+those events' rule (the user must already be a member, otherwise `404`).
+
+Native producers:
+
+- `POST /_test/guilds/:guildId/members/:userId`, with or without
+  `invite_code`. The membership (and the invite `uses` increment) is committed
+  and readable through REST while the dispatch is held; the held envelope is the
+  payload the bot would have received (the member object plus `guild_id`).
+  Rejected joins (`404`, `409`, `400`) emit nothing to capture.
+- The same dispatch for any other native producer is captured by the identical
+  mechanism, but it only has a capturable recipient when a session owning the
+  guild is connected. `POST /_test/setup` (bot and owner members of a listed
+  guild; the setup token is new, so no session of it exists yet) and the bot
+  join control (the joining setup sees its member inside `GUILD_CREATE` and is
+  excluded from `GUILD_MEMBER_ADD`) therefore produce no capturable
+  `GUILD_MEMBER_ADD`. The OAuth `PUT /guilds/:guildId/members/:userId` never
+  emits `GUILD_MEMBER_ADD` (a new member is inserted silently), so there is
+  nothing to capture; for an existing member it only emits the ordinary
+  `GUILD_MEMBER_UPDATE`, which a `GUILD_MEMBER_UPDATE` capture handles as before.
+
+A join has no delivery scope of its own, so a control captures only joins
+produced by the app/database that owns it: a join performed in another assembled
+Fauxcord app that happens to share the guild and user IDs is neither captured
+nor counted against `limit`. Every producer above records its database for this
+purpose; payloads and emission order are unchanged.
+
+The dispatch requires the Guild Members intent: a session without it receives
+and captures nothing. Only the selected session is held; other sessions of the
+same setup receive their own ordinary dispatch immediately. Capture stores an
+immutable snapshot of the member object (user, nickname, roles, `joined_at`,
+mute/deaf, flags). Release and replay use that snapshot even after the member
+leaves or changes; they never touch the database. Held joins are delivered in
+the order of the requested `event_ids` (pass them in capture order for native
+order); omitted ones stay held. Limits, TTL, byte budget, ownership keys,
+`sequence: "original"`, `application_ack`, disconnect/resume gating and cleanup
+behave exactly as for `GUILD_MEMBER_UPDATE`.
+
+```bash
+# Arm before the user joins.
+curl -X POST http://localhost:3000/_test/gateway-event-controls \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "guild_id": "222222222222222222",
+    "bot_id": "111111111111111111",
+    "events": ["GUILD_MEMBER_ADD"],
+    "member_id": "555555555555555555",
+    "hold": true
+  }'
+
+# The join commits but the bot is not told; do the other work, then release.
+curl -X POST http://localhost:3000/_test/guilds/222222222222222222/members/555555555555555555 \
+  -H 'Content-Type: application/json' -d '{"invite_code": "AbCd1234"}'
+curl -X POST http://localhost:3000/_test/gateway-event-controls/CONTROL_ID/release \
+  -H 'Content-Type: application/json' -d '{"event_ids":["HELD_EVENT_ID"]}'
+```
 
 ### Transport observation and explicit application acknowledgement
 

@@ -13,7 +13,7 @@ import { randomBytes } from 'node:crypto'
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
 import { formatStoredTimestamp, toDiscordTimestamp } from '../timestamp'
-import { gatewayBus } from '../gateway/bus'
+import { emitMemberAddEvent, gatewayBus } from '../gateway/bus'
 import { buildGuildCreatePayload, isValidAfkChannel } from './guilds'
 import { listVoiceRegions } from './catalog'
 import {
@@ -555,7 +555,7 @@ export function setupTestEnvironment(
         ).run(guildId, userId)
 
         pendingEvents.push(() => {
-          gatewayBus.emit('guild.member.add', {
+          emitMemberAddEvent(db, {
             guildId,
             member: getGuildMember(db, guildId, userId) as unknown as Record<
               string,
@@ -574,7 +574,7 @@ export function setupTestEnvironment(
         ).run(guildId, ownerId)
         if (botPresent)
           pendingEvents.push(() => {
-            gatewayBus.emit('guild.member.add', {
+            emitMemberAddEvent(db, {
               guildId,
               member: getGuildMember(db, guildId, ownerId) as unknown as Record<
                 string,
@@ -1088,7 +1088,7 @@ export function joinTestGuildMember(
 
   const result = join()
   if (typeof result !== 'string') {
-    gatewayBus.emit('guild.member.add', {
+    emitMemberAddEvent(db, {
       guildId,
       member: result as unknown as Record<string, unknown>,
     })
