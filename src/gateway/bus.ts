@@ -220,8 +220,23 @@ export const gatewayBus = new TypedGatewayBus()
 // eslint-disable-next-line unicorn/no-top-level-side-effects -- one-time setup on the module's own singleton, not a shared/exported binding mutation.
 gatewayBus.setMaxListeners(50)
 
-/** Database whose service is synchronously emitting a role event, if any. */
-let roleEmitDatabase: Database | undefined
+/** Database whose service is synchronously emitting a scope-less event, if any. */
+let emitDatabase: Database | undefined
+
+/**
+ * Runs a synchronous emit while recording the producing database.
+ * @param db - Database whose service produced the event
+ * @param emit - Emission whose listeners run synchronously inside this call
+ */
+function withEmitDatabase(db: Database, emit: () => void): void {
+  const previous = emitDatabase
+  emitDatabase = db
+  try {
+    emit()
+  } finally {
+    emitDatabase = previous
+  }
+}
 
 /**
  * Emits a role event while recording the producing database. Role events carry
@@ -235,16 +250,25 @@ let roleEmitDatabase: Database | undefined
 export function emitRoleEvent<
   K extends 'guild.role.create' | 'guild.role.update' | 'guild.role.delete',
 >(db: Database, event: K, payload: GatewayBusEvents[K]): void {
-  const previous = roleEmitDatabase
-  roleEmitDatabase = db
-  try {
-    gatewayBus.emit(event, payload)
-  } finally {
-    roleEmitDatabase = previous
-  }
+  withEmitDatabase(db, () => gatewayBus.emit(event, payload))
 }
 
-/** Returns the database producing the role event being dispatched, if known. */
-export function currentRoleEmitDatabase(): Database | undefined {
-  return roleEmitDatabase
+/**
+ * Emits `guild.member.add` while recording the producing database, exactly
+ * like {@link emitRoleEvent}: the event has no delivery scope of its own, so
+ * scoped test captures use the recorded database to ignore joins produced by
+ * another app database. The payload and delivery are unchanged.
+ * @param db - Database whose service produced the join
+ * @param payload - Event payload
+ */
+export function emitMemberAddEvent(
+  db: Database,
+  payload: GatewayBusEvents['guild.member.add']
+): void {
+  withEmitDatabase(db, () => gatewayBus.emit('guild.member.add', payload))
+}
+
+/** Returns the database producing the scope-less event being dispatched, if known. */
+export function currentEmitDatabase(): Database | undefined {
+  return emitDatabase
 }

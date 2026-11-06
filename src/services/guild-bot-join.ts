@@ -1,6 +1,6 @@
 /** Test-control service that adds a setup's bot to an existing guild. */
 import type { Database } from '../db'
-import { gatewayBus } from '../gateway/bus'
+import { emitMemberAddEvent, gatewayBus } from '../gateway/bus'
 import { toDiscordTimestamp } from '../timestamp'
 import { buildGuildCreatePayload } from './guilds'
 import { getGuildMember, type GuildMemberObject } from './guild-members'
@@ -120,7 +120,7 @@ export function joinTestGuildBot(
       guild: guild as unknown as Record<string, unknown>,
       scope: { db, botId: join.botId, token: join.token },
     })
-  gatewayBus.emit('guild.member.add', {
+  emitMemberAddEvent(db, {
     guildId,
     member: member as unknown as Record<string, unknown>,
     exceptScope: { db, token: join.token },
