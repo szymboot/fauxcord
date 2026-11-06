@@ -1125,6 +1125,8 @@ export interface TestInviteRequest {
   temporary?: boolean | null
   /** Emit INVITE_DELETE when `max_uses` exhaustion deletes it (default true). */
   delete_event_on_exhaustion?: boolean | null
+  /** Validated ISO 8601 creation time with a timezone, not in the future. */
+  created_at?: string | null
 }
 
 /** Rejection reasons for a human-created invite fixture. */
@@ -1168,6 +1170,10 @@ export function createTestInvite(
           temporary: request.temporary ?? undefined,
           deleteEventOnExhaustion:
             request.delete_event_on_exhaustion ?? undefined,
+          createdAt:
+            typeof request.created_at === 'string'
+              ? new Date(request.created_at)
+              : undefined,
         })
       : 'NOT_MEMBER'
   })()

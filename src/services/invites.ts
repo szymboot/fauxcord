@@ -102,13 +102,68 @@ function toIso(value: string): string {
 }
 
 /**
- * Formats a Date as a SQLite datetime string ("YYYY-MM-DD HH:MM:SS", UTC),
- * the storage format of `invites.created_at`.
+ * Formats a Date as a SQLite datetime string (UTC), the storage format of
+ * `invites.created_at`.
  * @param date - Date to format
- * @returns SQLite datetime string truncated to whole seconds
+ * @param keepMilliseconds - Keep the millisecond part ("YYYY-MM-DD
+ * HH:MM:SS.mmm") instead of truncating to whole seconds; used for explicit
+ * fixture timestamps so their expiry boundary is exact
+ * @returns SQLite datetime string
  */
-function toSqliteTimestamp(date: Date): string {
-  return date.toISOString().slice(0, 19).replace('T', ' ')
+function toSqliteTimestamp(date: Date, keepMilliseconds = false): string {
+  return date
+    .toISOString()
+    .slice(0, keepMilliseconds ? 23 : 19)
+    .replace('T', ' ')
+}
+
+/**
+ * Parses an `invites.created_at` SQLite datetime into epoch milliseconds.
+ * @param createdAt - SQLite datetime string (UTC)
+ * @returns Epoch milliseconds
+ */
+function createdAtMs(createdAt: string): number {
+  return new Date(`${createdAt.replace(' ', 'T')}Z`).getTime()
+}
+
+/**
+ * Whether an invite has reached its `max_age`: from the instant
+ * `now >= created_at + max_age` on Fauxcord's clock. `max_age: 0` never expires.
+ * This is the single expiry rule shared by listings, lookups, deletion and
+ * joins.
+ * @param invite - Invite fields needed for the check
+ * @param nowMs - Current time in epoch milliseconds
+ * @returns true when the invite is expired
+ */
+function isInviteExpired(
+  invite: Pick<InviteRow, 'created_at' | 'max_age'>,
+  nowMs: number
+): boolean {
+  return (
+    invite.max_age > 0 &&
+    nowMs >= createdAtMs(invite.created_at) + invite.max_age * 1000
+  )
+}
+
+/**
+ * Removes every expired invite (and, by cascade, its target-users data).
+ * Discord drops an invite once it reaches `max_age` and sends no
+ * INVITE_DELETE for it, so this deletes rows directly and publishes nothing;
+ * it must never go through the publishing deletion path. Every public read or
+ * write in this module runs it first, so all routes agree on what exists.
+ * @param db - Database
+ */
+export function purgeExpiredInvites(db: Database): void {
+  const now = Date.now()
+  const candidates = db
+    .prepare('SELECT code, created_at, max_age FROM invites WHERE max_age > 0')
+    .all() as Pick<InviteRow, 'code' | 'created_at' | 'max_age'>[]
+  const expired = candidates.filter((row) => isInviteExpired(row, now))
+  if (expired.length === 0) return
+  const remove = db.prepare('DELETE FROM invites WHERE code = ?')
+  db.transaction(() => {
+    for (const row of expired) remove.run(row.code)
+  })()
 }
 
 /**
@@ -241,6 +296,7 @@ export function getChannelInvites(
   db: Database,
   channelId: string
 ): InviteObject[] {
+  purgeExpiredInvites(db)
   const rows = db
     .prepare('SELECT * FROM invites WHERE channel_id = ? ORDER BY created_at')
     .all(channelId) as InviteRow[]
@@ -262,6 +318,11 @@ export interface InviteCreateParams {
    * INVITE_DELETE. Defaults to true; false keeps the deletion silent.
    */
   deleteEventOnExhaustion?: boolean
+  /**
+   * Creation time (defaults to now, truncated to whole seconds); an explicit
+   * value keeps its milliseconds. Lets fixtures create expired invites.
+   */
+  createdAt?: Date
 }
 
 /** A committed invite deletion awaiting its INVITE_DELETE dispatch. */
@@ -281,6 +342,7 @@ export function createInvite(
   db: Database,
   params: InviteCreateParams
 ): InviteObject {
+  purgeExpiredInvites(db)
   const code = generateInviteCode(db)
   // created_at comes from Fauxcord's JS clock (not SQLite's datetime('now')),
   // so invite expiry follows the same clock as every other Fauxcord timestamp.
@@ -295,7 +357,9 @@ export function createInvite(
     params.maxAge ?? 86_400,
     params.maxUses ?? 0,
     params.temporary ? 1 : 0,
-    toSqliteTimestamp(new Date()),
+    params.createdAt
+      ? toSqliteTimestamp(params.createdAt, true)
+      : toSqliteTimestamp(new Date()),
     params.deleteEventOnExhaustion === false ? 0 : 1
   )
 
@@ -347,10 +411,7 @@ export function consumeInviteUse(
   const row = db.prepare('SELECT * FROM invites WHERE code = ?').get(code) as
     InviteRow | undefined
   if (row?.guild_id !== guildId) return false
-  if (row.max_age > 0) {
-    const created = new Date(`${row.created_at.replace(' ', 'T')}Z`).getTime()
-    if (Date.now() >= created + row.max_age * 1000) return false
-  }
+  if (isInviteExpired(row, Date.now())) return false
   if (row.max_uses > 0 && row.uses >= row.max_uses) return false
 
   db.prepare('UPDATE invites SET uses = uses + 1 WHERE code = ?').run(code)
@@ -386,6 +447,7 @@ export function publishInviteDelete(
  * @returns Invite object, or null
  */
 export function getInvite(db: Database, code: string): InviteObject | null {
+  purgeExpiredInvites(db)
   const row = db.prepare('SELECT * FROM invites WHERE code = ?').get(code) as
     InviteRow | undefined
   return row ? toInviteObject(db, row) : null
@@ -404,6 +466,7 @@ export function deleteInvite(db: Database, code: string): InviteObject | null {
   if (db.inTransaction) {
     throw new Error('deleteInvite must not run inside an open transaction')
   }
+  purgeExpiredInvites(db)
   const deleted = db.transaction(() => {
     const row = db.prepare('SELECT * FROM invites WHERE code = ?').get(code) as
       InviteRow | undefined
@@ -432,6 +495,7 @@ export function deleteInvite(db: Database, code: string): InviteObject | null {
  * @returns Array of invite objects
  */
 export function getGuildInvites(db: Database, guildId: string): InviteObject[] {
+  purgeExpiredInvites(db)
   const rows = db
     .prepare('SELECT * FROM invites WHERE guild_id = ? ORDER BY created_at')
     .all(guildId) as InviteRow[]
@@ -474,6 +538,7 @@ export function getInviteTargetUsersCsv(
   db: Database,
   code: string
 ): string | null {
+  purgeExpiredInvites(db)
   const invite = db.prepare('SELECT 1 FROM invites WHERE code = ?').get(code)
   if (!invite) return null
 
@@ -533,16 +598,27 @@ function persistTargetUserIds(
  * Sets (replaces) the target users for an invite. The mock processes the
  * file synchronously and immediately marks the job COMPLETED — Fauxcord is
  * a deterministic mock and does not simulate asynchronous delay.
+ *
+ * The invite is re-checked at commit time: callers verify it exists before
+ * awaiting the uploaded file, so it may have expired or been deleted meanwhile,
+ * in which case nothing is written.
  * @param db - Database
- * @param code - Invite code (caller must have already verified the invite exists)
+ * @param code - Invite code
  * @param userIds - The validated user IDs parsed from the uploaded CSV
+ * @returns true when the target users were stored, false when the invite no
+ * longer exists (deleted or expired)
  */
 export function setInviteTargetUsers(
   db: Database,
   code: string,
   userIds: string[]
-): void {
+): boolean {
+  purgeExpiredInvites(db)
+  if (!db.prepare('SELECT 1 FROM invites WHERE code = ?').get(code)) {
+    return false
+  }
   persistTargetUserIds(db, code, userIds)
+  return true
 }
 
 /**
@@ -558,6 +634,7 @@ export function addInviteTargetUsers(
   code: string,
   userIds: string[]
 ): boolean {
+  purgeExpiredInvites(db)
   const invite = db.prepare('SELECT 1 FROM invites WHERE code = ?').get(code)
   if (!invite) return false
   const merged = new Set(currentTargetUserIds(db, code))
@@ -579,6 +656,7 @@ export function removeInviteTargetUsers(
   code: string,
   userIds: string[]
 ): boolean {
+  purgeExpiredInvites(db)
   const invite = db.prepare('SELECT 1 FROM invites WHERE code = ?').get(code)
   if (!invite) return false
   const toRemove = new Set(userIds)
@@ -599,6 +677,7 @@ export function getInviteTargetUsersJobStatus(
   db: Database,
   code: string
 ): TargetUsersJobStatusObject | null {
+  purgeExpiredInvites(db)
   const invite = db.prepare('SELECT 1 FROM invites WHERE code = ?').get(code)
   if (!invite) return null
 

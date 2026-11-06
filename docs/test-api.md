@@ -2448,9 +2448,16 @@ membership, no `uses` change and no event.
 - **Expiry** counts `max_age` seconds from the invite's `created_at` on
   Fauxcord's own clock (the one that stamps `created_at`, `expires_at` and
   `joined_at`); `max_age: 0` never expires. An invite is unusable from the
-  instant `now >= created_at + max_age`. Expired invites are *not* removed from
-  listings or `GET /invites/:code` (unchanged behaviour); they just stop
-  accepting joins.
+  instant `now >= created_at + max_age`. As on Discord, an expired invite is
+  removed: it is absent from `GET /guilds/:id/invites`,
+  `GET /channels/:id/invites` and `GET /invites/:code` (`404` / `10006`), its
+  target-users data goes with it, and `DELETE /invites/:code` on it answers
+  `404` / `10006` like an unknown invite. Joins through it get `10006` too.
+  Expiry emits **no** event (no `INVITE_DELETE`, as Discord sends none when an
+  invite expires). Fauxcord drops expired rows lazily, the next time any invite
+  route reads them, so no timer is involved. To get an already-expired invite
+  without waiting, create it with a past `created_at` (see the
+  [human invite fixture](#post-_testchannelschannelidinvites--create-an-invite-as-a-human)).
 - **`max_uses`**: when a join makes `uses` reach `max_uses` (> 0), the invite is
   deleted in the same transaction, as on Discord. It is then absent from
   `GET /guilds/:id/invites`, `GET /channels/:id/invites` and
@@ -2525,6 +2532,7 @@ curl -X POST http://localhost:3000/_test/channels/333333333333333333/invites \
 | `max_age`            | —        | Seconds until expiry, integer `0`–`5184000`; `0` never expires. Default `86400`. `null` means the default.   |
 | `max_uses`           | —        | Integer `0`–`100`; `0` is unlimited. Default `0`. `null` means the default.                                  |
 | `temporary`          | —        | Boolean. Default `false`. Recorded only; temporary membership is not modelled.                               |
+| `created_at`         | —        | ISO 8601 timestamp **with a timezone** (e.g. `2020-01-01T00:00:00Z`, `+02:00` offsets accepted), not in the future; `null` or absent means now. Stored with millisecond precision (an invite created without it is stamped to the whole second) and echoed (normalized to UTC) as the response's `created_at`; `expires_at` is `created_at + max_age`. A `created_at` older than `max_age` creates an invite that is **already expired**: it is returned by this call but never listed, and joins through it get `10006`. |
 | `delete_event_on_exhaustion` | — | Boolean. Default `true`; `null` means the default. Whether the deletion caused by a join that makes `uses` reach `max_uses` publishes `INVITE_DELETE`. `false` keeps that deletion silent. See [`INVITE_DELETE` Gateway event](#invite_delete-gateway-event). Has no effect on `DELETE /invites/:code`, which always publishes. |
 
 **Response**: `201 Created` with the same invite object as the native route
@@ -2541,7 +2549,7 @@ not part of the response). No Gateway event is emitted.
 | `404`  | `10013` | Unknown User.                                                           |
 | `400`  | `0`     | The inviter is a Bot (`User must not be a bot`).                        |
 | `404`  | `10007` | The inviter is not a member of the channel's Guild (Unknown Member).    |
-| `400`  | `50035` | Missing/non-string `inviter_id`, or invalid `max_age`/`max_uses`/`temporary`/`delete_event_on_exhaustion`. |
+| `400`  | `50035` | Missing/non-string `inviter_id`, or invalid `max_age`/`max_uses`/`temporary`/`delete_event_on_exhaustion`, or a `created_at` that is not a string, lacks a timezone, is not a valid date or is in the future. |
 | `400`  | `0`     | Malformed JSON or a body that is not a JSON object.                     |
 
 Typical attribution test: create the invite with this control, record

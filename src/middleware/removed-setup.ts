@@ -1,6 +1,7 @@
 import type { MiddlewareHandler } from 'hono'
 import type { Database } from '../db'
 import { DiscordErrorCode, discordError } from '../errors'
+import { purgeExpiredInvites } from '../services/invites'
 import type { AppEnv } from './auth'
 
 /**
@@ -48,6 +49,8 @@ function pathGuildId(db: Database, path: string): string | undefined {
   }
   const invite = /^\/invites\/([^/]+)/.exec(path)
   if (!invite) return undefined
+  // Expired invites no longer exist, so they must not resolve to a guild.
+  purgeExpiredInvites(db)
   const row = db
     .prepare(
       `SELECT c.guild_id FROM invites i JOIN channels c ON c.id = i.channel_id

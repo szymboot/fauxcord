@@ -4,12 +4,14 @@
 
 import { validateInviteCreate } from './channel'
 import { requiredError, typeError } from './common'
+import { normalizeMemberJoinDate } from './member-join-date'
 
 /**
  * Validates a human-created invite fixture body. max_age/max_uses share the
  * native invite limits; inviter_id must be a string (Snowflakes lose precision
  * as JSON numbers); temporary and delete_event_on_exhaustion must be
- * booleans when present.
+ * booleans when present; created_at (null means now) must be an ISO 8601
+ * timestamp with a timezone that is not in the future.
  * @param payload - Parsed JSON object (untrusted)
  * @returns Field-keyed error map (empty when valid)
  */
@@ -41,6 +43,30 @@ export function validateTestInvite(
     typeof payload.delete_event_on_exhaustion !== 'boolean'
   ) {
     errors.delete_event_on_exhaustion = { _errors: [typeError('boolean')] }
+  }
+  const createdAt = payload.created_at
+  if (createdAt !== undefined && createdAt !== null) {
+    if (typeof createdAt !== 'string') {
+      errors.created_at = { _errors: [typeError('string')] }
+    } else if (normalizeMemberJoinDate(createdAt) === null) {
+      errors.created_at = {
+        _errors: [
+          {
+            code: 'BASE_TYPE_BAD_FORMAT',
+            message: 'Must be a valid ISO8601 timestamp with a timezone.',
+          },
+        ],
+      }
+    } else if (Date.parse(createdAt) > Date.now()) {
+      errors.created_at = {
+        _errors: [
+          {
+            code: 'DATE_RANGE_INVALID',
+            message: 'Must not be in the future.',
+          },
+        ],
+      }
+    }
   }
   return errors
 }
