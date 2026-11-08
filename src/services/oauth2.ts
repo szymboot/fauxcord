@@ -324,3 +324,60 @@ export function getOAuth2Me(
       }
     : null
 }
+
+/** Parameters for a user-bound token issued by the test control. */
+export interface UserTokenParams {
+  clientId: string
+  userId: string
+  scope: string
+  expiresIn: number
+}
+
+/**
+ * Issues a user-bound access token (with a refresh token) for an existing user,
+ * bypassing the authorization-code flow. The client is created like the other
+ * grants do. When the client ID is the user ID of a registered bot (the mock's
+ * application ID convention), an unlinked client is linked to that bot's
+ * setup so the token is removed together with the setup.
+ * @param db - Database
+ * @param params - Client, user, scope and lifetime of the token
+ * @returns Token response
+ */
+export function createUserBoundToken(
+  db: Database,
+  params: UserTokenParams
+): TokenResponse {
+  const { clientId, userId, scope, expiresIn } = params
+  db.prepare(
+    'INSERT OR IGNORE INTO oauth2_clients (client_id, client_secret) VALUES (?, ?)'
+  ).run(clientId, 'mock_secret')
+  db.prepare(
+    `UPDATE oauth2_clients
+     SET bot_token = (SELECT token FROM bots WHERE user_id = ? LIMIT 1)
+     WHERE client_id = ? AND bot_token IS NULL`
+  ).run(clientId, clientId)
+
+  const accessToken = generateToken('mock_access_token')
+  const refreshToken = generateToken('mock_refresh_token')
+  const expiresAt = new Date(Date.now() + expiresIn * 1000)
+
+  db.prepare(
+    `INSERT INTO oauth2_access_tokens (token, client_id, user_id, scope, expires_at, refresh_token)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(
+    accessToken,
+    clientId,
+    userId,
+    scope,
+    expiresAt.toISOString(),
+    refreshToken
+  )
+
+  return {
+    access_token: accessToken,
+    token_type: 'Bearer',
+    expires_in: expiresIn,
+    refresh_token: refreshToken,
+    scope,
+  }
+}

@@ -31,6 +31,7 @@ import {
 } from '../validators/application-command'
 import type { ApplicationCommandCreatePayload } from '../validators/application-command'
 import { getGuild } from '../services/guilds'
+import { canEditCommandPermissions } from '../services/command-permission-access'
 
 /** Shared 400 body for a name-collision on create/update */
 const DUPLICATE_NAME_ERROR = validationError({
@@ -492,15 +493,30 @@ export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
 
       const payload = await parseJsonBody(c)
       const errors = validateCommandPermissions(payload.permissions)
-      return Object.keys(errors).length > 0
-        ? c.json(validationError(errors).body, 400)
+      if (Object.keys(errors).length > 0)
+        return c.json(validationError(errors).body, 400)
+
+      const entries = payload.permissions as CommandPermissionEntry[]
+      // User-bound Bearer tokens act as their user. Client-credentials tokens
+      // (no user) and bot tokens keep their access for mock compatibility.
+      const userId = c.get('accessToken')?.user_id
+      return userId &&
+        !canEditCommandPermissions(db, guildId, command, userId, entries)
+        ? c.json(
+            discordError(
+              DiscordErrorCode.MISSING_PERMISSIONS,
+              'Missing Permissions',
+              403
+            ).body,
+            403
+          )
         : c.json(
             setCommandPermissions(
               db,
               applicationId,
               guildId,
               commandId,
-              payload.permissions as CommandPermissionEntry[]
+              entries
             )
           )
     }

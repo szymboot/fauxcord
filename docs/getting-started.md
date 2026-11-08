@@ -381,11 +381,45 @@ Tokens exchanged through Fauxcord's authorization-code flow work with the same
 application and scope checks. A bot token used as a Bearer credential is invalid.
 Permission tokens do not authorize command CRUD.
 
+#### Acting as a user
+
+To exercise the user-based rules Discord applies, issue a token for a chosen
+existing user with [`POST /_test/oauth2/tokens`](./test-api.md#post-_testoauth2tokens--issue-a-bearer-token-for-a-chosen-user)
+(`client_id`, `user_id`, `scope`, optional `expires_in`). For `PUT .../commands/{command_id}/permissions`,
+a token with a user (`user_id` set: this control or the authorization-code flow) is
+rejected with `403` and code `50013` (Missing Permissions), leaving the stored
+overrides unchanged, unless all of these hold. They run after the scope,
+application, guild and command checks and payload validation:
+
+1. The user is a guild member who is the owner or has `ADMINISTRATOR`, or has both
+   `MANAGE_GUILD` and `MANAGE_ROLES` (guild-level permissions: `@everyone` plus
+   assigned roles).
+2. The user can run the command. The owner and Administrators always can.
+   Otherwise Fauxcord resolves the command's currently stored overrides for the
+   user: a user override first, then the user's roles (any role allow wins over
+   role denies), then the `@everyone` override whose ID is the guild ID. With no
+   matching override it falls back to `default_member_permissions`: `null` means
+   everyone, `"0"` nobody (without Administrator), anything else requires all of
+   those bits. Channel overrides are ignored. This precedence is Fauxcord's
+   approximation of Discord's documented "has the ability to run the command".
+3. Every role entry in the payload other than `@everyone` exists in the guild and
+   is strictly below the user's highest role (the owner is exempt from the
+   hierarchy, but a role that does not exist is still rejected; a member with
+   no role besides `@everyone` ranks as `@everyone`). Role order follows
+   `position`, then the lower ID. User and channel entries are not checked
+   further: Discord does not document a rule for them.
+
+The authorization-code flow always authorizes the fixed user
+`2222222222222222222`, who is not a guild member unless you add them, so its
+tokens are rejected for edits until you join that user or make them the owner;
+use the token control to pick another user. Tokens without a user (client credentials) and the owning bot keep their current
+access to permission GET/PUT, and permission GET routes keep their current
+authorization, as mock compatibility.
+
 These are emulator conventions: Fauxcord's token endpoint accepts `client_id`
 in the form body, auto-registers unknown clients, and does not verify client
-secrets. Its client-credentials tokens have no user identity, and command
-permission routes do not evaluate the authorizing user's guild permissions or
-role hierarchy. Existing owning Bot access to permission GET/PUT is retained
+secrets. Its client-credentials tokens have no user identity and skip the
+user checks above. Existing owning Bot access to permission GET/PUT is retained
 for compatibility. On [Discord](https://docs.discord.com/developers/interactions/application-commands#permissions),
 permission edits require a Bearer token authorized by a user with sufficient
 guild/resource permissions. Discord's [client-credentials flow](https://docs.discord.com/developers/topics/oauth2#client-credentials-grant)
