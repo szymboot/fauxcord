@@ -49,6 +49,8 @@ import type {
   SetupRequest,
   TestInteractionRequest,
 } from '../services/test-control'
+import { createUserBoundToken } from '../services/oauth2'
+import { validateTestOAuthToken } from '../validators/test-oauth-token'
 import { getChannelWebhooks } from '../services/webhooks'
 import {
   expireInteractionToken,
@@ -497,6 +499,24 @@ export function createTestRoutes(
     return result === 'BOT_USER'
       ? c.json({ message: 'User must not be a bot', code: 0 }, 400)
       : c.json(result)
+  })
+
+  // POST /_test/oauth2/tokens — Issue a Bearer token bound to an existing user
+  app.post('/_test/oauth2/tokens', async (c) => {
+    const parsed: unknown = await c.req.json().catch(() => undefined)
+    const validation = validateTestOAuthToken(parsed)
+    if (!validation)
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    if (!validation.ok)
+      return c.json(validationError(validation.errors).body, 400)
+    return db
+      .prepare('SELECT 1 FROM users WHERE id = ?')
+      .get(validation.value.userId)
+      ? c.json(createUserBoundToken(db, validation.value), 201)
+      : c.json(
+          discordError(DiscordErrorCode.UNKNOWN_USER, 'Unknown User', 404).body,
+          404
+        )
   })
 
   // POST /_test/guilds/:guildId/members/:userId — Join an existing non-bot user

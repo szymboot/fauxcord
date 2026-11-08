@@ -145,6 +145,16 @@ describe.each(['/api/v10', '/api', ''])(
       })
       expect(exchanged.status).toBe(200)
       const token = (await exchanged.json()) as TokenResponse
+      // The flow's fixed user is user-bound: it can edit only once it owns the
+      // guild (see application-command-permissions-user.test.ts for the rules).
+      const denied = await requestPermissions(
+        'edit',
+        `Bearer ${token.access_token}`
+      )
+      expect(denied.status).toBe(403)
+      context.db
+        .prepare('UPDATE guilds SET owner_id = ?')
+        .run('2222222222222222222')
       const response = await requestPermissions(
         'edit',
         `Bearer ${token.access_token}`

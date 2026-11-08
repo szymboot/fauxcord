@@ -2367,6 +2367,53 @@ works through the same sequence. This lets a client's prior member snapshot
 hold the old global name until the native update arrives. Socket delivery alone
 does not prove that the consuming bot's callback has completed.
 
+
+## `POST /_test/oauth2/tokens` — Issue a Bearer token for a chosen user
+
+Issues an OAuth2 access token (with a refresh token) bound to an **existing
+user**, so a test can act as a specific dashboard user without the fixed
+`/oauth2/authorize` identity (`2222222222222222222`). Like other test controls,
+it requires no Authorization header.
+
+```bash
+curl -X POST http://localhost:3000/_test/oauth2/tokens \
+  -H "Content-Type: application/json" \
+  -d '{"client_id":"111111111111111111","user_id":"555555555555555555",
+       "scope":"identify applications.commands.permissions.update"}'
+```
+
+```json
+{
+  "access_token": "mock_access_token_…",
+  "token_type": "Bearer",
+  "expires_in": 604800,
+  "scope": "identify applications.commands.permissions.update",
+  "refresh_token": "mock_refresh_token_…"
+}
+```
+
+| Field        | Required | Description                                                                                        |
+| ------------ | -------- | -------------------------------------------------------------------------------------------------- |
+| `client_id`  | ✅       | OAuth2 client (application) ID. An unknown client is created, like the other grants do.            |
+| `user_id`    | ✅       | ID of an existing user (register humans with `POST /_test/users`). Unknown users return `404` / `10013`. |
+| `scope`      | ✅       | Space-separated scopes: one or more printable, non-space ASCII names separated by single spaces.   |
+| `expires_in` | —        | Lifetime in seconds, an integer from `1` to `2592000` (30 days). Defaults to `604800` (7 days).    |
+
+The response is `201` with a standard token response. Missing or malformed
+fields, an unsupported field or a non-object body return `400` (field errors use
+code `50035`) and issue nothing. The token works as `Authorization: Bearer …`
+(for example `GET /oauth2/@me` reports the chosen user), expires after
+`expires_in`, and `POST /oauth2/token/revoke` revokes it by access or refresh
+token. When `client_id` is the user ID of a registered bot (Fauxcord's
+application ID convention), the client is linked to that setup, so the token is
+deleted with `DELETE /_test/setup/:token` like other OAuth2 tokens of the setup.
+`/oauth2/authorize`, `authorization_code` and `client_credentials` are unchanged;
+client-credentials tokens still have no user.
+
+With the `applications.commands.permissions.update` scope, a user-bound token
+authorizes command permission edits subject to that user's guild permissions;
+see [OAuth command permission overrides](./getting-started.md#oauth-command-permission-overrides).
+
 ---
 
 ## `PATCH /_test/guilds/:guildId/members/:userId` — Prepare member dates
