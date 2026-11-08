@@ -6,9 +6,11 @@ import { generateSnowflake } from '../snowflake'
 import {
   isRestFaultChannelEdit,
   isRestFaultGuildChannelCreatePath,
+  isRestFaultApplicationScoped,
   isRestFaultGuildLeave,
   isRestFaultPagePath,
   normalizeRestFaultQuery,
+  parseRestFaultApplicationCommandSelector,
   parseRestFaultInteractionSelector,
   type RestFaultRequest,
 } from '../validators/rest-fault'
@@ -422,6 +424,22 @@ function resolveRestFaultScope(
   )
   if (interactionId !== undefined)
     return resolveInteractionFaultScope(db, interactionId)
+  const applicationCommand = parseRestFaultApplicationCommandSelector(
+    request.method,
+    request.path
+  )
+  if (applicationCommand) {
+    // The guild must exist and be owned by the bot that is the path's application.
+    const guild = db
+      .prepare(
+        `SELECT g.id, g.bot_token FROM guilds g WHERE g.id = ?
+        AND EXISTS (SELECT 1 FROM bots b WHERE b.token = g.bot_token
+          AND b.user_id = ?)`
+      )
+      .get(applicationCommand.guildId, applicationCommand.applicationId) as
+      { id: string; bot_token: string } | undefined
+    return guild ? { guild, channelId: null, ownerBound: true } : undefined
+  }
   const parts = request.path.split('/')
   const channelId = parts[1] === 'channels' ? parts[2] : null
   const channelEdit = isRestFaultChannelEdit(request.method, request.path)
@@ -446,7 +464,14 @@ function resolveRestFaultScope(
             : parts[2]
         ) as { id: string; bot_token: string } | undefined)
   return guild?.id
-    ? { guild, channelId, ownerBound: channelEdit || guildLeave }
+    ? {
+        guild,
+        channelId,
+        ownerBound:
+          channelEdit ||
+          guildLeave ||
+          isRestFaultApplicationScoped(request.method, request.path),
+      }
     : undefined
 }
 
@@ -585,16 +610,23 @@ export function resolveInteractionFaultTarget(
     : undefined
 }
 
-/** Atomically consumes one matching attempt, with no ordinary route side effects. */
+/**
+ * Atomically consumes one matching attempt, with no ordinary route side
+ * effects. `clientId` is the OAuth2 client of a Bearer-authenticated caller;
+ * it only matters for application-scoped selectors, whose owning bot is the
+ * application with that ID.
+ */
 export function consumeRestFault(
   db: Database,
   method: string,
   path: string,
   botToken?: string,
   search = new URLSearchParams(),
-  recipientId?: string
+  recipientId?: string,
+  clientId?: string
 ): RestFault | undefined {
   pruneRestFaults(db)
+  const applicationScoped = isRestFaultApplicationScoped(method, path)
   let query = ''
   if (method === 'GET' && isRestFaultPagePath(path)) {
     const values: Record<string, string> = {}
@@ -617,11 +649,16 @@ export function consumeRestFault(
     WHERE id = (
       SELECT f.id FROM test_rest_faults f JOIN guilds g ON g.id = f.guild_id
       WHERE f.method = ? AND f.path = ? AND f.query = ? AND f.remaining > 0
-      AND ((f.method != 'GET' AND f.path != '/users/@me/channels' AND ? = 0) OR g.bot_token = ?)
+      AND (? = 1 OR (f.method != 'GET' AND f.path != '/users/@me/channels' AND ? = 0) OR g.bot_token = ?)
       AND (f.path != '/users/@me/channels'
         OR json_extract(f.options, '$.recipient_id') IS NULL
         OR json_extract(f.options, '$.recipient_id') = ?)
-      AND (f.owner_token IS NULL OR f.owner_token = ?)
+      AND (f.owner_token IS NULL OR f.owner_token = ?
+        OR (? = 1 AND f.owner_token IN
+          (SELECT token FROM bots WHERE user_id = ?)))
+      AND (? = 0 OR f.path NOT LIKE '/applications/%'
+        OR EXISTS (SELECT 1 FROM bots b WHERE b.token = f.owner_token
+          AND f.path LIKE '/applications/' || b.user_id || '/%'))
       LIMIT 1
     )
     RETURNING *`
@@ -630,10 +667,14 @@ export function consumeRestFault(
         method,
         path,
         query,
+        Number(applicationScoped),
         method === 'POST' && isRestFaultGuildChannelCreatePath(path) ? 1 : 0,
         botToken ?? null,
         recipientId ?? null,
-        botToken ?? null
+        botToken ?? null,
+        Number(applicationScoped && clientId !== undefined),
+        clientId ?? null,
+        Number(applicationScoped)
       ) as StoredRestFault | undefined
   )
 }

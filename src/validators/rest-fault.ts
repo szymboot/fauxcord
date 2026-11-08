@@ -59,6 +59,53 @@ export function parseRestFaultInteractionSelector(
   return match?.[1]
 }
 
+/**
+ * Extracts the application and guild IDs from the guild-scoped application
+ * command selectors:
+ * `GET|PUT /applications/{app}/guilds/{guild}/commands`,
+ * `GET /applications/{app}/guilds/{guild}/commands/permissions`, and
+ * `GET|PUT /applications/{app}/guilds/{guild}/commands/{command}/permissions`.
+ */
+export function parseRestFaultApplicationCommandSelector(
+  method: unknown,
+  path: string
+): { applicationId: string; guildId: string } | undefined {
+  const match =
+    method === 'GET'
+      ? /^\/applications\/(\d{1,20})\/guilds\/(\d{1,20})\/commands(?:\/permissions|\/\d{1,20}\/permissions)?$/.exec(
+          path
+        )
+      : method === 'PUT'
+        ? /^\/applications\/(\d{1,20})\/guilds\/(\d{1,20})\/commands(?:\/\d{1,20}\/permissions)?$/.exec(
+            path
+          )
+        : null
+  return match ? { applicationId: match[1], guildId: match[2] } : undefined
+}
+
+/** Identifies the exact guild role listing selector (`GET /guilds/{id}/roles`). */
+export function isRestFaultGuildRolesRead(
+  method: unknown,
+  path: string
+): boolean {
+  return method === 'GET' && /^\/guilds\/\d{1,20}\/roles$/.test(path)
+}
+
+/**
+ * Identifies selectors that belong to the guild's owning application: a
+ * request authenticated with the owning bot's token or with an OAuth2 Bearer
+ * token issued to that application consumes them.
+ */
+export function isRestFaultApplicationScoped(
+  method: unknown,
+  path: string
+): boolean {
+  return (
+    parseRestFaultApplicationCommandSelector(method, path) !== undefined ||
+    isRestFaultGuildRolesRead(method, path)
+  )
+}
+
 /** Identifies the exact selector for the calling bot leaving a guild. */
 export function isRestFaultGuildLeave(method: unknown, path: string): boolean {
   return method === 'DELETE' && /^\/users\/@me\/guilds\/\d{1,20}$/.test(path)
@@ -244,9 +291,14 @@ export function validateRestFault(
     return undefined
   const guildRead =
     body.method === 'GET' &&
-    /^\/guilds\/\d{1,20}\/(?:audit-logs|members|bans|invites|channels|(?:members|voice-states)\/\d{1,20})$/.test(
+    (/^\/guilds\/\d{1,20}\/(?:audit-logs|members|bans|invites|channels|(?:members|voice-states)\/\d{1,20})$/.test(
       body.path
-    )
+    ) ||
+      isRestFaultGuildRolesRead(body.method, body.path))
+  const applicationCommand = parseRestFaultApplicationCommandSelector(
+    body.method,
+    body.path
+  )
   const pageRead = body.method === 'GET' && isRestFaultPagePath(body.path)
   const query = pageRead
     ? normalizeRestFaultQuery(
@@ -262,12 +314,16 @@ export function validateRestFault(
     return undefined
   if (
     ((userRead || dmCreate) && body.guild_id === undefined) ||
-    ((dmCreate || guildChannelCreate || body.method === 'GET') &&
+    ((dmCreate ||
+      guildChannelCreate ||
+      applicationCommand ||
+      body.method === 'GET') &&
       body.guild_id !== undefined &&
       (typeof body.guild_id !== 'string' ||
         !/^\d{1,20}$/.test(body.guild_id) ||
         ((guildRead || guildChannelCreate) &&
-          body.guild_id !== body.path.split('/', 3)[2])))
+          body.guild_id !== body.path.split('/', 3)[2]) ||
+        (applicationCommand && body.guild_id !== applicationCommand.guildId)))
   )
     return undefined
 
@@ -279,6 +335,7 @@ export function validateRestFault(
     guildChannelCreate ||
     guildRead ||
     pageRead ||
+    applicationCommand !== undefined ||
     guildLeave ||
     interactionSelector ||
     (body.method === 'POST' &&
