@@ -1191,6 +1191,12 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `DELETE` | `/interactions/{interactionId}/messages/@original`  | Original response deletion  |
 | `GET`    | `/guilds/{guildId}/members/{userId}`                | Member reads                |
 | `GET`    | `/guilds/{guildId}/voice-states/{userId}`           | Member voice state reads    |
+| `GET`    | `/guilds/{guildId}/roles`                           | Guild role listing          |
+| `GET`    | `/applications/{applicationId}/guilds/{guildId}/commands` | Guild command listing |
+| `PUT`    | `/applications/{applicationId}/guilds/{guildId}/commands` | Guild command bulk overwrite |
+| `GET`    | `/applications/{applicationId}/guilds/{guildId}/commands/permissions` | Guild command permissions listing |
+| `GET`    | `/applications/{applicationId}/guilds/{guildId}/commands/{commandId}/permissions` | Command permissions read |
+| `PUT`    | `/applications/{applicationId}/guilds/{guildId}/commands/{commandId}/permissions` | Command permissions update |
 | `GET`    | `/users/{userId}`                                   | Global user reads           |
 | `GET`    | `/guilds/{guildId}/members`                         | A specific member page      |
 | `GET`    | `/guilds/{guildId}/bans`                            | A specific ban page         |
@@ -1592,6 +1598,54 @@ User ID. For example, to fail a bot's read of a connected member's voice state:
 ```
 
 `src/rest-voice-state-read-faults.test.ts` covers this selector.
+
+Application command and role selectors (`GET /guilds/{guildId}/roles` and the five
+`/applications/{applicationId}/guilds/{guildId}/commands...` routes in the table
+above) are scoped to the Guild in the path, exactly like the other Guild
+selectors: the Guild must exist (`404` otherwise), optional `guild_id` must equal
+the path's Guild (`400` otherwise; it is also accepted on the `PUT` selectors),
+and `query` and `recipient_id` return `400`. The command and permission IDs need
+not exist yet. The `applicationId` must be the application of the Bot owning the
+Guild (the mock treats an application ID as its Bot's user ID); naming any other
+application returns `404` when arming. Only the exact methods listed are
+selectors, so `POST`/`PATCH`/`DELETE` command routes, the global
+`/applications/{applicationId}/commands` routes and the batch
+`PUT .../commands/permissions` neither consume nor can be armed through them.
+
+These controls belong to the Guild's owning Bot, with or without a `mode`. They
+are consumed by a request authenticated with that Bot's token **or** with an
+OAuth2 Bearer access token whose `client_id` is that Bot's application ID, both
+user-bound (authorization-code) and client-credentials tokens. This lets a bot
+exercise how it handles a failing permission edit made with a user's Bearer
+token (scope `applications.commands.permissions.update`). Other Bots, Bearer
+tokens of other clients, expired tokens (`401`) and unauthenticated requests do
+not consume the control. The Bearer rule is specific to these selectors: older
+selectors keep their existing caller rules (for example, a mode-omitted
+`DELETE /channels/{channelId}` fault is still consumed by any authenticated
+caller, including a Bearer one, while owner-bound GET selectors ignore Bearer
+callers).
+
+A selected request fails before the native route, authorization and validation
+run, with every supported failure mode (plain `status`/`code`/`message`,
+`rate_limit`, `delay`, `disconnect`), `times`, expiry, inspection counters and
+outcomes as described below. A faulted `PUT` therefore leaves stored commands and
+command permissions untouched, and a `delay` never resumes the write. After
+exhaustion the ordinary route runs again. Guild deletion, setup deletion and
+global or owning-token reset remove active and exhausted controls like the other
+Guild selectors. For example, to fail a user-token permission edit:
+
+```json
+{
+  "method": "PUT",
+  "path": "/applications/111111111111111111/guilds/222222222222222222/commands/444444444444444444/permissions",
+  "status": 503,
+  "code": 0,
+  "message": "Service Unavailable",
+  "times": 1
+}
+```
+
+`src/rest-application-command-faults.test.ts` covers these selectors.
 
 DM channel creation uses the same owning-Bot and cleanup scope as global user
 GETs. Set `method` to `POST`, `path` to `/users/@me/channels`, and **require** a

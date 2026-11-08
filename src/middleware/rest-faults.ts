@@ -3,7 +3,10 @@ import type { MiddlewareHandler } from 'hono'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import type { Database } from '../db'
 import type { AppEnv } from './auth'
-import { parseRestFaultInteractionSelector } from '../validators/rest-fault'
+import {
+  isRestFaultApplicationScoped,
+  parseRestFaultInteractionSelector,
+} from '../validators/rest-fault'
 import {
   consumeRestFault,
   getRestFaultRuntime,
@@ -15,6 +18,9 @@ import {
  * routes use the calling bot; token-authorized interaction routes (outside
  * bot auth) use the bot owning the stored interaction, so they pass through
  * unchanged unless a control is armed for that exact interaction.
+ * Application-scoped selectors (guild application commands and permissions,
+ * guild roles) are also consumed by OAuth2 Bearer callers whose client is the
+ * guild's owning application.
  */
 export function createRestFaultMiddleware(
   db: Database
@@ -64,7 +70,12 @@ export function createRestFaultMiddleware(
       path,
       interaction?.ownerToken ?? bot?.token,
       new URL(c.req.url).searchParams,
-      recipientId
+      recipientId,
+      // Bearer callers never set `bot`; application-scoped selectors also
+      // match the OAuth2 client (application) of the access token.
+      isRestFaultApplicationScoped(c.req.method, path)
+        ? c.get('accessToken')?.client_id
+        : undefined
     )
     if (fault) {
       if (fault.mode === 'rate_limit') {

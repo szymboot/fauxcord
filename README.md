@@ -240,6 +240,9 @@ snapshot. IDENTIFY, RESUME, TTL and evidence are described in the
 `times`, TTL, inspection counters and reset cleanup. Selectors include message,
 channel, ban, member, role, invite and voice-state routes, plus the ban-appeal
 paths `GET /guilds/:guildId/channels`, `DELETE /users/@me/guilds/:guildId`,
+guild application command and command-permission routes (consumable by the
+bot's token or by an OAuth2 Bearer token of its application),
+`GET /guilds/:guildId/roles`,
 and, by interaction ID rather than secret token,
 `POST /interactions/:interactionId/callback` and
 `GET`/`PATCH`/`DELETE /interactions/:interactionId/messages/@original`. To arm those
