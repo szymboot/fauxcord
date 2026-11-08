@@ -1618,9 +1618,12 @@ OAuth2 Bearer access token whose `client_id` is that Bot's application ID, both
 user-bound (authorization-code) and client-credentials tokens. This lets a bot
 exercise how it handles a failing permission edit made with a user's Bearer
 token (scope `applications.commands.permissions.update`). Other Bots, Bearer
-tokens of other clients, expired tokens and unauthenticated requests follow the
-ordinary route without consuming the control. Bearer callers consume no other
-selector; the older selectors keep their existing caller rules.
+tokens of other clients, expired tokens (`401`) and unauthenticated requests do
+not consume the control. The Bearer rule is specific to these selectors: older
+selectors keep their existing caller rules (for example, a mode-omitted
+`DELETE /channels/{channelId}` fault is still consumed by any authenticated
+caller, including a Bearer one, while owner-bound GET selectors ignore Bearer
+callers).
 
 A selected request fails before the native route, authorization and validation
 run, with every supported failure mode (plain `status`/`code`/`message`,

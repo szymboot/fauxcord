@@ -188,6 +188,7 @@ describe('application command REST faults', () => {
   })
 
   describe.each(selectors)('$name', (selector) => {
+    /** Resolves the selected request path for the seeded command. */
     const path = (): string => selector.path(commandId)
 
     /** Sends the selected request as the given caller. */
@@ -343,6 +344,7 @@ describe('application command REST faults', () => {
 
   describe('failed writes', () => {
     it('leaves stored permissions unchanged when PUT permissions is faulted', async () => {
+      /** Replaces the command permissions as the given caller. */
       const put = (permission: boolean, auth: string): Promise<Response> =>
         request(
           `${COMMANDS}/${commandId}/permissions`,
@@ -365,6 +367,7 @@ describe('application command REST faults', () => {
     it('leaves stored commands unchanged when the bulk overwrite is faulted', async () => {
       const before = commandState()
       await arm('PUT', COMMANDS)
+      /** Bulk-overwrites the guild commands as the given caller. */
       const overwrite = (auth: string): Promise<Response> =>
         request(
           COMMANDS,
@@ -498,6 +501,7 @@ describe('application command REST faults over real HTTP', () => {
     })
     expect(armed.status).toBe(201)
     const { id } = (await armed.json()) as { id: string }
+    /** Sends the selected Bearer request over the real socket. */
     const attempt = (): Promise<Response> =>
       fetch(`${real.baseUrl}${path}`, {
         method: 'PUT',
