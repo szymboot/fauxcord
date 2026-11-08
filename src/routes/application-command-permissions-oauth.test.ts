@@ -155,6 +155,12 @@ describe.each(['/api/v10', '/api', ''])(
       context.db
         .prepare('UPDATE guilds SET owner_id = ?')
         .run('2222222222222222222')
+      // Role entries must exist in the guild even for its owner.
+      context.db
+        .prepare(
+          "INSERT INTO roles (id, guild_id, name, position, permissions) SELECT ?, id, 'r', 1, '0' FROM guilds"
+        )
+        .run(OVERRIDES[0].id)
       const response = await requestPermissions(
         'edit',
         `Bearer ${token.access_token}`

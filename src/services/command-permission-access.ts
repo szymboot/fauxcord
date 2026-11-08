@@ -147,11 +147,10 @@ export function canEditCommandPermissions(
   )
     return false
 
-  if (resolved.owner) return true
+  // A member with no role besides @everyone ranks as @everyone.
   const everyoneRole = db
     .prepare('SELECT id, position FROM roles WHERE id = ? AND guild_id = ?')
     .get(guildId, guildId) as RankedRole | undefined
-  // A member with no role besides @everyone ranks as @everyone.
   const [firstHeld, ...otherHeld] =
     heldRoles.length > 0
       ? heldRoles
@@ -162,6 +161,7 @@ export function canEditCommandPermissions(
   )
   for (const entry of entries) {
     if (entry.type !== OverwriteType.ROLE || entry.id === guildId) continue
+    // Existence applies to everyone, the owner included.
     const role = /^\d+$/.test(entry.id)
       ? (db
           .prepare(
@@ -169,7 +169,7 @@ export function canEditCommandPermissions(
           )
           .get(entry.id, guildId) as RankedRole | undefined)
       : undefined
-    if (!role || !outranksRole(highest, role)) return false
+    if (!role || (!resolved.owner && !outranksRole(highest, role))) return false
   }
   return true
 }

@@ -403,7 +403,8 @@ application, guild and command checks and payload validation:
    those bits. Channel overrides are ignored. This precedence is Fauxcord's
    approximation of Discord's documented "has the ability to run the command".
 3. Every role entry in the payload other than `@everyone` exists in the guild and
-   is strictly below the user's highest role (the owner is exempt; a member with
+   is strictly below the user's highest role (the owner is exempt from the
+   hierarchy, but a role that does not exist is still rejected; a member with
    no role besides `@everyone` ranks as `@everyone`). Role order follows
    `position`, then the lower ID. User and channel entries are not checked
    further: Discord does not document a rule for them.

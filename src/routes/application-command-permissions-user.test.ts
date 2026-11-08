@@ -689,6 +689,12 @@ describe('command permission edits by a user-bound token', () => {
       expect(
         await statusOf(put(token, [{ id: top, type: 1, permission: true }]))
       ).toBe(200)
+      const before = await stored()
+      for (const id of ['700000000000000777', 'role'])
+        await expectDenied(
+          await put(token, [{ id, type: 1, permission: true }]),
+          before
+        )
     })
 
     it('does not check the @everyone entry, user entries or channel entries', async () => {
@@ -720,6 +726,7 @@ describe('command permission edits by a user-bound token', () => {
   })
 
   describe('unchanged credentials', () => {
+    /** Entries that a user-bound token would be denied (unknown and top roles). */
     const risky = (): { id: string; type: number; permission: boolean }[] => [
       { id: role(99), type: 1, permission: true },
       { id: '700000000000009998', type: 1, permission: true },
