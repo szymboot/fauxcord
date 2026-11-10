@@ -162,7 +162,7 @@ describe('initial interaction callback observation', () => {
     })
   })
 
-  it.each([1, 6, 7, 8, 9, 10, 12, 13])(
+  it.each([1, 6, 7, 9, 10, 12, 13])(
     'records accepted acknowledgement-only callback type %i',
     async (type) => {
       expect(await callbackStatus(JSON.stringify({ type }))).toBe(204)

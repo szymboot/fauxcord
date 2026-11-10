@@ -1,46 +1,11 @@
 /** Validation for the locale override on test interactions. */
 
-import type { Locale } from 'discord-api-types/v10'
 import { requiredError, typeError, type ValidationErrors } from './common'
 import { text, validateMessageComponents } from './message-components'
 import { validateMessageEmbeds } from './message'
+import { parseAutocompleteChoices } from './autocomplete'
+import { isDiscordLocale } from './locales'
 import { parseModal } from './modal'
-
-/** Discord's supported locales, checked against the installed API types. */
-const DISCORD_LOCALES = {
-  id: true,
-  'en-US': true,
-  'en-GB': true,
-  bg: true,
-  'zh-CN': true,
-  'zh-TW': true,
-  hr: true,
-  cs: true,
-  da: true,
-  nl: true,
-  fi: true,
-  fr: true,
-  de: true,
-  el: true,
-  hi: true,
-  hu: true,
-  it: true,
-  ja: true,
-  ko: true,
-  lt: true,
-  no: true,
-  pl: true,
-  'pt-BR': true,
-  ro: true,
-  ru: true,
-  'es-ES': true,
-  'es-419': true,
-  'sv-SE': true,
-  th: true,
-  tr: true,
-  uk: true,
-  vi: true,
-} satisfies Record<`${Locale}`, boolean>
 
 /**
  * Validates an optional invoking-user locale before creating an interaction.
@@ -52,7 +17,7 @@ export function validateInteractionLocale(locale: unknown): ValidationErrors {
   if (typeof locale !== 'string') {
     return { locale: { _errors: [typeError('string')] } }
   }
-  return Object.hasOwn(DISCORD_LOCALES, locale)
+  return isDiscordLocale(locale)
     ? {}
     : {
         locale: {
@@ -68,7 +33,8 @@ export function validateInteractionLocale(locale: unknown): ValidationErrors {
 
 /**
  * Validates callback structure, modeled direct-message field types, the
- * flags accepted by a deferred response, and modal definitions (type 9).
+ * flags accepted by a deferred response, autocomplete choices (type 8), and
+ * modal definitions (type 9).
  * Other callback data retains the mock's existing scope.
  * @param payload - Untrusted callback JSON
  * @returns Discord-shaped validation errors
@@ -99,6 +65,18 @@ export function validateInteractionCallback(
       },
     }
   }
+  if (callback.type === 8 && callback.data != null) {
+    if (typeof callback.data !== 'object' || Array.isArray(callback.data)) {
+      return { data: { _errors: [typeError('object')] } }
+    }
+    const errors: ValidationErrors = {}
+    for (const [path, error] of Object.entries(
+      parseAutocompleteChoices(callback.data).errors
+    )) {
+      errors[`data.${path}`] = error
+    }
+    return errors
+  }
   if (callback.type === 9 && callback.data !== undefined) {
     if (
       typeof callback.data !== 'object' ||
@@ -115,7 +93,11 @@ export function validateInteractionCallback(
     }
     return errors
   }
-  if (callback.data === undefined) return {}
+  if (
+    callback.data === undefined ||
+    (callback.type === 8 && callback.data === null)
+  )
+    return {}
   if (
     typeof callback.data !== 'object' ||
     callback.data === null ||
@@ -235,10 +217,105 @@ function validateTestComponentInteraction(
 }
 
 /**
+ * Counts the options marked `focused: true` anywhere in an option tree
+ * (subcommands and subcommand groups nest their options) and records the
+ * first malformed option.
+ * @param options - Raw option list
+ * @param path - Error path of the list
+ * @param errors - Collector for validation errors
+ * @returns How many focused options the tree holds
+ */
+function countFocusedOptions(
+  options: unknown,
+  path: string,
+  errors: ValidationErrors
+): number {
+  if (options === undefined) return 0
+  if (!Array.isArray(options)) {
+    errors[path] = { _errors: [typeError('list')] }
+    return 0
+  }
+  let focused = 0
+  for (const [index, option] of options.entries()) {
+    const optionPath = `${path}.${index}`
+    if (
+      typeof option !== 'object' ||
+      option === null ||
+      Array.isArray(option)
+    ) {
+      errors[optionPath] = { _errors: [typeError('object')] }
+      continue
+    }
+    const {
+      focused: isFocused,
+      value,
+      options: nested,
+    } = option as {
+      focused?: unknown
+      value?: unknown
+      options?: unknown
+    }
+    if (isFocused === true) {
+      focused += 1
+      // Discord sends the partially typed text as a string for every
+      // option type, including integer and number options.
+      if (value !== undefined && typeof value !== 'string') {
+        errors[`${optionPath}.value`] = { _errors: [typeError('string')] }
+      }
+    }
+    focused += countFocusedOptions(nested, `${optionPath}.options`, errors)
+  }
+  return focused
+}
+
+/**
+ * Validates which options a CHAT_INPUT request focuses: an autocomplete
+ * interaction (`type: 4`) has exactly one focused option anywhere in its
+ * option tree, an APPLICATION_COMMAND interaction has none. Other
+ * interaction types keep their options unvalidated.
+ * @param fields - Request body fields
+ * @param errors - Collector for validation errors
+ */
+function validateFocusedOptions(
+  fields: TestInteractionFields,
+  errors: ValidationErrors
+): void {
+  const interactionType = fields.type ?? 2
+  if (interactionType !== 2 && interactionType !== 4) return
+  const optionErrors: ValidationErrors = {}
+  const focused = countFocusedOptions(fields.options, 'options', optionErrors)
+  if (Object.keys(optionErrors).length > 0) {
+    Object.assign(errors, optionErrors)
+    return
+  }
+  if (interactionType === 4 && focused !== 1) {
+    errors.options = {
+      _errors: [
+        {
+          code: 'BASE_TYPE_BAD_VALUE',
+          message:
+            'AUTOCOMPLETE (4) interactions need exactly one option with focused: true.',
+        },
+      ],
+    }
+  } else if (interactionType === 2 && focused > 0) {
+    errors.options = {
+      _errors: [
+        {
+          code: 'BASE_TYPE_BAD_VALUE',
+          message: 'Only AUTOCOMPLETE (4) interactions have a focused option.',
+        },
+      ],
+    }
+  }
+}
+
+/**
  * Validates the fields of a simulated interaction request. A MESSAGE_COMPONENT
  * (`type: 3`) button click is validated as such; otherwise the fields that
  * select the command kind are checked: `command_type` (1 CHAT_INPUT, 2 USER), the USER command's
- * `target_id`, and the invoking user's locale. `command_type` defaults to 2
+ * `target_id`, the invoking user's locale, and the focused option of
+ * autocomplete (`type: 4`) versus command (`type: 2`) requests. `command_type` defaults to 2
  * when a `target_id` is given and to 1 otherwise.
  * @param body - Untrusted request body
  * @returns Discord-shaped field errors, or an empty object when valid
@@ -272,6 +349,7 @@ export function validateTestInteraction(body: unknown): ValidationErrors {
         'Only USER commands (command_type 2) have a target.'
       )
     }
+    validateFocusedOptions(fields, errors)
     return errors
   }
   if (targetId === undefined) {

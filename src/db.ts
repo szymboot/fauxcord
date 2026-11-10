@@ -292,6 +292,25 @@ function migrateInteractionModal(db: Database): void {
 }
 
 /**
+ * Adds the normalized choices an autocomplete result (type 8) carried and the
+ * latest callback type refused for the interaction's type.
+ * @param db - Database instance
+ */
+function migrateInteractionAutocomplete(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(interactions)').all() as {
+    name: string
+  }[]
+  for (const [name, type] of [
+    ['choices_json', 'TEXT'],
+    ['rejected_callback_type', 'INTEGER'],
+  ] as const) {
+    if (columns.every((column) => column.name !== name)) {
+      db.exec(`ALTER TABLE interactions ADD COLUMN ${name} ${type}`)
+    }
+  }
+}
+
+/**
  * Adds the message snapshot a component click (and a modal opened from it)
  * carries.
  * @param db - Database instance
@@ -879,6 +898,8 @@ export function initializeDatabase(dbPath: string): Database {
       initial_callback_type       INTEGER,
       initial_response_message_id TEXT,
       modal_json                  TEXT,
+      choices_json                TEXT,
+      rejected_callback_type      INTEGER,
       message_json                TEXT,
       token_expires_at            INTEGER,
       created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1271,6 +1292,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateInteractionLocale(db)
   migrateInteractionCallbackType(db)
   migrateInteractionModal(db)
+  migrateInteractionAutocomplete(db)
   migrateInteractionMessage(db)
   migrateInteractionTokenExpiry(db)
   migrateRestFaultSelectors(db)

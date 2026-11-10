@@ -13,6 +13,16 @@ import { handleInteractionCallback } from '../services/interactions'
 import type { InteractionCallbackPayload } from '../services/interactions'
 import { validateInteractionCallback } from '../validators/interaction'
 
+/** Messages for callback types refused for the interaction's type. */
+const REFUSAL_MESSAGES = {
+  modal_not_allowed:
+    'A modal can only answer an application command or message component interaction.',
+  autocomplete_only:
+    'An autocomplete interaction can only be answered with an autocomplete result (type 8).',
+  autocomplete_result_not_allowed:
+    'An autocomplete result can only answer an autocomplete interaction.',
+} as const
+
 /**
  * Creates the Interactions API routes.
  * @param db - Database
@@ -50,15 +60,14 @@ export function createInteractionRoutes(db: Database, baseUrl: string): Hono {
           )
           return c.json(err.body, 404)
         }
-        if (result.reason === 'modal_not_allowed') {
+        if (result.reason !== 'already_responded') {
           return c.json(
             validationError({
               type: {
                 _errors: [
                   {
                     code: 'BASE_TYPE_CHOICES',
-                    message:
-                      'A modal can only answer an application command or message component interaction.',
+                    message: REFUSAL_MESSAGES[result.reason],
                   },
                 ],
               },

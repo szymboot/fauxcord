@@ -332,6 +332,30 @@ otherwise the submission returns `404`. See
 [test-api.md](./test-api.md#user-context-commands) for payloads, supported
 modal components, and validation errors.
 
+### Autocomplete
+
+Simulate a user typing into an option of a slash command with `"type": 4` and
+exactly one option marked `"focused": true` (its `value` is the partial text,
+always a string). The bot must answer with callback type `8`; read the choices
+it returned from the callback observation:
+
+```bash
+curl -X POST http://localhost:3000/_test/interactions \
+  -H "Content-Type: application/json" \
+  -d '{"application_id": "111111111111111111", "type": 4, "command_name": "ban",
+       "guild_id": "222222222222222222", "channel_id": "333333333333333333",
+       "options": [{"name": "user", "type": 3, "value": "to", "focused": true}]}'
+
+curl "http://localhost:3000/_test/interactions/<interaction_id>/callback?application_id=111111111111111111" \
+  -H "X-Interaction-Token: <interaction_token>"
+# {"responded": true, "initial_callback_type": 8, "choices": [{"name": "Tom", "value": "1"}], …}
+```
+
+Any other callback type is refused with `400` and leaves the interaction
+unacknowledged; the observation then reports `"responded": false` with
+`"rejected_callback_type": <type>` so a test can fail fast. See
+[test-api.md](./test-api.md#autocomplete-interactions-type-4).
+
 ### Button clicks
 
 Simulate a user clicking a button on a message the bot sent with
