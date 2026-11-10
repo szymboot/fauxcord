@@ -1199,8 +1199,8 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `GET`    | `/applications/{applicationId}/guilds/{guildId}/commands` | Guild command listing |
 | `PUT`    | `/applications/{applicationId}/guilds/{guildId}/commands` | Guild command bulk overwrite |
 | `GET`    | `/applications/{applicationId}/guilds/{guildId}/commands/permissions` | Guild command permissions listing |
-| `GET`    | `/applications/{applicationId}/guilds/{guildId}/commands/{commandId}/permissions` | Command permissions read |
-| `PUT`    | `/applications/{applicationId}/guilds/{guildId}/commands/{commandId}/permissions` | Command permissions update |
+| `GET`    | `/applications/{applicationId}/guilds/{guildId}/commands/{commandId}/permissions` | Command permissions read (`commandId` may be the application ID) |
+| `PUT`    | `/applications/{applicationId}/guilds/{guildId}/commands/{commandId}/permissions` | Command permissions update (`commandId` may be the application ID) |
 | `GET`    | `/users/{userId}`                                   | Global user reads           |
 | `GET`    | `/guilds/{guildId}/members`                         | A specific member page      |
 | `GET`    | `/guilds/{guildId}/bans`                            | A specific ban page         |
@@ -2472,7 +2472,9 @@ deleted with `DELETE /_test/setup/:token` like other OAuth2 tokens of the setup.
 client-credentials tokens still have no user.
 
 With the `applications.commands.permissions.update` scope, a user-bound token
-authorizes command permission edits subject to that user's guild permissions;
+authorizes command permission edits subject to that user's guild permissions,
+including the application-level list stored under the application ID in the
+command position (it applies to commands without overrides of their own);
 see [OAuth command permission overrides](./getting-started.md#oauth-command-permission-overrides).
 
 ---

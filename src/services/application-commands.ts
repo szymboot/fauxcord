@@ -582,8 +582,59 @@ function toPermissionsObject(
   }
 }
 
+/** Permission record of the application-level list retrieved from the DB */
+interface ApplicationLevelPermissionRow {
+  application_id: string
+  guild_id: string
+  permissions: string
+}
+
 /**
- * Retrieves all command permission overrides in a guild.
+ * Reads the application-level permission entries Discord stores under the
+ * application ID in the command position. They apply to every command of the
+ * application that has no overwrites of its own.
+ * @param db - Database
+ * @param applicationId - Application ID
+ * @param guildId - Guild ID
+ * @returns The stored entries, empty when none were set
+ */
+export function getApplicationLevelPermissionEntries(
+  db: Database,
+  applicationId: string,
+  guildId: string
+): CommandPermissionEntry[] {
+  const row = db
+    .prepare(
+      'SELECT * FROM application_level_command_permissions WHERE application_id = ? AND guild_id = ?'
+    )
+    .get(applicationId, guildId) as ApplicationLevelPermissionRow | undefined
+  return row ? (JSON.parse(row.permissions) as CommandPermissionEntry[]) : []
+}
+
+/**
+ * Builds the permissions object of the application-level list, whose `id` is
+ * the application ID.
+ * @param applicationId - Application ID
+ * @param guildId - Guild ID
+ * @param permissions - The stored entries
+ * @returns Object for API responses
+ */
+function toApplicationLevelObject(
+  applicationId: string,
+  guildId: string,
+  permissions: CommandPermissionEntry[]
+): GuildApplicationCommandPermissionsObject {
+  return {
+    id: applicationId,
+    application_id: applicationId,
+    guild_id: guildId,
+    permissions,
+  }
+}
+
+/**
+ * Retrieves all command permission overrides in a guild, followed by the
+ * application-level entry (`id` = application ID) when that list is non-empty.
  * @param db - Database
  * @param applicationId - Application ID
  * @param guildId - Guild ID
@@ -599,18 +650,30 @@ export function getAllCommandPermissions(
       'SELECT * FROM application_command_permissions WHERE application_id = ? AND guild_id = ?'
     )
     .all(applicationId, guildId) as PermissionRow[]
-  return rows.map((row) => toPermissionsObject(row))
+  const applicationLevel = getApplicationLevelPermissionEntries(
+    db,
+    applicationId,
+    guildId
+  )
+  return [
+    ...rows.map((row) => toPermissionsObject(row)),
+    ...(applicationLevel.length > 0
+      ? [toApplicationLevelObject(applicationId, guildId, applicationLevel)]
+      : []),
+  ]
 }
 
 /**
  * Retrieves permission overrides for one command. A command with no
  * explicit overrides yet still returns an object with an empty
  * `permissions` array, matching real Discord; only a genuinely unknown
- * command returns null.
+ * command returns null. When `commandId` is the application ID, returns the
+ * application-level list (empty when never set).
  * @param db - Database
  * @param applicationId - Application ID
  * @param guildId - Guild ID
- * @param commandId - Command ID
+ * @param commandId - Command ID, or the application ID for the
+ *   application-level list
  * @returns Permissions object, or null if the command does not exist
  */
 export function getCommandPermissions(
@@ -619,6 +682,13 @@ export function getCommandPermissions(
   guildId: string,
   commandId: string
 ): GuildApplicationCommandPermissionsObject | null {
+  if (commandId === applicationId)
+    return toApplicationLevelObject(
+      applicationId,
+      guildId,
+      getApplicationLevelPermissionEntries(db, applicationId, guildId)
+    )
+
   const row = db
     .prepare(
       'SELECT * FROM application_command_permissions WHERE application_id = ? AND guild_id = ? AND command_id = ?'
@@ -640,11 +710,13 @@ export function getCommandPermissions(
 }
 
 /**
- * Sets (upserts) permission overrides for one command in a guild.
+ * Sets (upserts) permission overrides for one command in a guild. When
+ * `commandId` is the application ID, sets the application-level list instead.
  * @param db - Database
  * @param applicationId - Application ID
  * @param guildId - Guild ID
- * @param commandId - Command ID
+ * @param commandId - Command ID, or the application ID for the
+ *   application-level list
  * @param permissions - The full desired set of permission overrides
  * @returns The resulting permissions object
  */
@@ -655,6 +727,16 @@ export function setCommandPermissions(
   commandId: string,
   permissions: CommandPermissionEntry[]
 ): GuildApplicationCommandPermissionsObject {
+  if (commandId === applicationId) {
+    db.prepare(
+      `INSERT INTO application_level_command_permissions (application_id, guild_id, permissions)
+       VALUES (?, ?, ?)
+       ON CONFLICT(guild_id, application_id) DO UPDATE SET
+         permissions = excluded.permissions`
+    ).run(applicationId, guildId, JSON.stringify(permissions))
+    return toApplicationLevelObject(applicationId, guildId, permissions)
+  }
+
   db.prepare(
     `INSERT INTO application_command_permissions (application_id, guild_id, command_id, permissions)
      VALUES (?, ?, ?, ?)

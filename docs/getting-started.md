@@ -399,6 +399,13 @@ curl -X POST http://localhost:3000/api/v10/oauth2/token \
   --data-urlencode 'scope=applications.commands.permissions.update'
 ```
 
+The application ID in the command position addresses the application-level list,
+as on Discord: `PUT .../commands/{application_id}/permissions` sets it and
+`GET` returns it (an empty `permissions` array until set), and
+`GET .../commands/permissions` includes an entry whose `id` is the application
+ID while that list is non-empty. The list applies to every command of the
+application that has no overrides of its own (see rule 2 below).
+
 Use the returned `access_token` as `Authorization: Bearer <access_token>` when
 calling `/applications/{application_id}/guilds/{guild_id}/commands/{command_id}/permissions`.
 Tokens exchanged through Fauxcord's authorization-code flow work with the same
@@ -421,8 +428,12 @@ application, guild and command checks and payload validation:
 2. The user can run the command. The owner and Administrators always can.
    Otherwise Fauxcord resolves the command's currently stored overrides for the
    user: a user override first, then the user's roles (any role allow wins over
-   role denies), then the `@everyone` override whose ID is the guild ID. With no
-   matching override it falls back to `default_member_permissions`: `null` means
+   role denies), then the `@everyone` override whose ID is the guild ID. A command
+   with no stored overrides at all (never set, or cleared with `[]`) uses the
+   application-level list instead, resolved in the same order; a command with
+   any override of its own, even an unrelated one such as a channel entry,
+   ignores the application-level list. With no matching entry it falls back to
+   `default_member_permissions`: `null` means
    everyone, `"0"` nobody (without Administrator), anything else requires all of
    those bits. Channel overrides are ignored. This precedence is Fauxcord's
    approximation of Discord's documented "has the ability to run the command".
@@ -432,6 +443,12 @@ application, guild and command checks and payload validation:
    no role besides `@everyone` ranks as `@everyone`). Role order follows
    `position`, then the lower ID. User and channel entries are not checked
    further: Discord does not document a rule for them.
+
+Editing the application-level list itself
+(`PUT .../commands/{application_id}/permissions`) with a user-bound token follows
+rules 1 and 3 only: the list belongs to no single command, so the "can run the
+command" check (rule 2) is skipped. Bot tokens and client-credentials tokens keep
+their current access to this route as well.
 
 The authorization-code flow always authorizes the fixed user
 `2222222222222222222`, who is not a guild member unless you add them, so its

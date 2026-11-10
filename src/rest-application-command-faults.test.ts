@@ -344,6 +344,14 @@ describe('application command REST faults', () => {
 
   describe('failed writes', () => {
     it('leaves stored permissions unchanged when PUT permissions is faulted', async () => {
+      // A user-bound token must be authorized as its user: make it the owner.
+      db.prepare(
+        "INSERT OR IGNORE INTO users (id, username, discriminator, bot) VALUES ('555555555555555551', 'Owner', '0', 0)"
+      ).run()
+      db.prepare('UPDATE guilds SET owner_id = ? WHERE id = ?').run(
+        '555555555555555551',
+        GUILD
+      )
       /** Replaces the command permissions as the given caller. */
       const put = (permission: boolean, auth: string): Promise<Response> =>
         request(

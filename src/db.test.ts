@@ -956,6 +956,22 @@ describe('application commands / interactions tables', () => {
     db.close()
   })
 
+  it('creates the application_level_command_permissions table', () => {
+    const db = initializeDatabase(':memory:')
+    const columns = db
+      .prepare('PRAGMA table_info(application_level_command_permissions)')
+      .all() as { name: string }[]
+    expect(columns.map((c) => c.name)).toEqual(
+      expect.arrayContaining([
+        'application_id',
+        'guild_id',
+        'permissions',
+        'created_at',
+      ])
+    )
+    db.close()
+  })
+
   it('creates the application_command_permissions table', () => {
     const db = initializeDatabase(':memory:')
     const columns = db
@@ -1617,6 +1633,11 @@ describe('domain foreign-key cascades', () => {
        VALUES (?, ?, 'cascade-command')`
     ).run(applicationId, guildId)
     db.prepare(
+      `INSERT INTO application_level_command_permissions
+         (application_id, guild_id)
+       VALUES (?, ?)`
+    ).run(applicationId, guildId)
+    db.prepare(
       `INSERT INTO interactions
          (id, application_id, token, type, user_id)
        VALUES ('cascade-interaction', ?, 'cascade-token', 2, ?)`
@@ -1633,6 +1654,7 @@ describe('domain foreign-key cascades', () => {
       'lobby_members',
       'application_commands',
       'application_command_permissions',
+      'application_level_command_permissions',
       'interactions',
     ]) {
       expect(
