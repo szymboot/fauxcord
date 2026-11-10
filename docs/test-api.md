@@ -1924,6 +1924,9 @@ failed attempt. A retry after exhaustion is a new ordinary request and can
 persist and dispatch exactly once. These controls do not depend on channel
 permission enforcement. Pagination page holds remain separate controls; when
 both select a GET, the page hold runs first.
+Member-read snapshot holds are another separate control; a REST fault that
+matches `GET /guilds/{id}/members/{id}` runs first and the hold stays armed (see
+[Member read snapshot holds](#member-read-snapshot-holds)).
 
 `timeout_ms` is an integer from 1 to 60000, default 30000, for explicit modes
 only. Its deadline starts at arming and never extends on inspection/consumption.
@@ -6699,7 +6702,7 @@ guild-scoped application command and command permission routes, whose stored
 registrations survive and are served again after a rejoin), and
 `GET /users/@me/guilds` simply omits the guild. Dispatches caused by a
 detached bot's REST calls are never delivered. Audit-log response controls,
-REST fault controls and page holds scoped to the guild stay registered with
+REST fault controls, page holds and member-read snapshot holds scoped to the guild stay registered with
 the surviving fixture.
 
 Discord rejects a guild owner leaving its own guild; Fauxcord does not enforce
@@ -6894,3 +6897,148 @@ For an import harness such as DSC-837:
 When embedding `buildApp`, call its `shutdownRestPageHolds()` before closing the
 HTTP server, then close the database after HTTP requests drain. The production
 entry point and `createRealServer()` already use this order.
+
+---
+
+## Member read snapshot holds
+
+Use this one-shot control to hold the next authenticated
+`GET /guilds/{guildId}/members/{userId}` of a guild's owning bot **after
+Fauxcord already computed its response**. The held request later completes with
+that older **snapshot**, even if the member was updated, removed or rejoined
+meanwhile. This is for testing bots that cache roles from a member read and must
+not cache a read that raced with `GUILD_MEMBER_UPDATE` / `GUILD_MEMBER_REMOVE`.
+
+It differs from the other controls:
+
+- REST faults in `mode: "delay"` always end with an error, never the native
+  response.
+- [Page holds](#rest-pagination-page-holds) select member/ban **list** pages and
+  read current fixture data after release; they do not snapshot.
+
+### `POST /_test/rest-member-read-holds`
+
+```bash
+curl -X POST http://localhost:3000/_test/rest-member-read-holds \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "guild_id": "222222222222222222",
+    "user_id": "100000000000000001",
+    "timeout_ms": 30000
+  }'
+```
+
+| Field        | Required | Meaning                                                                                                                                  |
+| ------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `guild_id`   | yes      | Exact decimal guild ID. The guild must exist; its owning bot is captured at creation.                                                     |
+| `user_id`    | yes      | Exact decimal user ID. The member does **not** need to exist: the snapshot of a missing member is the native `404` Unknown Member reply. |
+| `timeout_ms` | yes      | Integer from 1 to 60000. The deadline starts at **arming**, so an unused control also expires.                                            |
+
+The selector matches `GET` through the bare, `/api` and `/api/v10` prefixes and
+only for the guild's owning Bot token. Other bots, guilds, users, methods
+(`PATCH`, `DELETE`, `PUT` …) and routes (`GET /guilds/{id}/members`, roles,
+test-control and health endpoints) proceed normally. Unauthenticated requests
+get `401` and never consume the control. Returns `201` with the status below;
+invalid selectors return `400`, an unknown guild `404`, and an already
+armed/holding identical `guild_id` + `user_id` returns `409`. Bot credentials
+are never exposed.
+
+### Snapshot semantics
+
+1. The first matching request **claims** the control atomically. Further
+   matching requests proceed normally, even while the first is held: this is a
+   one-shot control, not a gate on retries.
+2. The native handler then runs to completion and its response (status, body and
+   the headers the handler set, such as `Content-Type`) is captured **before**
+   the request waits. The control only enters `holding` once that snapshot
+   exists, so a harness that polls for `holding` and then changes the member
+   (role change, kick, rejoin) is guaranteed the snapshot predates the change.
+3. The request waits until release, deletion, timeout, reset/scope deletion or
+   shutdown, then returns **exactly** the captured response. The native handler
+   is **not** run again: a role added, a member removed or a member rejoined in
+   the meantime does not change it. A member absent at arrival yields a held
+   `404` (`code` 10007, "Unknown Member"), even if they join meanwhile.
+4. Headers added by outer middleware are not part of the snapshot: CORS,
+   `X-RateLimit-*` (bucket and reset time are computed when the response is
+   sent), and version headers reflect completion time.
+
+Every outcome except a client disconnect returns the snapshot, including
+deletion of the control, timeout, `POST /_test/reset`, guild deletion, bot setup
+deletion and shutdown (the guild deletion case therefore returns a `200`
+snapshot of a guild that no longer exists).
+
+### `GET /_test/rest-member-read-holds/{id}`
+
+Returns current status with `Cache-Control: no-store`, or `404` after removal:
+
+```json
+{
+  "id": "100000000000000099",
+  "guild_id": "222222222222222222",
+  "user_id": "100000000000000001",
+  "timeout_ms": 30000,
+  "state": "holding",
+  "arrived": 1,
+  "arrived_at": "2026-10-04T12:00:01.000Z",
+  "snapshot_status": 200,
+  "expires_at": "2026-10-04T12:00:30.000Z",
+  "finished_at": null
+}
+```
+
+`state` is `armed`, `holding`, `released`, `timed_out`, `disconnected` or
+`cancelled`. `arrived` is 0 or 1; `arrived_at` is when the matching request
+reached the control and `snapshot_status` is the HTTP status captured in the
+snapshot (`null` until a request is held; `404` for an absent member).
+`finished_at` is set when the control disarms. Terminal status is retained until
+explicit deletion, reset, scope deletion or server shutdown.
+
+### Release and removal
+
+- `POST /_test/rest-member-read-holds/{id}/release` disarms an armed control or
+  resumes the held request with its snapshot; returns `200` with retained status
+  (`404` for unknown IDs). Repeating it is idempotent and keeps an existing
+  terminal state.
+- `DELETE /_test/rest-member-read-holds/{id}` removes configuration and evidence,
+  resuming a held request with its snapshot; returns `204` (`404` for unknown
+  IDs).
+
+A client disconnect ends the wait and disarms the control as `disconnected`; a
+reconnecting client cannot reuse a claimed control. Token-scoped
+`POST /_test/reset`, bot setup deletion and guild deletion remove the affected
+controls and unblock requests; a global reset removes every control. Shutdown
+unblocks requests before the HTTP server drains. Controls live only in memory and
+cannot survive a Fauxcord restart. When embedding `buildApp`, call its
+`shutdownRestMemberReadHolds()` before closing the HTTP server (the production
+entry point and `createRealServer()` already do).
+
+### Interaction with REST faults and page holds
+
+The control sits **after** REST-fault matching, so faults are deterministic:
+
+- A REST fault that matches the same `GET` (any mode) is consumed first and
+  answers the request. That request never reaches the hold, which stays
+  `armed` with `arrived: 0` and can claim the next matching request.
+- A fault armed while a request is already held does not affect it: the released
+  snapshot is returned as is and the fault's attempt is not consumed by it.
+- Page holds only select list routes and never overlap this selector.
+
+### Example: stale role read race
+
+```bash
+# 1. Arm the hold before the bot refreshes the member.
+ID=$(curl -s -X POST http://localhost:3000/_test/rest-member-read-holds \
+  -H 'Content-Type: application/json' \
+  -d '{"guild_id":"222222222222222222","user_id":"100000000000000001","timeout_ms":30000}' \
+  | jq -r .id)
+
+# 2. Wait until the read arrived and its snapshot exists (state == "holding").
+curl -s http://localhost:3000/_test/rest-member-read-holds/$ID | jq .state
+
+# 3. Change the member meanwhile (Gateway GUILD_MEMBER_UPDATE is delivered).
+curl -X PUT -H 'Authorization: Bot <token>' \
+  http://localhost:3000/api/v10/guilds/222222222222222222/members/100000000000000001/roles/<roleId>
+
+# 4. Let the read finish with the OLDER response.
+curl -X POST http://localhost:3000/_test/rest-member-read-holds/$ID/release
+```

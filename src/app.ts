@@ -20,6 +20,8 @@ import { createRemovedSetupMiddleware } from './middleware/removed-setup'
 import { createRestFaultMiddleware } from './middleware/rest-faults'
 import { createRestPageHoldMiddleware } from './middleware/rest-page-holds'
 import { getRestPageHolds } from './services/rest-page-holds'
+import { createRestMemberReadHoldMiddleware } from './middleware/rest-member-read-holds'
+import { getRestMemberReadHolds } from './services/rest-member-read-holds'
 import { createChannelRoutes } from './routes/channels'
 import { createGuildRoutes } from './routes/guilds'
 import { createUserRoutes } from './routes/users'
@@ -99,6 +101,7 @@ export function buildApp(
   unsubscribeGateway: () => void
   /** Disarms page holds before closing the HTTP server. */
   shutdownRestPageHolds: () => void
+  shutdownRestMemberReadHolds: () => void
   /** Cancels transport delays before HTTP shutdown. */
   shutdownRestFaults: () => void
 } {
@@ -216,6 +219,8 @@ export function buildApp(
   app.use('*', createRemovedSetupMiddleware(db))
   app.use('*', createRestPageHoldMiddleware(db))
   app.use('*', createRestFaultMiddleware(db))
+  // Inside the fault middleware: a matching fault pre-empts a member read hold.
+  app.use('*', createRestMemberReadHoldMiddleware(db))
 
   // Normalize version prefixes and mount each route
   // /api/v10/ → /
@@ -268,6 +273,9 @@ export function buildApp(
     },
     shutdownRestPageHolds: () => {
       getRestPageHolds(db).shutdown()
+    },
+    shutdownRestMemberReadHolds: () => {
+      getRestMemberReadHolds(db).shutdown()
     },
   }
 }

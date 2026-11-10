@@ -9,6 +9,7 @@ import {
   recoverRestFaultOutcomes,
 } from './services/rest-faults'
 import { getRestPageHolds } from './services/rest-page-holds'
+import { getRestMemberReadHolds } from './services/rest-member-read-holds'
 import { parseReactionEmoji, reactionEmojiKey } from './services/reaction-emoji'
 import BetterSqlite3 from 'better-sqlite3'
 import type { Database } from 'better-sqlite3'
@@ -1332,6 +1333,7 @@ export function runInTransaction<T>(
  */
 export function closeDatabase(db: Database): void {
   getRestPageHolds(db).shutdown()
+  getRestMemberReadHolds(db).shutdown()
   getRestFaultRuntime(db).shutdown(false)
   if (db.open) {
     db.close()
