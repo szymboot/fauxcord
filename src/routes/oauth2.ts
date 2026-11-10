@@ -7,6 +7,7 @@
 import { Hono } from 'hono'
 import type { Database } from '../db'
 import {
+  authenticateClient,
   createAuthCode,
   exchangeAuthCode,
   createClientCredentialsToken,
@@ -14,7 +15,72 @@ import {
   getOAuth2Me,
   getOpenIdUserInfo,
   getPublicKeys,
+  refreshAccessToken,
 } from '../services/oauth2'
+
+/** Client credentials presented to the token endpoint. */
+interface ClientCredentials {
+  clientId: string
+  clientSecret: string
+  /** True when the credentials came from an `Authorization: Basic` header. */
+  basic: boolean
+}
+
+/**
+ * Tells whether an Authorization header uses the Basic scheme.
+ * @param authorization - Authorization header value
+ * @returns True for a Basic credential
+ */
+function isBasicAuthorization(authorization: string | undefined): boolean {
+  return authorization?.toLowerCase().startsWith('basic ') ?? false
+}
+
+/**
+ * Decodes a Basic-auth credential component (form-urlencoded per RFC 6749).
+ * @param value - Raw component
+ * @returns Decoded component, or null when it is malformed
+ */
+function decodeBasicComponent(value: string): string | null {
+  try {
+    return decodeURIComponent(value.replaceAll('+', ' '))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Extracts the client credentials of a token request, from the
+ * `Authorization: Basic` header (client_secret_basic) or the form body
+ * (client_secret_post). The header wins when it is present.
+ * @param authorization - Authorization header value
+ * @param params - Parsed form body
+ * @returns The credentials, or null when missing or malformed
+ */
+function readClientCredentials(
+  authorization: string | undefined,
+  params: URLSearchParams
+): ClientCredentials | null {
+  if (authorization && isBasicAuthorization(authorization)) {
+    const decoded = Buffer.from(
+      authorization.slice(6).trim(),
+      'base64'
+    ).toString('utf8')
+    const separator = decoded.indexOf(':')
+    if (separator === -1) return null
+    const clientId = decodeBasicComponent(decoded.slice(0, separator))
+    const clientSecret = decodeBasicComponent(decoded.slice(separator + 1))
+    if (!clientId || clientSecret === null) return null
+    const bodyClientId = params.get('client_id')
+    return bodyClientId && bodyClientId !== clientId
+      ? null
+      : { clientId, clientSecret, basic: true }
+  }
+  const clientId = params.get('client_id')
+  const clientSecret = params.get('client_secret')
+  return !clientId || clientSecret === null
+    ? null
+    : { clientId, clientSecret, basic: false }
+}
 
 /**
  * Creates the OAuth2 API routes.
@@ -84,7 +150,8 @@ export function createOAuth2Routes(db: Database): Hono {
     return c.redirect(redirectUrl.href)
   })
 
-  // POST /oauth2/token — Issue an OAuth2 token
+  // POST /oauth2/token — Issue an OAuth2 token (authorization_code,
+  // client_credentials, refresh_token)
   app.post('/oauth2/token', async (c) => {
     const contentType = c.req.header('content-type') ?? ''
     let params: URLSearchParams
@@ -129,6 +196,37 @@ export function createOAuth2Routes(db: Database): Hono {
 
       const tokenResponse = createClientCredentialsToken(db, clientId, scope)
       return c.json(tokenResponse)
+    }
+
+    if (grantType === 'refresh_token') {
+      const credentials = readClientCredentials(
+        c.req.header('Authorization'),
+        params
+      )
+      if (
+        !credentials ||
+        !authenticateClient(db, credentials.clientId, credentials.clientSecret)
+      ) {
+        if (
+          credentials?.basic ??
+          isBasicAuthorization(c.req.header('Authorization'))
+        ) {
+          c.header('WWW-Authenticate', 'Basic')
+        }
+        return c.json({ error: 'invalid_client' }, 401)
+      }
+
+      const refreshToken = params.get('refresh_token')
+      if (!refreshToken) return c.json({ error: 'invalid_request' }, 400)
+
+      const tokenResponse = refreshAccessToken(
+        db,
+        credentials.clientId,
+        refreshToken
+      )
+      return tokenResponse
+        ? c.json(tokenResponse)
+        : c.json({ error: 'invalid_grant' }, 400)
     }
 
     return c.json({ message: '400: Bad Request', code: 0 }, 400)

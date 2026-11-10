@@ -10,7 +10,7 @@ It lets you automate testing of bots and apps without connecting to the real Dis
 - Send, fetch, edit, and delete messages
 - Reactions, pins, Webhooks
 - Guild / channel / member / role operations
-- OAuth2 flows (Authorization Code / Client Credentials)
+- OAuth2 flows (Authorization Code / Client Credentials / Refresh Token)
 - File attachments
 - Gateway (WebSocket): Identify / Heartbeat / Resume, and Dispatch events for
   messages, reactions, guilds, guild emoji, channels, members, and roles
@@ -457,9 +457,11 @@ use the token control to pick another user. Tokens without a user (client creden
 access to permission GET/PUT, and permission GET routes keep their current
 authorization, as mock compatibility.
 
-These are emulator conventions: Fauxcord's token endpoint accepts `client_id`
-in the form body, auto-registers unknown clients, and does not verify client
-secrets. Its client-credentials tokens have no user identity and skip the
+These are emulator conventions: for `authorization_code` and
+`client_credentials`, Fauxcord's token endpoint accepts `client_id` in the form
+body, auto-registers unknown clients, and does not verify client secrets (only
+the [`refresh_token` grant](#refreshing-an-oauth2-token) authenticates the
+client). Its client-credentials tokens have no user identity and skip the
 user checks above. Existing owning Bot access to permission GET/PUT is retained
 for compatibility. On [Discord](https://docs.discord.com/developers/interactions/application-commands#permissions),
 permission edits require a Bearer token authorized by a user with sufficient
@@ -467,6 +469,47 @@ guild/resource permissions. Discord's [client-credentials flow](https://docs.dis
 authenticates the client and returns a token for the bot owner; team applications
 are restricted to `identify` and `applications.commands.update`. Do not assume
 Fauxcord's simplified token issuance or Bot permission edits work on Discord.
+
+### Refreshing an OAuth2 token
+
+`POST /oauth2/token` (form-urlencoded, under `/api/v10`, `/api` or bare) with
+`grant_type=refresh_token` exchanges a refresh token for a new access token and
+refresh token, the way Discord does and the way Go's `golang.org/x/oauth2`
+`TokenSource` sends it. Refresh tokens come from the authorization-code flow and
+from [`POST /_test/oauth2/tokens`](./test-api.md#post-_testoauth2tokens--issue-a-bearer-token-for-a-chosen-user);
+client-credentials tokens have none.
+
+The client authenticates with `client_id` + `client_secret`, either in the form
+body or as `Authorization: Basic base64(client_id:client_secret)` (each part
+form-urlencoded first, as RFC 6749 says; the header wins when both are sent).
+The client must exist and the secret must equal its stored one. Clients created
+by the authorization-code flow or the client-credentials grant use
+`mock_secret`; register the secret your system under test will send with the
+`client_secret` field of `/_test/oauth2/tokens`.
+
+```bash
+curl -X POST http://localhost:3000/api/v10/oauth2/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode 'grant_type=refresh_token' \
+  --data-urlencode 'refresh_token=mock_refresh_token_…' \
+  --data-urlencode 'client_id=111111111111111111' \
+  --data-urlencode 'client_secret=my-secret'
+```
+
+| Response                                 | When                                                                                   |
+| ---------------------------------------- | -------------------------------------------------------------------------------------- |
+| `200` token response                     | `{access_token, token_type: "Bearer", expires_in, refresh_token, scope}`               |
+| `401` `{"error":"invalid_client"}`       | Missing or malformed credentials, unknown client, or wrong secret                      |
+| `400` `{"error":"invalid_request"}`      | `refresh_token` is missing                                                             |
+| `400` `{"error":"invalid_grant"}`        | The refresh token is unknown, revoked, already used, or was issued to another client   |
+
+Refresh tokens are single-use. A successful refresh issues a new access token
+and refresh token for the same user, client and scope with the default lifetime
+(7 days), and invalidates the previous access token and refresh token. The new
+token authorizes exactly like the original (for example `GET /oauth2/@me` and
+command permission edits) and, because it keeps the client, is deleted with the
+setup by `DELETE /_test/setup/:token`. An expired access token can still be
+refreshed.
 
 ## Environment variables
 
