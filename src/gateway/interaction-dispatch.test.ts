@@ -273,3 +273,113 @@ describe('INTERACTION_CREATE (integration)', () => {
     }
   )
 })
+
+describe('autocomplete INTERACTION_CREATE (integration)', () => {
+  let close: (() => Promise<void>) | undefined
+  let ws: WebSocket | undefined
+
+  afterEach(async () => {
+    ws?.terminate()
+    ws = undefined
+    await close?.()
+    close = undefined
+  })
+
+  it('dispatches an autocomplete interaction natively and records the bot result', async () => {
+    const { db, url, close: cleanup } = await createTestGatewayServer()
+    close = cleanup
+    const applicationId = '111111111111111111'
+    const bot = seedBot(db, 'Bot autocomplete-token', applicationId)
+    const guild = seedGuild(db, bot)
+    const channel = seedChannel(db, guild)
+    const user = createTestUser(db, { username: 'Caller' })
+    db.prepare(
+      'INSERT INTO guild_members (guild_id, user_id) VALUES (?, ?)'
+    ).run(guild, user.id)
+    createCommand(db, applicationId, guild, {
+      name: 'search',
+      description: 'Search',
+    })
+
+    ws = new WebSocket(url)
+    await new Promise((resolve) => ws?.once('message', resolve))
+    ws.send(
+      JSON.stringify({
+        op: GatewayOp.Identify,
+        d: { token: bot, intents: 0 },
+      })
+    )
+    await new Promise((resolve) => ws?.once('message', resolve))
+    const dispatchPromise = new Promise<Record<string, unknown>>((resolve) => {
+      ws?.on('message', (raw: Buffer) => {
+        const event = JSON.parse(raw.toString()) as Record<string, unknown>
+        if (event.t === 'INTERACTION_CREATE') resolve(event)
+      })
+    })
+
+    const httpUrl = url.replace('ws://', 'http://')
+    const options = [
+      {
+        name: 'group',
+        type: 2,
+        options: [
+          {
+            name: 'sub',
+            type: 1,
+            options: [{ name: 'query', type: 3, value: 'ab', focused: true }],
+          },
+        ],
+      },
+    ]
+    const created = await fetch(`${httpUrl}/_test/interactions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        application_id: applicationId,
+        command_name: 'search',
+        type: 4,
+        guild_id: guild,
+        channel_id: channel,
+        user_id: user.id,
+        options,
+      }),
+    })
+    expect(created.status).toBe(201)
+    const interaction = (await created.json()) as { id: string; token: string }
+    const dispatch = await dispatchPromise
+    expect(dispatch.d).toEqual(interaction)
+    expect(dispatch.d).toMatchObject({
+      type: 4,
+      data: { name: 'search', type: 1, options },
+    })
+
+    const callback = (body: unknown): Promise<Response> =>
+      fetch(
+        `${httpUrl}/api/v10/interactions/${interaction.id}/${interaction.token}/callback`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }
+      )
+    const refused = await callback({ type: 4, data: { content: 'no' } })
+    expect(refused.status).toBe(400)
+    const accepted = await callback({
+      type: 8,
+      data: { choices: [{ name: 'A', value: 'a' }] },
+    })
+    expect(accepted.status).toBe(204)
+    const observation = await fetch(
+      `${httpUrl}/_test/interactions/${interaction.id}/callback?application_id=${applicationId}`,
+      { headers: { 'X-Interaction-Token': interaction.token } }
+    )
+    expect(await observation.json()).toEqual({
+      interaction_id: interaction.id,
+      application_id: applicationId,
+      responded: true,
+      initial_callback_type: 8,
+      choices: [{ name: 'A', value: 'a' }],
+      rejected_callback_type: 4,
+    })
+  })
+})

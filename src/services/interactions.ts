@@ -7,6 +7,10 @@
  */
 
 import type { MessageComponents } from '../validators/message-components'
+import {
+  parseAutocompleteChoices,
+  type AutocompleteChoice,
+} from '../validators/autocomplete'
 import { parseModal, type ModalObject } from '../validators/modal'
 
 import type { Database } from '../db'
@@ -56,6 +60,8 @@ interface InteractionRow {
   initial_callback_type: number | null
   initial_response_message_id: string | null
   modal_json: string | null
+  choices_json: string | null
+  rejected_callback_type: number | null
   message_json: string | null
   token_expires_at: number | null
   created_at: string
@@ -310,6 +316,17 @@ export interface InteractionCallbackObservation {
   initial_callback_type: number | null
   /** The normalized modal; present only when the accepted callback was type 9. */
   modal?: ModalObject
+  /**
+   * The normalized autocomplete choices; present only when the accepted
+   * callback was type 8 (`[]` for an empty result).
+   */
+  choices?: AutocompleteChoice[]
+  /**
+   * The latest callback type refused because it is not allowed for this
+   * interaction's type; absent when none was refused. A refusal does not
+   * acknowledge the interaction.
+   */
+  rejected_callback_type?: number
 }
 
 /**
@@ -328,7 +345,8 @@ export function getInteractionCallbackObservation(
 ): InteractionCallbackObservation | null {
   const row = db
     .prepare(
-      `SELECT id, application_id, responded, initial_callback_type, modal_json
+      `SELECT id, application_id, responded, initial_callback_type, modal_json,
+              choices_json, rejected_callback_type
        FROM interactions WHERE id = ? AND application_id = ? AND token = ?`
     )
     .get(interactionId, applicationId, token) as
@@ -339,6 +357,8 @@ export function getInteractionCallbackObservation(
         | 'responded'
         | 'initial_callback_type'
         | 'modal_json'
+        | 'choices_json'
+        | 'rejected_callback_type'
       >
     | undefined
   return row
@@ -351,6 +371,14 @@ export function getInteractionCallbackObservation(
           row.modal_json && {
             modal: JSON.parse(row.modal_json) as ModalObject,
           }),
+        ...(row.initial_callback_type === 8 && {
+          choices: row.choices_json
+            ? (JSON.parse(row.choices_json) as AutocompleteChoice[])
+            : [],
+        }),
+        ...(row.rejected_callback_type !== null && {
+          rejected_callback_type: row.rejected_callback_type,
+        }),
       }
     : null
 }
@@ -364,6 +392,8 @@ export interface InteractionCallbackPayload {
     components?: MessageComponents | null
     tts?: boolean | null
     flags?: number | null
+    /** Autocomplete result (type 8) choices, validated on the way in. */
+    choices?: unknown
     /** Modal (type 9) fields, validated by `parseModal`. */
     custom_id?: string
     title?: string
@@ -393,13 +423,19 @@ export type InteractionCallbackResult =
   | { ok: false; reason: 'not_found' }
   | { ok: false; reason: 'already_responded' }
   | { ok: false; reason: 'modal_not_allowed' }
+  | { ok: false; reason: 'autocomplete_only' }
+  | { ok: false; reason: 'autocomplete_result_not_allowed' }
 
 /**
  * Handles POST /interactions/:id/:token/callback. Type 4 (CHANNEL_MESSAGE_
  * WITH_SOURCE) creates the original response. Type 5 creates a loading
  * original that can be completed through the webhook edit endpoint.
  * Type 9 records the normalized modal for test control to read and submit;
- * it is refused for interaction types that cannot open a modal. Types 6/7
+ * it is refused for interaction types that cannot open a modal. Type 8
+ * records the normalized autocomplete choices; an autocomplete interaction
+ * accepts only type 8, and type 8 answers only an autocomplete interaction.
+ * A callback type refused for the interaction's type is recorded as
+ * `rejected_callback_type` without acknowledging the interaction. Types 6/7
  * retain this mock's acknowledgement-only behavior.
  * @param db - Database
  * @param interactionId - `:interactionId` route param
@@ -421,9 +457,23 @@ export function handleInteractionCallback(
   if (!row) return { ok: false, reason: 'not_found' }
   if (row.responded === 1) return { ok: false, reason: 'already_responded' }
   // Discord only lets commands and message components open a modal; PING,
-  // autocomplete, and modal submissions cannot.
-  if (payload.type === 9 && row.type !== 2 && row.type !== 3) {
-    return { ok: false, reason: 'modal_not_allowed' }
+  // autocomplete, and modal submissions cannot. An autocomplete interaction
+  // takes only an autocomplete result, which no other interaction takes.
+  const refusal =
+    row.type === 4 && payload.type !== 8
+      ? 'autocomplete_only'
+      : row.type !== 4 && payload.type === 8
+        ? 'autocomplete_result_not_allowed'
+        : payload.type === 9 && row.type !== 2 && row.type !== 3
+          ? 'modal_not_allowed'
+          : undefined
+  if (refusal) {
+    // Remember the refusal so a harness can fail fast instead of waiting for
+    // an acknowledgement that cannot come from this callback.
+    db.prepare(
+      'UPDATE interactions SET rejected_callback_type = ? WHERE id = ?'
+    ).run(payload.type, row.id)
+    return { ok: false, reason: refusal }
   }
 
   const interaction: InteractionCallbackResponse['interaction'] = {
@@ -484,9 +534,16 @@ export function handleInteractionCallback(
     if (!deferred) resource = { type: 4, message }
   } else {
     const { modal } = payload.type === 9 ? parseModal(payload.data) : {}
+    const choices =
+      payload.type === 8 ? parseAutocompleteChoices(payload.data).choices : null
     db.prepare(
-      'UPDATE interactions SET responded = 1, initial_callback_type = ?, modal_json = ? WHERE id = ?'
-    ).run(payload.type, modal ? JSON.stringify(modal) : null, row.id)
+      'UPDATE interactions SET responded = 1, initial_callback_type = ?, modal_json = ?, choices_json = ? WHERE id = ?'
+    ).run(
+      payload.type,
+      modal ? JSON.stringify(modal) : null,
+      choices ? JSON.stringify(choices) : null,
+      row.id
+    )
   }
 
   return {

@@ -3346,8 +3346,10 @@ guild-scoped) and dispatches it to the bot via the Gateway as
 `INTERACTION_CREATE`. Responds `201` immediately with the interaction's
 info; the Gateway dispatch happens asynchronously right after. The default
 interaction is a slash command (CHAT_INPUT); pass `target_id` to invoke a
-[user context command](#user-context-commands), or `type: 3` to
-[click a button](#button-clicks-message_component) on a bot message.
+[user context command](#user-context-commands), `type: 3` to
+[click a button](#button-clicks-message_component) on a bot message, or
+`type: 4` to [request autocomplete choices](#autocomplete-interactions-type-4)
+for a slash command option.
 
 ```bash
 curl -X POST http://localhost:3000/_test/interactions \
@@ -3368,11 +3370,11 @@ curl -X POST http://localhost:3000/_test/interactions \
 | `command_name`   | ✅       | Name of a command already registered via the Application Commands API                                                                                                                       |
 | `command_type`   | —        | Kind of command to invoke: `1` CHAT_INPUT (default) or `2` USER (default when `target_id` is set). Only commands of this kind match, so a slash command and a user command may share a name |
 | `target_id`      | —        | USER commands only: ID of the user the command is invoked on (`data.target_id`); must be an existing user                                                                                   |
-| `type`           | —        | Interaction type (default: `2`, APPLICATION_COMMAND)                                                                                                                                        |
+| `type`           | —        | Interaction type (default: `2`, APPLICATION_COMMAND); `4` is [AUTOCOMPLETE](#autocomplete-interactions-type-4), `3` a [button click](#button-clicks-message_component)                       |
 | `guild_id`       | —        | Guild ID. When set, prefers a guild-scoped command match, falling back to a global command of the same name                                                                                 |
 | `channel_id`     | —        | Channel ID the interaction is bound to (needed for `type: 4`/`5` original responses and followups)                                                                                          |
 | `user_id`        | —        | Invoking user ID (auto-generated if omitted)                                                                                                                                                |
-| `options`        | —        | Command option values, passed through into the interaction's `data.options`                                                                                                                 |
+| `options`        | —        | Command option values, passed through into the interaction's `data.options`. Exactly one option has `focused: true` for `type: 4` and none does for `type: 2`                               |
 
 **Response**: `201` with the created interaction object (matches the
 Discord `Interaction` shape). `404` (`{"message": "404: Not Found", "code": 0}`)
@@ -3462,6 +3464,61 @@ created. Responses to a user command use message type `23`
 | `404`  | `{"message": "404: Not Found", "code": 0}`              | No command of that kind and name in scope (a slash command of the same name does not match) |
 | `404`  | `Unknown User` (`10013`)                                | `target_id` is not an existing user (create one with `POST /_test/users`)                   |
 | `404`  | `Unknown Guild` (`10004`) / `Unknown Channel` (`10003`) | As for every simulated interaction                                                          |
+
+### Autocomplete interactions (`type: 4`)
+
+`type: 4` simulates a user typing into a slash command option that has
+`autocomplete` enabled, dispatching a native `APPLICATION_COMMAND_AUTOCOMPLETE`
+`INTERACTION_CREATE` for a registered CHAT_INPUT command. `options` is echoed
+into `data.options` as sent; the option being typed has `focused: true`, and
+it may sit inside a subcommand or subcommand group:
+
+```bash
+curl -X POST http://localhost:3000/_test/interactions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "application_id": "111111111111111111",
+    "type": 4,
+    "command_name": "ban",
+    "guild_id": "222222222222222222",
+    "channel_id": "333333333333333333",
+    "user_id": "555555555555555555",
+    "options": [
+      {
+        "name": "admin",
+        "type": 2,
+        "options": [
+          {
+            "name": "lookup",
+            "type": 1,
+            "options": [
+              { "name": "user", "type": 3, "value": "tom", "focused": true }
+            ]
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+The request is checked before anything is created or dispatched:
+
+- A `type: 4` request needs **exactly one** option with `focused: true`
+  anywhere in the option tree; a `type: 2` (or omitted `type`) request must have
+  none. Otherwise: `400`, `50035`, with an `options` field error.
+- `options` must be a list of objects (field error on `options` /
+  `options.N`), and a focused option's `value`, when present, must be a
+  **string** whatever the option's type: Discord sends the partially typed
+  text (such as `"3."` for an integer option), not a parsed value
+  (`options.N.value` error otherwise). A focused option may omit `value`.
+- Autocomplete only exists for CHAT_INPUT commands: `type: 4` with a USER
+  command (`target_id`) is refused with a `type` field error.
+
+The interaction has `type: 4` and the same `data` (`id`, `name`, `type`,
+`options`) and `member`/`user`, `locale`, `guild_id` and `channel_id` fields as
+a slash command. The bot answers it with a callback of type `8` only; see
+[Autocomplete results](#autocomplete-results-type-8). It never creates a
+message.
 
 ### Button clicks (MESSAGE_COMPONENT)
 
@@ -3623,13 +3680,15 @@ A known matching interaction returns `200`, with `Cache-Control: no-store`:
 | Direct `CHANNEL_MESSAGE_WITH_SOURCE` accepted            | `true`      | `4`                                |
 | Deferred `DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE` accepted | `true`      | `5`                                |
 | `MODAL` accepted with modal data                         | `true`      | `9`, plus a `modal` object (below) |
+| `APPLICATION_COMMAND_AUTOCOMPLETE_RESULT` accepted       | `true`      | `8`, plus a `choices` array (below) |
 | Other accepted callback                                  | `true`      | Accepted callback type number      |
 | Acknowledged before callback recording was introduced    | `true`      | `null` (unknown historical mode)   |
 
 `initial_callback_type` is the **response callback type**, not the incoming
 interaction's `type` (normally `2` for a slash command). The mock currently accepts
-callback types `1`, `4`, `5`, `6`, `7`, `8`, `9`, `10`, `12`, and `13`; only `4` and
-`5` create originals when a channel is supplied. Recording other accepted types
+callback types `1`, `4`, `5`, `6`, `7`, `8`, `9`, `10`, `12`, and `13` (subject to
+the per-interaction-type rules below); only `4` and `5` create originals when a
+channel is supplied. Recording other accepted types
 does not extend their existing acknowledgement-only behavior.
 
 When the accepted callback was a modal (`9` with `data`), the response also has
@@ -3687,6 +3746,57 @@ sequentially from `1` in document order, parents before children, skipping ids
 already used, as Discord does. A type-9 callback without `data` keeps its old
 acknowledgement-only behavior and records no `modal`.
 
+When the accepted callback was an autocomplete result (`8`), the response also
+has a `choices` array holding the normalized choices the bot returned, `[]` for
+an empty result. It is absent for every other state:
+
+```json
+{
+  "interaction_id": "123456789",
+  "application_id": "111111111111111111",
+  "responded": true,
+  "initial_callback_type": 8,
+  "choices": [
+    { "name": "Tom", "value": "444444444444444444" },
+    { "name": "Tomek", "value": "444444444444444445", "name_localizations": { "pl": "Tomek" } }
+  ]
+}
+```
+
+### Refused callbacks (`rejected_callback_type`)
+
+When the bot sends a callback whose type Discord does not allow for that kind
+of interaction (see [Autocomplete results](#autocomplete-results-type-8) and
+the modal rule), the callback gets a `400` and the interaction **stays
+unacknowledged**. The refusal is also recorded durably on the interaction, so a
+harness can fail fast instead of timing out on an interaction that never
+becomes `responded`. The observation then has a `rejected_callback_type`
+number next to `responded: false`:
+
+```json
+{
+  "interaction_id": "123456789",
+  "application_id": "111111111111111111",
+  "responded": false,
+  "initial_callback_type": null,
+  "rejected_callback_type": 4
+}
+```
+
+- It holds the type of the **latest** refused callback and is absent when
+  none was refused.
+- Only refusals by interaction type are recorded: an autocomplete interaction
+  answered with anything but `8`, type `8` for any other interaction, and a
+  modal (`9`) for an interaction that cannot open one. The callback body is
+  validated first, so a callback with an invalid body (`50035` for other
+  reasons, such as a malformed message or choice), an unsupported callback
+  type, a wrong token, or an already acknowledged interaction (`40060`) is not
+  recorded.
+- A later accepted callback works normally. The record stays, so a response
+  with `responded: true` may still carry the earlier `rejected_callback_type`;
+  read `responded` and `initial_callback_type` for the outcome.
+- It survives database reopen and is removed with the interaction.
+
 A harness can poll while `responded` is `false`, then distinguish direct `4` from
 deferred `5`. Any other type, or `true` with `null`, must be handled as a separate
 or unknown mode. Read the original message separately for completed output:
@@ -3713,6 +3823,49 @@ error bodies. Keep the token out of URLs, diagnostic output, and logs, including
 HTTP header dumps. The observation keeps working after the token expired (it is
 test control, not a token-authorized Discord route). This Fauxcord-specific route
 has no Discord OpenAPI manifest entry.
+
+---
+
+## Autocomplete results (`type: 8`)
+
+A bot answers an autocomplete interaction (interaction `type: 4`) with
+`POST /interactions/:id/:token/callback` and
+`{"type": 8, "data": {"choices": [{"name": "Tom", "value": "tom"}]}}`. As in
+Discord:
+
+- An autocomplete interaction accepts **only** callback type `8`. Types `4`,
+  `5`, `6`, `7`, `9` and the rest are refused with `400`, `50035` and a `type`
+  field error (`BASE_TYPE_CHOICES`, "An autocomplete interaction can only be
+  answered with an autocomplete result (type 8)."). No message is created and
+  `responded` stays `0`, so the bot can still answer correctly. The refusal is
+  recorded as [`rejected_callback_type`](#refused-callbacks-rejected_callback_type).
+- Type `8` is refused for every interaction type other than `4` the same way
+  ("An autocomplete result can only answer an autocomplete interaction.").
+- The existing modal rule is unchanged: a modal (`9`) is refused for
+  interactions other than commands and message components.
+
+`data.choices` is validated like Discord; failures return `400`, `50035`,
+without acknowledging the interaction, with paths prefixed `data.`:
+
+| Field                         | Rule                                                                                         |
+| ----------------------------- | -------------------------------------------------------------------------------------------- |
+| `choices`                     | Optional list of at most 25 choices (`data.choices`)                                         |
+| `choices.N.name`              | Required string, 1-100 characters                                                            |
+| `choices.N.value`             | Required string of at most 100 characters, or a number                                       |
+| `choices.N.name_localizations`| Optional (or `null`) object of supported [locales](https://docs.discord.com/developers/reference#locales) to names of 1-100 characters |
+
+A missing `choices` (or missing/`null` `data`) is an accepted, **empty** result:
+libraries such as DiscordGo omit `choices` when it is empty and send
+`{"type":8,"data":{"tts":false,"content":"","components":null,"embeds":null}}`.
+Message fields (`content`, `tts`, `embeds`, `components`, `flags`) are ignored
+for type `8`, and no message is ever created.
+
+The normalized choices (unknown choice fields dropped, `null`
+`name_localizations` omitted) are stored and returned by the
+[callback observation](#get-_testinteractionsinteractionidcallback--observe-the-initial-callback)
+as `choices`, only when the accepted callback was type `8`. With
+`?with_response=true` the callback returns `{"interaction": {…}}` without
+`resource`, as for every other non-message callback.
 
 ---
 
