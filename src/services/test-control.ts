@@ -8,6 +8,7 @@ import type { MessageComponents } from '../validators/message-components'
 
 import { getRestFaultRuntime, pruneRestFaults } from './rest-faults'
 import { getRestPageHolds } from './rest-page-holds'
+import { getRestMemberReadHolds } from './rest-member-read-holds'
 import { pruneClosedDms, resetClosedDms } from './closed-dms'
 import { randomBytes } from 'node:crypto'
 import type { Database } from '../db'
@@ -717,6 +718,7 @@ export function deleteTestSetup(db: Database, token: string): boolean {
     ).run(token)
   db.prepare('DELETE FROM bots WHERE token = ?').run(token)
   getRestPageHolds(db).reset(token)
+  getRestMemberReadHolds(db).reset(token)
   getRestFaultRuntime(db).prune()
   db.prepare(
     'DELETE FROM application_commands WHERE application_id = ? AND guild_id IS NULL'
@@ -734,6 +736,7 @@ export function deleteTestSetup(db: Database, token: string): boolean {
  */
 export function resetTestData(db: Database, token?: string): void {
   getRestPageHolds(db).reset(token)
+  getRestMemberReadHolds(db).reset(token)
   resetRestFaults(db, token)
   resetClosedDms(db, token)
   resetAuditLogResponses(db, token)

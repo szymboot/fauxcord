@@ -17,6 +17,8 @@ import {
 } from '../services/attachments'
 import { getRestPageHolds } from '../services/rest-page-holds'
 import { validateRestPageHold } from '../validators/rest-page-hold'
+import { getRestMemberReadHolds } from '../services/rest-member-read-holds'
+import { validateRestMemberReadHold } from '../validators/rest-member-read-hold'
 import { createAuditLogEntry } from '../services/audit-logs'
 import {
   isAuditSnowflake,
@@ -276,6 +278,41 @@ export function createTestRoutes(
 
   app.delete('/_test/rest-page-holds/:id', (c) => {
     return pageHolds.remove(c.req.param('id'))
+      ? c.body(null, 204)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
+
+  const memberReadHolds = getRestMemberReadHolds(db)
+  app.post('/_test/rest-member-read-holds', async (c) => {
+    const payload = validateRestMemberReadHold(
+      await c.req.json<unknown>().catch(() => undefined)
+    )
+    if (!payload) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    const result = memberReadHolds.create(payload)
+    if (result === 'UNKNOWN_SCOPE')
+      return c.json({ message: '404: Not Found', code: 0 }, 404)
+    return result === 'CONFLICT'
+      ? c.json({ message: '409: Conflict', code: 0 }, 409)
+      : c.json(result, 201)
+  })
+
+  app.get('/_test/rest-member-read-holds/:id', (c) => {
+    c.header('Cache-Control', 'no-store')
+    const status = memberReadHolds.get(c.req.param('id'))
+    return status
+      ? c.json(status)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
+
+  app.post('/_test/rest-member-read-holds/:id/release', (c) => {
+    const status = memberReadHolds.release(c.req.param('id'))
+    return status
+      ? c.json(status)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
+
+  app.delete('/_test/rest-member-read-holds/:id', (c) => {
+    return memberReadHolds.remove(c.req.param('id'))
       ? c.body(null, 204)
       : c.json({ message: '404: Not Found', code: 0 }, 404)
   })

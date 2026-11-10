@@ -7,6 +7,7 @@
 
 import { getRestFaultRuntime } from './rest-faults'
 import { getRestPageHolds } from './rest-page-holds'
+import { getRestMemberReadHolds } from './rest-member-read-holds'
 import { runInTransaction, type Database } from '../db'
 import { getGuildRoles, type RoleObject } from './guild-roles'
 import { getGuildChannels } from './channels'
@@ -270,7 +271,10 @@ export function isValidAfkChannel(
  */
 export function deleteGuild(db: Database, guildId: string): boolean {
   const result = db.prepare('DELETE FROM guilds WHERE id = ?').run(guildId)
-  if (result.changes > 0) getRestPageHolds(db).reset(undefined, guildId)
+  if (result.changes > 0) {
+    getRestPageHolds(db).reset(undefined, guildId)
+    getRestMemberReadHolds(db).reset(undefined, guildId)
+  }
   getRestFaultRuntime(db).prune()
   return result.changes > 0
 }
