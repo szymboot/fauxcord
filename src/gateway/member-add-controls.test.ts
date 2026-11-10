@@ -390,7 +390,7 @@ describe('native GUILD_MEMBER_ADD capture controls', () => {
     expect(rejected.status).toBe(400)
     expect(await rejected.json()).toEqual({
       message:
-        'member_id requires every event to be one of GUILD_MEMBER_ADD, GUILD_MEMBER_UPDATE, GUILD_BAN_ADD, GUILD_BAN_REMOVE, VOICE_STATE_UPDATE, INTERACTION_CREATE',
+        'member_id requires every event to be one of GUILD_MEMBER_ADD, GUILD_MEMBER_UPDATE, GUILD_MEMBER_REMOVE, GUILD_BAN_ADD, GUILD_BAN_REMOVE, VOICE_STATE_UPDATE, INTERACTION_CREATE',
       code: 0,
     })
     // role_id is still reserved for role events.

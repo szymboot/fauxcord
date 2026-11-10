@@ -519,6 +519,10 @@ disconnect real Discord sends, before the member removal event:
 | `POST /guilds/:guildId/bulk-ban`          | per banned user, in `user_ids` order: `GUILD_BAN_ADD`, `VOICE_STATE_UPDATE`¹, `GUILD_MEMBER_REMOVE`² |
 | `DELETE /guilds/:guildId/bans/:userId`    | `GUILD_BAN_REMOVE` when an existing ban is removed                                                   |
 
+Each of these `GUILD_MEMBER_REMOVE` envelopes (and the ban and voice events) can be
+captured, held, released and replayed individually; see
+[native member removals](#native-member-removals).
+
 1. Only when the member had a connected voice/stage state, meaning its channel
    is a voice or stage channel of the same guild (the rule
    `GUILD_CREATE.voice_states` uses; legacy rows pointing elsewhere count as
@@ -4281,8 +4285,8 @@ the newly resolved session.
 `MESSAGE_DELETE`,
 `MESSAGE_DELETE_BULK`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`,
 `MESSAGE_REACTION_REMOVE_ALL`, `MESSAGE_REACTION_REMOVE_EMOJI`,
-`GUILD_MEMBER_ADD`, `GUILD_MEMBER_UPDATE`, `GUILD_BAN_ADD`, `GUILD_BAN_REMOVE`,
-`GUILD_ROLE_CREATE`, `GUILD_ROLE_UPDATE`, `GUILD_ROLE_DELETE`,
+`GUILD_MEMBER_ADD`, `GUILD_MEMBER_UPDATE`, `GUILD_MEMBER_REMOVE`, `GUILD_BAN_ADD`,
+`GUILD_BAN_REMOVE`, `GUILD_ROLE_CREATE`, `GUILD_ROLE_UPDATE`, `GUILD_ROLE_DELETE`,
 `INVITE_DELETE`, `GUILD_AUDIT_LOG_ENTRY_CREATE` and
 `INTERACTION_CREATE`. Only events that the native producer actually emits are
 captured. Message creation (including
@@ -4294,6 +4298,10 @@ reaction-clear DELETE endpoints have native producers.
 For joins, select `GUILD_MEMBER_ADD` (see
 [native member joins](#native-member-joins)). Add `member_id` to match
 `d.user.id`, including a user who has not joined yet.
+
+For members leaving, being kicked or banned, select `GUILD_MEMBER_REMOVE` (see
+[native member removals](#native-member-removals)). Add `member_id` to match
+`d.user.id`.
 
 For bans, select `GUILD_BAN_ADD` and/or `GUILD_BAN_REMOVE`. Native producers
 are `PUT /guilds/:guildId/bans/:userId`, `POST /guilds/:guildId/bulk-ban`, and
@@ -4347,8 +4355,8 @@ answers within milliseconds can reach the route.
 
 Holding a ban event holds only its matching envelope. A following
 `VOICE_STATE_UPDATE` disconnect and `GUILD_MEMBER_REMOVE` proceed normally;
-select voice separately to hold the disconnect too. `GUILD_MEMBER_REMOVE` is
-not a supported capture event. The ban's database changes still commit before
+select voice or [`GUILD_MEMBER_REMOVE`](#native-member-removals) separately to
+hold those too. The ban's database changes still commit before
 capture. Held ban originals consume their native sequence but do not enter
 RESUME history; release/replay with `sequence: "new"` adds a fresh sequence to
 history, while opted-in `sequence: "original"` writes the captured envelope
@@ -4739,31 +4747,36 @@ handling. Malformed action JSON, duplicate IDs or invalid sequence mode returns
 
 `member_id` narrows a control to one subject user. It uses the same positive
 1–20 digit string format as the scope IDs; null/malformed selectors return
-`400`. If **every selected event is `GUILD_MEMBER_ADD`, `GUILD_BAN_ADD` or
-`GUILD_BAN_REMOVE`**, the user need not be a current guild member or exist in the
-users table. This lets a controller arm a join capture before the user joins
-(the capture is armed before the join it must hold), arm an unban capture after
-banning removed the user's membership, or select a ban target who never joined.
+`400`. If **every selected event is `GUILD_MEMBER_ADD`, `GUILD_MEMBER_REMOVE`,
+`GUILD_BAN_ADD` or `GUILD_BAN_REMOVE`**, the user need not be a current guild
+member or exist in the users table. This lets a controller arm a join capture
+before the user joins (the capture is armed before the join it must hold), arm an
+unban capture after banning removed the user's membership, select a ban target
+who never joined, or arm a removal capture for a user who has already left (for
+example to hold the next departure after a rejoin). A removal capture is
+normally armed while the member is still in the guild, because the departure
+happens after arming; no membership is required either way.
 If the control also selects `GUILD_MEMBER_UPDATE`, `VOICE_STATE_UPDATE` or
 `INTERACTION_CREATE`, the user must be a current member of that guild **when
 arming**, otherwise creation returns `404`. Membership is not rechecked on
-capture, release or replay: a ban's events remain capturable after membership
-removal. The selector matches the subject user of each event:
+capture, release or replay: a ban's or removal's events remain capturable after
+membership removal. The selector matches the subject user of each event:
 
 | Event                 | Matched field |
 | --------------------- | ------------- |
 | `GUILD_MEMBER_ADD`    | `d.user.id`   |
 | `GUILD_MEMBER_UPDATE` | `d.user.id`   |
+| `GUILD_MEMBER_REMOVE` | `d.user.id`   |
 | `VOICE_STATE_UPDATE`  | `d.user_id`   |
 | `GUILD_BAN_ADD`       | `d.user.id`   |
 | `GUILD_BAN_REMOVE`    | `d.user.id`   |
 | `INTERACTION_CREATE`  | `d.member.user.id` |
 
-`events` may combine these six events (for example holding a user's ban and
+`events` may combine these seven events (for example holding a user's ban and
 voice disconnect together, or a join with the member's later updates). Every
 listed event must be one of these user-scoped events; any other event type
 (messages, reactions) together with `member_id` returns `400` with
-`{"message":"member_id requires every event to be one of GUILD_MEMBER_ADD, GUILD_MEMBER_UPDATE, GUILD_BAN_ADD, GUILD_BAN_REMOVE, VOICE_STATE_UPDATE, INTERACTION_CREATE","code":0}`.
+`{"message":"member_id requires every event to be one of GUILD_MEMBER_ADD, GUILD_MEMBER_UPDATE, GUILD_MEMBER_REMOVE, GUILD_BAN_ADD, GUILD_BAN_REMOVE, VOICE_STATE_UPDATE, INTERACTION_CREATE","code":0}`.
 Dispatches of other users never match a selected control and pass through
 untouched.
 
@@ -5057,6 +5070,85 @@ curl -X POST http://localhost:3000/_test/guilds/222222222222222222/members/55555
   -H 'Content-Type: application/json' -d '{"invite_code": "AbCd1234"}'
 curl -X POST http://localhost:3000/_test/gateway-event-controls/CONTROL_ID/release \
   -H 'Content-Type: application/json' -d '{"event_ids":["HELD_EVENT_ID"]}'
+```
+
+### Native member removals
+
+Arm `events: ["GUILD_MEMBER_REMOVE"]` (optionally with `member_id`, see
+[member selectors](#member-selectors)) to hold, release, replay or merely observe
+the dispatch of a member leaving the guild. Typical use: hold a leave, let later
+events of the same user (a rejoin's `GUILD_MEMBER_ADD`, a role's
+`GUILD_MEMBER_UPDATE`) reach the bot first, then release the leave with its
+**original** sequence to test that an older leave does not clobber state cached
+from newer events.
+
+Native producers (each removal of a current member emits one envelope):
+
+- `DELETE /guilds/:guildId/members/:userId` (kick/leave of a member).
+- `PUT /guilds/:guildId/bans/:userId` (the ban's `GUILD_MEMBER_REMOVE`, only when
+  the banned user was a member).
+- `POST /guilds/:guildId/bulk-ban` (one per banned user who was a member, in
+  `user_ids` order).
+- Detaching the guild's own bot (`DELETE /users/@me/guilds/:guildId`, or a kick,
+  ban or bulk ban naming the bot) also emits the bot's own
+  `GUILD_MEMBER_REMOVE`, but that detaches the bot and cancels every control of
+  the guild right after (like for any event of a removed guild), so nothing stays
+  held or inspectable; see
+  [guild removal](#remove-a-guild-from-the-bot-through-discord-rest-guild_delete).
+  Test cleanup (`/_test/reset`, setup and guild deletion) is silent and
+  produces nothing to capture.
+
+Holding `GUILD_MEMBER_REMOVE` holds **only that envelope**. The other events of
+the same operation (`VOICE_STATE_UPDATE` disconnect, `GUILD_BAN_ADD`) are
+delivered immediately unless a second control selects them (their event types
+differ, so the controls never overlap); see
+[Member removal disconnects voice](#member-removal-disconnects-voice). The
+database changes commit before capture: the membership, its role assignments and
+voice state are already gone while the envelope is held. A control for the same
+guild and session conflicts (`409`) with another one selecting
+`GUILD_MEMBER_REMOVE` when either has no `member_id` or both name the same user
+(see [overlap and precedence](#member-selectors)).
+
+The dispatch requires the Guild Members intent: a session without it receives
+and captures nothing. Only the selected session is held; other sessions of the
+same setup receive their own ordinary dispatch. Capture stores an immutable
+snapshot of `{ guild_id, user }`. Release and replay deliver exactly that
+snapshot (`d.guild_id` and `d.user.id` as captured) even after the user rejoined,
+was updated or was banned; they never touch the database, never repeat the
+removal and never restore or change the membership. Limits, TTL, byte budget,
+ownership keys, `sequence: "original"` (requires `allow_original_sequence`),
+`application_ack`, disconnect/resume gating, inspection and cleanup behave
+exactly as for `GUILD_MEMBER_ADD` and `GUILD_MEMBER_UPDATE`. A removal produced
+by another assembled Fauxcord app sharing the same guild and user IDs is neither
+captured nor counted against `limit`.
+
+```bash
+# Arm before the member leaves; keep the original sequence releasable.
+curl -X POST http://localhost:3000/_test/gateway-event-controls \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "guild_id": "222222222222222222",
+    "bot_id": "111111111111111111",
+    "events": ["GUILD_MEMBER_REMOVE"],
+    "member_id": "555555555555555555",
+    "hold": true,
+    "allow_original_sequence": true
+  }'
+
+# Kick the member: the removal commits but the bot is not told.
+curl -X DELETE http://localhost:3000/api/v10/guilds/222222222222222222/members/555555555555555555 \
+  -H "Authorization: Bot mytoken"
+
+# The member rejoins and gets a role; their GUILD_MEMBER_ADD and
+# GUILD_MEMBER_UPDATE reach the bot with later sequences.
+curl -X POST http://localhost:3000/_test/guilds/222222222222222222/members/555555555555555555
+curl -X PUT http://localhost:3000/api/v10/guilds/222222222222222222/members/555555555555555555/roles/666666666666666666 \
+  -H "Authorization: Bot mytoken"
+
+# Now deliver the older leave with the sequence it was captured with.
+curl -X POST http://localhost:3000/_test/gateway-event-controls/CONTROL_ID/release \
+  -H 'Content-Type: application/json' \
+  -d '{"event_ids":["HELD_EVENT_ID"],"sequence":"original"}'
 ```
 
 ### Transport observation and explicit application acknowledgement

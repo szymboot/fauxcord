@@ -12,6 +12,7 @@ import { currentEmitDatabase } from './bus'
 export const CONTROL_EVENTS = [
   'GUILD_MEMBER_ADD',
   'GUILD_MEMBER_UPDATE',
+  'GUILD_MEMBER_REMOVE',
   'GUILD_BAN_ADD',
   'GUILD_BAN_REMOVE',
   'GUILD_ROLE_CREATE',
@@ -37,6 +38,7 @@ export const CONTROL_EVENTS = [
 export const MEMBER_SCOPED_EVENTS = [
   'GUILD_MEMBER_ADD',
   'GUILD_MEMBER_UPDATE',
+  'GUILD_MEMBER_REMOVE',
   'GUILD_BAN_ADD',
   'GUILD_BAN_REMOVE',
   'VOICE_STATE_UPDATE',
@@ -124,6 +126,7 @@ export function memberScopedUserId(
   return [
     'GUILD_MEMBER_ADD',
     'GUILD_MEMBER_UPDATE',
+    'GUILD_MEMBER_REMOVE',
     'GUILD_BAN_ADD',
     'GUILD_BAN_REMOVE',
   ].includes(event ?? '')
@@ -142,10 +145,10 @@ export interface EventControlRequest {
   session_id?: string
   /**
    * Optional exact member selector; every listed event must be one of
-   * {@link MEMBER_SCOPED_EVENTS}. Policies made only of ban and member-add
-   * events allow non-members (a joining user is not a member yet); member
-   * update, voice and interaction events require current membership when
-   * arming. Other users pass through.
+   * {@link MEMBER_SCOPED_EVENTS}. Policies made only of ban, member-add and
+   * member-remove events allow non-members (a joining user is not a member
+   * yet, a departed one no longer is); member update, voice and interaction
+   * events require current membership when arming. Other users pass through.
    */
   member_id?: string
   /**
