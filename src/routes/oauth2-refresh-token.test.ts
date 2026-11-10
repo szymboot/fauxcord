@@ -226,6 +226,32 @@ describe('POST /oauth2/token (refresh_token)', () => {
     }
   })
 
+  it('rejects malformed Basic Base64 without consuming the token', async () => {
+    const original = await issue()
+    const valid = basic(APP_ID, SECRET).Authorization.slice(6)
+    for (const authorization of [
+      `Basic !!!${valid}`,
+      `Basic ${valid.slice(0, 4)} ${valid.slice(4)}`,
+      `Basic ${valid}$`,
+      'Basic ',
+    ]) {
+      const response = await post(
+        {
+          grant_type: 'refresh_token',
+          refresh_token: original.refresh_token ?? '',
+        },
+        { Authorization: authorization }
+      )
+      expect(response.status).toBe(401)
+      await expect(response.json()).resolves.toEqual({
+        error: 'invalid_client',
+      })
+    }
+    expect(await statusOf(refreshWithBody(original.refresh_token ?? ''))).toBe(
+      200
+    )
+  })
+
   it('rejects a missing refresh_token with 400 invalid_request', async () => {
     await issue()
     const response = await post({

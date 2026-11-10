@@ -18,6 +18,9 @@ import {
   refreshAccessToken,
 } from '../services/oauth2'
 
+/** Standard Base64 alphabet with optional padding. */
+const BASE64_PATTERN = /^[\d+/A-Za-z]+={0,2}$/
+
 /** Client credentials presented to the token endpoint. */
 interface ClientCredentials {
   clientId: string
@@ -61,10 +64,10 @@ function readClientCredentials(
   params: URLSearchParams
 ): ClientCredentials | null {
   if (authorization && isBasicAuthorization(authorization)) {
-    const decoded = Buffer.from(
-      authorization.slice(6).trim(),
-      'base64'
-    ).toString('utf8')
+    const encoded = authorization.slice(6).trim()
+    // Buffer silently skips characters outside the alphabet, so check first
+    if (!BASE64_PATTERN.test(encoded)) return null
+    const decoded = Buffer.from(encoded, 'base64').toString('utf8')
     const separator = decoded.indexOf(':')
     if (separator === -1) return null
     const clientId = decodeBasicComponent(decoded.slice(0, separator))
