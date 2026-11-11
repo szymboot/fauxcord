@@ -75,6 +75,8 @@ import {
 } from '../validators/member-dates'
 import { validateTestUserGlobalName } from '../validators/test-user-global-name'
 import { validateRestFault } from '../validators/rest-fault'
+import { validateRestObservation } from '../validators/rest-observation'
+import { getRestObservations } from '../services/rest-observations'
 import { createClosedDmRoutes } from './test-closed-dms'
 import { createDmChannelRoutes } from './test-dm-channels'
 import { createTestInviteRoutes } from './test-invites'
@@ -339,6 +341,30 @@ export function createTestRoutes(
 
   app.delete('/_test/rest-faults/:id', (c) => {
     return deleteRestFault(db, c.req.param('id'))
+      ? c.body(null, 204)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
+
+  app.post('/_test/rest-observations', async (c) => {
+    const parsed: unknown = await c.req.json().catch(() => undefined)
+    const payload = validateRestObservation(parsed)
+    if (!payload) return c.json({ message: '400: Bad Request', code: 0 }, 400)
+    const result = getRestObservations(db).create(payload)
+    return result === 'UNKNOWN_SCOPE'
+      ? c.json({ message: '404: Not Found', code: 0 }, 404)
+      : c.json(result, 201)
+  })
+
+  app.get('/_test/rest-observations/:id', (c) => {
+    c.header('Cache-Control', 'no-store')
+    const observation = getRestObservations(db).get(c.req.param('id'))
+    return observation
+      ? c.json(observation)
+      : c.json({ message: '404: Not Found', code: 0 }, 404)
+  })
+
+  app.delete('/_test/rest-observations/:id', (c) => {
+    return getRestObservations(db).remove(c.req.param('id'))
       ? c.body(null, 204)
       : c.json({ message: '404: Not Found', code: 0 }, 404)
   })

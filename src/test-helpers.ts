@@ -16,6 +16,7 @@ import { initializeDatabase, closeDatabase } from './db'
 import type { Database } from './db'
 import { createAuthMiddleware, type AppEnv } from './middleware/auth'
 import { createRestFaultMiddleware } from './middleware/rest-faults'
+import { createRestObservationMiddleware } from './middleware/rest-observations'
 import { createRestPageHoldMiddleware } from './middleware/rest-page-holds'
 import { createRestMemberReadHoldMiddleware } from './middleware/rest-member-read-holds'
 import { corsMiddleware } from './middleware/cors'
@@ -139,6 +140,7 @@ export function createFullTestApp(): FullTestContext {
   // Authentication middleware
   const authMiddleware = createAuthMiddleware(db, false)
   app.use('*', authMiddleware)
+  app.use('*', createRestObservationMiddleware(db))
   app.use('*', createRestPageHoldMiddleware(db))
   app.use('*', createRestFaultMiddleware(db))
   app.use('*', createRestMemberReadHoldMiddleware(db))

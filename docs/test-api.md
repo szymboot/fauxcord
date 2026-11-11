@@ -683,7 +683,7 @@ Fauxcord-only route policy.
 
 ---
 
-## `POST /_test/reset` — Reset posted data, audit logs and REST faults
+## `POST /_test/reset` — Reset posted data, audit logs, REST faults and observations
 
 Deletes only posted data, while keeping Guild, Channel, and Bot registrations intact.  
 Use this for initialization before and after each test case.
@@ -698,7 +698,7 @@ curl -X POST http://localhost:3000/_test/reset \
 
 What gets deleted: messages, webhooks, invites, reactions, pins, embeds, attachments,
 retained attachment files and download metadata (including deleted-message uploads),
-voice-state fixtures, audit-log fixtures and recorded invite-deletion entries, audit response controls, and all REST fault controls (including exhausted controls and consumption history).
+voice-state fixtures, audit-log fixtures and recorded invite-deletion entries, audit response controls, all REST fault controls (including exhausted controls and consumption history) and all REST observations.
 
 ### Reset only a specific Bot's data
 
@@ -709,7 +709,7 @@ curl -X POST http://localhost:3000/_test/reset \
 ```
 
 Only messages sent by that Bot and Webhooks/Invites belonging to that Bot's Guilds are deleted.
-REST fault controls in that Bot's Guilds are also deleted, including controls targeting
+REST fault controls and REST observations in that Bot's Guilds are also deleted, including controls targeting
 human-authored messages, global user reads, and DM channel creation.
 Audit-log fixtures and recorded entries are cleared by the target Guild's Bot token,
 regardless of their actor or target author. Voice states in that Bot's Guilds are also cleared. Other Bots' Guilds keep their controls and audit history.
@@ -2131,6 +2131,111 @@ a one-shot fault was exercised. Inspection does not consume a fault.
 Returns `204` when removed, or `404` if unknown. Removes both the active failure
 and its history; subsequent requests run normally. Pending transport delays
 finish with their configured error and never enter the ordinary route.
+
+## `POST /_test/rest-observations` — Count exact REST requests without failing them
+
+A REST fault fails a request before its route runs, so it cannot show how many
+requests a bot sent while behaving normally. An **observation** only counts and
+records the requests of an exact selector; every request still runs exactly as
+without it (no failure, delay, rate limit or changed response). Create it
+**before** triggering the behavior under test. This is how a consumer proves it
+sent no request, or exactly one, for a burst of events.
+
+```bash
+# Count every command permission edit of a guild (any command)
+curl -X POST http://localhost:3000/_test/rest-observations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "method": "PUT",
+    "path": "/applications/111111111111111111/guilds/222222222222222222/commands/*/permissions",
+    "timeout_ms": 30000
+  }'
+# => 201 {"id":"...","method":"PUT","path":"...","guild_id":"222222222222222222",
+#         "count":0,"requests":[],"expires_at":"2030-01-01T00:00:30.000Z"}
+
+# ... trigger the bot's resync, then read the evidence:
+curl http://localhost:3000/_test/rest-observations/<id>
+# => {"id":"...","method":"PUT","path":".../commands/*/permissions",
+#     "guild_id":"222222222222222222","count":1,
+#     "requests":[{"method":"PUT",
+#       "path":"/applications/111111111111111111/guilds/222222222222222222/commands/444444444444444444/permissions",
+#       "status":200,"at":"2030-01-01T00:00:01.250Z","credential":"bot"}],
+#     "expires_at":"2030-01-01T00:00:30.000Z","state":"active"}
+```
+
+Assert `count === 0` after a role rename, `count === 1` after a burst of role
+updates, or compare the `requests[].path` command IDs to see which commands were
+edited.
+
+**Fields**
+
+| Field        | Required | Description                                                        |
+| ------------ | -------- | ------------------------------------------------------------------ |
+| `method`     | ✅       | HTTP method of a [`/_test/rest-faults` selector](#post-_testrest-faults--fail-bounded-exact-rest-attempts) |
+| `path`       | ✅       | Bare path with concrete numeric IDs, exactly as for faults; see the command wildcard below |
+| `guild_id`   | —        | Scope for global user selectors, with the same rules as for faults |
+| `timeout_ms` | —        | Lifetime, integer `1`–`600000` (default `60000`)                   |
+
+Unknown fields (including the fault-only `status`, `times`, `mode`, `query` and
+`recipient_id`) are rejected. The selector set, path format, ID requirements and
+validation are exactly those of `/_test/rest-faults`; page selectors
+(`/guilds/{id}/members`, `/guilds/{id}/bans`, `/channels/{id}/messages`) count
+requests with any query string. Invalid input returns
+`400 {"message":"400: Bad Request","code":0}`; a missing guild, channel or
+application mismatch returns `404`. Observations never conflict: overlapping
+observations (even of the same selector) are allowed and count independently.
+
+**Command wildcard.** For `GET` and `PUT`
+`/applications/{applicationId}/guilds/{guildId}/commands/{commandId}/permissions`
+the `{commandId}` segment may be `*`, matching every command of that guild,
+including the application ID used as command ID for application-level
+permissions. `*` is accepted nowhere else.
+
+**Who is counted.** The caller scope is the same as for faults. `GET` selectors
+and the guild-owned selectors (guild command listing and bulk overwrite, command
+permission reads and edits, guild role listing, channel edits, leaving a guild,
+guild channel creation, DM creation and the interaction routes) observe only the
+bot owning the selected guild; the application command selectors and
+`GET /guilds/{guildId}/roles` also observe OAuth2 Bearer tokens issued to that
+bot's application. Requests of other bots or applications are not counted. Other
+selectors count any authenticated caller. Interaction routes are authorized by
+the interaction token and recorded with `credential: "bot"`; their `path` is the
+token-free `/interactions/{id}/...` form.
+
+**What is counted.** Every matching request that reaches Fauxcord while the
+observation is active is counted exactly once, on the `/api/v10`, `/api` and
+bare prefixes alike, whatever its outcome: a request that a REST fault fails,
+that a rate limit or page hold answers, or that ends in a route error is counted
+with the final HTTP status the response carries. A `disconnect` fault destroys
+the connection, so its entry records the status of the response that was never
+delivered (`204`). A request is recorded when its response is produced, so a
+delayed or held request appears once it finishes. Fauxcord does not count a
+request it rejects for authentication (`401`), since it cannot attribute it.
+
+Returns `201` with `id`, `method`, `path`, `guild_id` (the resolved guild),
+`count: 0`, `requests: []` and `expires_at`. After `timeout_ms` the observation
+stops counting but stays readable until removed.
+
+## `GET /_test/rest-observations/:id` — Read an observation
+
+Returns the snapshot, or `404` for an unknown or cleared observation:
+
+| Field        | Description                                                                |
+| ------------ | -------------------------------------------------------------------------- |
+| `id`, `method`, `path`, `guild_id`, `expires_at` | As returned by creation (`path` as selected, including `*`) |
+| `count`      | Number of counted requests, never reset by the retention limit             |
+| `requests`   | Newest-last list of `{method, path, status, at, credential}`; `path` is the concrete request path, `at` an ISO timestamp, `credential` `"bot"` or `"bearer"`. At most the latest `1000` entries are kept (the oldest are dropped) while `count` keeps counting |
+| `state`      | `"active"`, or `"expired"` once `expires_at` has passed                    |
+
+Reading never changes an observation.
+
+## `DELETE /_test/rest-observations/:id` — Remove an observation
+
+Returns `204`, or `404` if unknown. Observations are also removed, like REST
+faults, by `POST /_test/reset` (all of them, or only those of the given Bot's
+guilds), by deleting the setup (`DELETE /_test/setup/:token`), by deleting the
+guild or when its owning bot changes. Deleting a channel does not remove
+observations, so `DELETE /channels/{channelId}` can be counted and read back.
 
 ---
 

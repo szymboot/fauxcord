@@ -45,6 +45,7 @@ import {
 } from './invites'
 import { resetAuditLogResponses } from './audit-log-responses'
 import { resetRestFaults } from './rest-faults'
+import { getRestObservations } from './rest-observations'
 import {
   resolveMessageStickers,
   getMessageStickerItems,
@@ -684,6 +685,7 @@ export function setupTestEnvironment(
   const result = setup()
   pruneClosedDms(db)
   pruneRestFaults(db)
+  getRestObservations(db).prune()
   // Emit only after the transaction has committed successfully.
   for (const emit of pendingEvents) emit()
   return result
@@ -719,6 +721,7 @@ export function deleteTestSetup(db: Database, token: string): boolean {
   db.prepare('DELETE FROM bots WHERE token = ?').run(token)
   getRestPageHolds(db).reset(token)
   getRestMemberReadHolds(db).reset(token)
+  getRestObservations(db).reset(token)
   getRestFaultRuntime(db).prune()
   db.prepare(
     'DELETE FROM application_commands WHERE application_id = ? AND guild_id IS NULL'
@@ -737,6 +740,7 @@ export function deleteTestSetup(db: Database, token: string): boolean {
 export function resetTestData(db: Database, token?: string): void {
   getRestPageHolds(db).reset(token)
   getRestMemberReadHolds(db).reset(token)
+  getRestObservations(db).reset(token)
   resetRestFaults(db, token)
   resetClosedDms(db, token)
   resetAuditLogResponses(db, token)

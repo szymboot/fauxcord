@@ -371,8 +371,14 @@ function deserializeFault(
   }
 }
 
+/** Selector fields that determine which guild and bot own a control. */
+export type RestFaultSelector = Pick<
+  RestFaultRequest,
+  'method' | 'path' | 'guild_id'
+>
+
 /** Guild, owning bot and optional channel that scope one control. */
-interface RestFaultScope {
+export interface RestFaultScope {
   guild: { id: string; bot_token: string }
   channelId: string | null
   /** Whether only the scope's owning bot may consume the control. */
@@ -414,9 +420,9 @@ function resolveInteractionFaultScope(
 }
 
 /** Resolves the scope an exact selector derives from existing fixtures. */
-function resolveRestFaultScope(
+export function resolveRestFaultScope(
   db: Database,
-  request: RestFaultRequest
+  request: RestFaultSelector
 ): RestFaultScope | undefined {
   const interactionId = parseRestFaultInteractionSelector(
     request.method,
@@ -608,6 +614,59 @@ export function resolveInteractionFaultTarget(
         ownerToken: row.bot_token,
       }
     : undefined
+}
+
+/** Request path in selector form and the bot that owns an interaction route. */
+export interface RestFaultRequestTarget {
+  /** Version-prefix-free selector path the request is matched as. */
+  path: string
+  /** Bot owning the stored interaction of a token-authorized request. */
+  interactionOwner?: string
+  /**
+   * True for the token-free interaction pseudo-paths sent directly: only a
+   * verified native interaction request may match those selectors.
+   */
+  forgedInteractionPath: boolean
+}
+
+/**
+ * Derives the selector form of a request: strips the version prefix, decodes
+ * the `@me` spellings selectors use, and resolves token-authorized interaction
+ * routes to their token-free selector. Shared by fault and observation
+ * matching so both see exactly the same path.
+ * @param db - Database
+ * @param method - HTTP method
+ * @param rawPath - Request path as received
+ * @param botUserId - User ID of the authenticated bot, if any
+ */
+export function resolveRestFaultRequestTarget(
+  db: Database,
+  method: string,
+  rawPath: string,
+  botUserId?: string
+): RestFaultRequestTarget {
+  let path = rawPath
+    .replace(/^\/api(?:\/v10)?(?=\/)/, '')
+    .replace(/^\/users\/%40me\/(?=channels$|guilds\/\d{1,20}$)/, '/users/@me/')
+  const interaction = resolveInteractionFaultTarget(db, method, path)
+  if (interaction) path = interaction.path
+  // Token-free interaction selectors are never reachable by sending their
+  // pseudo-paths directly; only a verified native request matches them.
+  else if (parseRestFaultInteractionSelector(method, path))
+    return { path, forgedInteractionPath: true }
+  // The native voice-state read resolves `@me` (or `%40me`, which decodeURI
+  // keeps) to the calling bot, so the selector for that bot's numeric user ID
+  // matches either spelling.
+  if (method === 'GET' && botUserId)
+    path = path.replace(
+      /^(\/guilds\/\d{1,20}\/voice-states)\/(?:@|%40)me$/,
+      (_, prefix: string) => `${prefix}/${botUserId}`
+    )
+  return {
+    path,
+    interactionOwner: interaction?.ownerToken,
+    forgedInteractionPath: false,
+  }
 }
 
 /**

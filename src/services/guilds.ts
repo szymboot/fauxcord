@@ -8,6 +8,7 @@
 import { getRestFaultRuntime } from './rest-faults'
 import { getRestPageHolds } from './rest-page-holds'
 import { getRestMemberReadHolds } from './rest-member-read-holds'
+import { getRestObservations } from './rest-observations'
 import { runInTransaction, type Database } from '../db'
 import { getGuildRoles, type RoleObject } from './guild-roles'
 import { getGuildChannels } from './channels'
@@ -275,6 +276,7 @@ export function deleteGuild(db: Database, guildId: string): boolean {
     getRestPageHolds(db).reset(undefined, guildId)
     getRestMemberReadHolds(db).reset(undefined, guildId)
   }
+  getRestObservations(db).reset(undefined, guildId)
   getRestFaultRuntime(db).prune()
   return result.changes > 0
 }
