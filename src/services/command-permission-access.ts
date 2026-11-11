@@ -11,7 +11,10 @@ import type {
   ApplicationCommandObject,
   CommandPermissionEntry,
 } from './application-commands'
-import { getCommandPermissions } from './application-commands'
+import {
+  getApplicationLevelPermissionEntries,
+  getCommandPermissions,
+} from './application-commands'
 
 /** Command permission overwrite types. */
 const OverwriteType = { ROLE: 1, USER: 2 } as const
@@ -48,9 +51,45 @@ function getHeldRoles(
 }
 
 /**
- * Whether the user can run the command, from its stored permission overwrites
- * (user, then roles with any allow winning over denies, then `@everyone`) and
- * finally `default_member_permissions`. Channel overwrites are ignored.
+ * Resolves a permission entry list for a user: the user's own entry, then the
+ * user's roles (any allow wins over denies), then the `@everyone` entry whose
+ * ID is the guild ID. Channel entries are ignored.
+ * @param entries - Stored permission entries
+ * @param guildId - Guild ID
+ * @param userId - User ID
+ * @param heldRoles - Roles the user holds besides `@everyone`
+ * @returns The decision, or undefined when no entry applies to the user
+ */
+function evaluateEntries(
+  entries: CommandPermissionEntry[],
+  guildId: string,
+  userId: string,
+  heldRoles: RankedRole[]
+): boolean | undefined {
+  const personal = entries.find(
+    (entry) => entry.type === OverwriteType.USER && entry.id === userId
+  )
+  if (personal) return personal.permission
+
+  const roleIds = new Set(heldRoles.map((role) => role.id))
+  const roleEntries = entries.filter(
+    (entry) => entry.type === OverwriteType.ROLE && roleIds.has(entry.id)
+  )
+  return roleEntries.length > 0
+    ? roleEntries.some((entry) => entry.permission)
+    : entries.find(
+        (entry) => entry.type === OverwriteType.ROLE && entry.id === guildId
+      )?.permission
+}
+
+/**
+ * Whether the user can run the command. The command's own stored overwrites
+ * decide when it has any; a command with none falls back to the
+ * application-level list (Discord applies it to every command without
+ * explicit overwrites). Each list is evaluated as the user's own entry, then
+ * the user's roles (any allow winning over denies), then the `@everyone` entry.
+ * When no entry applies, `default_member_permissions` decides. Channel
+ * overwrites are ignored.
  * @param db - Database
  * @param guildId - Guild ID
  * @param command - Command being edited
@@ -67,26 +106,20 @@ function canRunCommand(
   permissions: bigint,
   heldRoles: RankedRole[]
 ): boolean {
-  const overwrites: CommandPermissionEntry[] =
+  const ownEntries: CommandPermissionEntry[] =
     getCommandPermissions(db, command.application_id, guildId, command.id)
       ?.permissions ?? []
+  const entries =
+    ownEntries.length > 0
+      ? ownEntries
+      : getApplicationLevelPermissionEntries(
+          db,
+          command.application_id,
+          guildId
+        )
 
-  const personal = overwrites.find(
-    (entry) => entry.type === OverwriteType.USER && entry.id === userId
-  )
-  if (personal) return personal.permission
-
-  const roleIds = new Set(heldRoles.map((role) => role.id))
-  const roleEntries = overwrites.filter(
-    (entry) => entry.type === OverwriteType.ROLE && roleIds.has(entry.id)
-  )
-  if (roleEntries.length > 0)
-    return roleEntries.some((entry) => entry.permission)
-
-  const everyone = overwrites.find(
-    (entry) => entry.type === OverwriteType.ROLE && entry.id === guildId
-  )
-  if (everyone) return everyone.permission
+  const decided = evaluateEntries(entries, guildId, userId, heldRoles)
+  if (decided !== undefined) return decided
 
   const required = command.default_member_permissions
   if (required === null) return true
@@ -95,33 +128,20 @@ function canRunCommand(
 }
 
 /**
- * Whether the user may edit the permissions of `command` in the guild.
- *
- * Mirrors Discord's documented requirements for the authorizing user, as
- * Fauxcord's approximation:
- * 1. The user is a guild member who is the owner or has ADMINISTRATOR, or has
- *    both MANAGE_GUILD and MANAGE_ROLES.
- * 2. The user can run the command. The owner and Administrators always can;
- *    otherwise the command's stored overwrites decide (user overwrite first,
- *    then the user's roles where any allow wins over denies, then the
- *    `@everyone` overwrite whose ID is the guild ID), falling back to
- *    `default_member_permissions` (null = everyone, "0" = nobody without
- *    Administrator, otherwise all bits required). Channel overwrites are
- *    ignored.
- * 3. Every ROLE entry other than `@everyone` exists in the guild and is
- *    strictly below the user's highest role (the owner is exempt). USER and
- *    CHANNEL entries are not checked: Discord does not document that rule.
+ * Shared authorization of permission edits. `command` is the command being
+ * edited, or null for the application-level list, which belongs to no single
+ * command and therefore skips the "can run the command" check.
  * @param db - Database
  * @param guildId - Guild ID
- * @param command - Command being edited
+ * @param command - Command being edited, or null for the application-level list
  * @param userId - User behind the Bearer token
  * @param entries - Permission entries in the request payload
  * @returns True when the edit is allowed
  */
-export function canEditCommandPermissions(
+function canEditPermissions(
   db: Database,
   guildId: string,
-  command: ApplicationCommandObject,
+  command: ApplicationCommandObject | null,
   userId: string,
   entries: CommandPermissionEntry[]
 ): boolean {
@@ -135,6 +155,7 @@ export function canEditCommandPermissions(
 
   const heldRoles = getHeldRoles(db, guildId, userId)
   if (
+    command &&
     !resolved.privileged &&
     !canRunCommand(
       db,
@@ -172,4 +193,63 @@ export function canEditCommandPermissions(
     if (!role || (!resolved.owner && !outranksRole(highest, role))) return false
   }
   return true
+}
+
+/**
+ * Whether the user may edit the permissions of `command` in the guild.
+ *
+ * Mirrors Discord's documented requirements for the authorizing user, as
+ * Fauxcord's approximation:
+ * 1. The user is a guild member who is the owner or has ADMINISTRATOR, or has
+ *    both MANAGE_GUILD and MANAGE_ROLES.
+ * 2. The user can run the command. The owner and Administrators always can.
+ *    Otherwise the command's stored overwrites decide when it has any; a
+ *    command with none uses the application-level list (the permissions stored
+ *    under the application ID). Each list is evaluated as the user's own
+ *    entry, then the user's roles where any allow wins over denies, then the
+ *    `@everyone` entry whose ID is the guild ID. When no entry applies,
+ *    `default_member_permissions` decides (null = everyone, "0" = nobody
+ *    without Administrator, otherwise all bits required). Channel overwrites
+ *    are ignored.
+ * 3. Every ROLE entry other than `@everyone` exists in the guild and is
+ *    strictly below the user's highest role (the owner is exempt). USER and
+ *    CHANNEL entries are not checked: Discord does not document that rule.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param command - Command being edited
+ * @param userId - User behind the Bearer token
+ * @param entries - Permission entries in the request payload
+ * @returns True when the edit is allowed
+ */
+export function canEditCommandPermissions(
+  db: Database,
+  guildId: string,
+  command: ApplicationCommandObject,
+  userId: string,
+  entries: CommandPermissionEntry[]
+): boolean {
+  return canEditPermissions(db, guildId, command, userId, entries)
+}
+
+/**
+ * Whether the user may edit the application-level permission list of the
+ * guild (the list stored under the application ID). The same rules as
+ * {@link canEditCommandPermissions} apply (rules 1 and 3: guild member who is
+ * the owner, has ADMINISTRATOR, or has MANAGE_GUILD and MANAGE_ROLES, and
+ * every ROLE entry other than `@everyone` exists and ranks strictly below the
+ * user's highest role, the owner being exempt), except that the "can run the
+ * command" check is skipped because the list belongs to no single command.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param userId - User behind the Bearer token
+ * @param entries - Permission entries in the request payload
+ * @returns True when the edit is allowed
+ */
+export function canEditApplicationPermissions(
+  db: Database,
+  guildId: string,
+  userId: string,
+  entries: CommandPermissionEntry[]
+): boolean {
+  return canEditPermissions(db, guildId, null, userId, entries)
 }

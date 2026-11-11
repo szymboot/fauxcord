@@ -883,6 +883,18 @@ export function initializeDatabase(dbPath: string): Database {
       PRIMARY KEY (guild_id, command_id)
     );
 
+    -- Application-level command permissions: the list Discord stores under
+    -- the application ID in the command position. It belongs to no command,
+    -- so it cannot live in application_command_permissions (command_id is a
+    -- foreign key to application_commands).
+    CREATE TABLE IF NOT EXISTS application_level_command_permissions (
+      application_id TEXT NOT NULL,
+      guild_id       TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+      permissions    TEXT NOT NULL DEFAULT '[]',
+      created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (guild_id, application_id)
+    );
+
     CREATE TABLE IF NOT EXISTS interactions (
       id                          TEXT PRIMARY KEY,
       application_id              TEXT NOT NULL,
@@ -934,10 +946,15 @@ export function initializeDatabase(dbPath: string): Database {
       updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_applications_owner ON applications(owner_id);
-    CREATE TRIGGER IF NOT EXISTS trg_applications_delete_legacy_state
+    -- Recreated on every start so databases created before the
+    -- application-level permissions table also clean it up.
+    DROP TRIGGER IF EXISTS trg_applications_delete_legacy_state;
+    CREATE TRIGGER trg_applications_delete_legacy_state
       AFTER DELETE ON applications
       BEGIN
         DELETE FROM application_command_permissions
+          WHERE application_id = OLD.id;
+        DELETE FROM application_level_command_permissions
           WHERE application_id = OLD.id;
         DELETE FROM application_commands WHERE application_id = OLD.id;
         DELETE FROM interactions WHERE application_id = OLD.id;

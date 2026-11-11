@@ -31,7 +31,10 @@ import {
 } from '../validators/application-command'
 import type { ApplicationCommandCreatePayload } from '../validators/application-command'
 import { getGuild } from '../services/guilds'
-import { canEditCommandPermissions } from '../services/command-permission-access'
+import {
+  canEditApplicationPermissions,
+  canEditCommandPermissions,
+} from '../services/command-permission-access'
 
 /** Shared 400 body for a name-collision on create/update */
 const DUPLICATE_NAME_ERROR = validationError({
@@ -479,10 +482,14 @@ export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
       )
       if (guild instanceof Response) return guild
 
+      // The application ID in the command position addresses the
+      // application-level list, which belongs to no command.
       const command =
-        getCommand(db, applicationId, guildId, commandId) ??
-        getCommand(db, applicationId, null, commandId)
-      if (!command) {
+        commandId === applicationId
+          ? null
+          : (getCommand(db, applicationId, guildId, commandId) ??
+            getCommand(db, applicationId, null, commandId))
+      if (commandId !== applicationId && !command) {
         const err = discordError(
           DiscordErrorCode.UNKNOWN_APPLICATION_COMMAND,
           'Unknown Application Command',
@@ -500,17 +507,13 @@ export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
       // User-bound Bearer tokens act as their user. Client-credentials tokens
       // (no user) and bot tokens keep their access for mock compatibility.
       const userId = c.get('accessToken')?.user_id
-      return userId &&
-        !canEditCommandPermissions(db, guildId, command, userId, entries)
+      const allowed =
+        !userId ||
+        (command
+          ? canEditCommandPermissions(db, guildId, command, userId, entries)
+          : canEditApplicationPermissions(db, guildId, userId, entries))
+      return allowed
         ? c.json(
-            discordError(
-              DiscordErrorCode.MISSING_PERMISSIONS,
-              'Missing Permissions',
-              403
-            ).body,
-            403
-          )
-        : c.json(
             setCommandPermissions(
               db,
               applicationId,
@@ -518,6 +521,14 @@ export function createApplicationCommandRoutes(db: Database): Hono<AppEnv> {
               commandId,
               entries
             )
+          )
+        : c.json(
+            discordError(
+              DiscordErrorCode.MISSING_PERMISSIONS,
+              'Missing Permissions',
+              403
+            ).body,
+            403
           )
     }
   )
