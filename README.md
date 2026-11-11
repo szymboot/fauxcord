@@ -252,6 +252,11 @@ before a fast bot answers, hold the simulated interaction's dispatch with a
 the fault by the returned interaction ID, then release it. See the
 [selector list](./docs/test-api.md#post-_testrest-faults--fail-bounded-exact-rest-attempts).
 
+`POST /_test/rest-observations` counts and records requests of the same exact
+selectors without failing or delaying them (including a `*` command wildcard for
+command permissions), so tests can assert how many REST requests a bot sent. See
+[Count exact REST requests](./docs/test-api.md#post-_testrest-observations--count-exact-rest-requests-without-failing-them).
+
 ### Inspect channel messages (for testing)
 
 ```bash

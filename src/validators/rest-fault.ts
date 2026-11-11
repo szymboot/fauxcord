@@ -172,94 +172,24 @@ export function normalizeRestFaultQuery(
   return result
 }
 
-/** Returns a validated, bounded fault request, or undefined for invalid input. */
-export function validateRestFault(
-  value: unknown
-): RestFaultRequest | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return undefined
-  }
-  const body = value as Record<string, unknown>
-  if (typeof body.path !== 'string') return undefined
-  const mode = body.mode
-  if (
-    mode !== undefined &&
-    (typeof mode !== 'string' ||
-      !['rate_limit', 'delay', 'disconnect'].includes(mode))
-  )
-    return undefined
-  const timeout = body.timeout_ms === undefined ? 30_000 : body.timeout_ms
-  if (
-    mode !== undefined &&
-    (typeof timeout !== 'number' ||
-      !Number.isSafeInteger(timeout) ||
-      timeout < 1 ||
-      timeout > 60_000)
-  )
-    return undefined
-  if (mode === undefined && body.timeout_ms !== undefined) return undefined
-  if (mode === 'rate_limit') {
-    if (
-      typeof body.retry_after !== 'number' ||
-      !Number.isFinite(body.retry_after) ||
-      body.retry_after <= 0 ||
-      body.retry_after > 60 ||
-      (body.global !== undefined && typeof body.global !== 'boolean') ||
-      (body.status !== undefined && body.status !== 429)
-    )
-      return undefined
-  } else if (body.retry_after !== undefined || body.global !== undefined)
-    return undefined
-  if (mode === 'delay') {
-    if (
-      typeof body.delay_ms !== 'number' ||
-      !Number.isSafeInteger(body.delay_ms) ||
-      body.delay_ms < 1 ||
-      body.delay_ms > 60_000
-    )
-      return undefined
-  } else if (body.delay_ms !== undefined) return undefined
-  const status =
-    body.status === undefined
-      ? mode === 'rate_limit'
-        ? 429
-        : mode
-          ? 504
-          : undefined
-      : body.status
-  const code = body.code === undefined ? (mode ? 0 : undefined) : body.code
-  const message =
-    body.message === undefined
-      ? mode === 'rate_limit'
-        ? 'You are being rate limited.'
-        : mode
-          ? 'Transport failure'
-          : undefined
-      : body.message
-  const times = body.times === undefined ? 1 : body.times
-  if (
-    typeof times !== 'number' ||
-    times < 1 ||
-    times > 100 ||
-    !Number.isSafeInteger(times)
-  )
-    return undefined
-  if (
-    typeof status !== 'number' ||
-    status < 400 ||
-    status > 599 ||
-    !Number.isSafeInteger(status)
-  )
-    return undefined
-  if (typeof code !== 'number' || code < 0 || !Number.isSafeInteger(code))
-    return undefined
-  if (
-    typeof message !== 'string' ||
-    message.length === 0 ||
-    message.length > 1000
-  )
-    return undefined
+/** Selector facts the validated request fields are derived from. */
+export interface RestFaultSelectorShape {
+  userRead: boolean
+  dmCreate: boolean
+  /** Validated body selector; only present for DM channel creation. */
+  recipientId: string | undefined
+  query: RestFaultQuery | undefined
+}
 
+/**
+ * Validates the exact request selector (`method`, `path`, `guild_id`, and the
+ * fault-only `recipient_id` and `query`) shared by REST faults and
+ * observations. Returns undefined for an unsupported or inconsistent selector.
+ */
+export function validateRestFaultSelector(
+  body: Record<string, unknown>
+): RestFaultSelectorShape | undefined {
+  if (typeof body.path !== 'string') return undefined
   const userRead =
     body.method === 'GET' && /^\/users\/\d{1,20}$/.test(body.path)
   const dmCreate = body.method === 'POST' && body.path === '/users/@me/channels'
@@ -354,33 +284,127 @@ export function validateRestFault(
       /^\/guilds\/\d{1,20}\/members\/\d{1,20}$/.test(body.path))
   return supported
     ? {
-        method: body.method as RestFaultRequest['method'],
-        path: body.path,
-        ...((userRead || dmCreate) && { guild_id: body.guild_id as string }),
-        ...(dmCreate &&
-          body.recipient_id !== undefined && {
-            recipient_id: body.recipient_id,
-          }),
-        ...(query && { query }),
-        status,
-        code,
-        message,
-        times,
-        ...(mode !== undefined && {
-          mode: mode as RestFaultRequest['mode'],
-          timeout_ms: typeof timeout === 'number' ? timeout : 30_000,
-          ...(mode === 'rate_limit' && {
-            retry_after:
-              typeof body.retry_after === 'number'
-                ? body.retry_after
-                : undefined,
-            global: typeof body.global === 'boolean' ? body.global : false,
-          }),
-          ...(mode === 'delay' && {
-            delay_ms:
-              typeof body.delay_ms === 'number' ? body.delay_ms : undefined,
-          }),
-        }),
+        userRead,
+        dmCreate,
+        recipientId:
+          typeof body.recipient_id === 'string' ? body.recipient_id : undefined,
+        query,
       }
     : undefined
+}
+
+/** Returns a validated, bounded fault request, or undefined for invalid input. */
+export function validateRestFault(
+  value: unknown
+): RestFaultRequest | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined
+  }
+  const body = value as Record<string, unknown>
+  if (typeof body.path !== 'string') return undefined
+  const mode = body.mode
+  if (
+    mode !== undefined &&
+    (typeof mode !== 'string' ||
+      !['rate_limit', 'delay', 'disconnect'].includes(mode))
+  )
+    return undefined
+  const timeout = body.timeout_ms === undefined ? 30_000 : body.timeout_ms
+  if (
+    mode !== undefined &&
+    (typeof timeout !== 'number' ||
+      !Number.isSafeInteger(timeout) ||
+      timeout < 1 ||
+      timeout > 60_000)
+  )
+    return undefined
+  if (mode === undefined && body.timeout_ms !== undefined) return undefined
+  if (mode === 'rate_limit') {
+    if (
+      typeof body.retry_after !== 'number' ||
+      !Number.isFinite(body.retry_after) ||
+      body.retry_after <= 0 ||
+      body.retry_after > 60 ||
+      (body.global !== undefined && typeof body.global !== 'boolean') ||
+      (body.status !== undefined && body.status !== 429)
+    )
+      return undefined
+  } else if (body.retry_after !== undefined || body.global !== undefined)
+    return undefined
+  if (mode === 'delay') {
+    if (
+      typeof body.delay_ms !== 'number' ||
+      !Number.isSafeInteger(body.delay_ms) ||
+      body.delay_ms < 1 ||
+      body.delay_ms > 60_000
+    )
+      return undefined
+  } else if (body.delay_ms !== undefined) return undefined
+  const status =
+    body.status === undefined
+      ? mode === 'rate_limit'
+        ? 429
+        : mode
+          ? 504
+          : undefined
+      : body.status
+  const code = body.code === undefined ? (mode ? 0 : undefined) : body.code
+  const message =
+    body.message === undefined
+      ? mode === 'rate_limit'
+        ? 'You are being rate limited.'
+        : mode
+          ? 'Transport failure'
+          : undefined
+      : body.message
+  const times = body.times === undefined ? 1 : body.times
+  if (
+    typeof times !== 'number' ||
+    times < 1 ||
+    times > 100 ||
+    !Number.isSafeInteger(times)
+  )
+    return undefined
+  if (
+    typeof status !== 'number' ||
+    status < 400 ||
+    status > 599 ||
+    !Number.isSafeInteger(status)
+  )
+    return undefined
+  if (typeof code !== 'number' || code < 0 || !Number.isSafeInteger(code))
+    return undefined
+  if (
+    typeof message !== 'string' ||
+    message.length === 0 ||
+    message.length > 1000
+  )
+    return undefined
+
+  const selector = validateRestFaultSelector(body)
+  if (!selector) return undefined
+  const { userRead, dmCreate, recipientId, query } = selector
+  return {
+    method: body.method as RestFaultRequest['method'],
+    path: body.path,
+    ...((userRead || dmCreate) && { guild_id: body.guild_id as string }),
+    ...(dmCreate && recipientId !== undefined && { recipient_id: recipientId }),
+    ...(query && { query }),
+    status,
+    code,
+    message,
+    times,
+    ...(mode !== undefined && {
+      mode: mode as RestFaultRequest['mode'],
+      timeout_ms: typeof timeout === 'number' ? timeout : 30_000,
+      ...(mode === 'rate_limit' && {
+        retry_after:
+          typeof body.retry_after === 'number' ? body.retry_after : undefined,
+        global: typeof body.global === 'boolean' ? body.global : false,
+      }),
+      ...(mode === 'delay' && {
+        delay_ms: typeof body.delay_ms === 'number' ? body.delay_ms : undefined,
+      }),
+    }),
+  }
 }

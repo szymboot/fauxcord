@@ -3,14 +3,11 @@ import type { MiddlewareHandler } from 'hono'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import type { Database } from '../db'
 import type { AppEnv } from './auth'
-import {
-  isRestFaultApplicationScoped,
-  parseRestFaultInteractionSelector,
-} from '../validators/rest-fault'
+import { isRestFaultApplicationScoped } from '../validators/rest-fault'
 import {
   consumeRestFault,
   getRestFaultRuntime,
-  resolveInteractionFaultTarget,
+  resolveRestFaultRequestTarget,
 } from '../services/rest-faults'
 
 /**
@@ -27,29 +24,18 @@ export function createRestFaultMiddleware(
 ): MiddlewareHandler<AppEnv> {
   const runtime = getRestFaultRuntime(db)
   return async (c, next) => {
-    let path = c.req.path
-      .replace(/^\/api(?:\/v10)?(?=\/)/, '')
-      .replace(
-        /^\/users\/%40me\/(?=channels$|guilds\/\d{1,20}$)/,
-        '/users/@me/'
-      )
     const bot = c.get('bot')
-    const interaction = resolveInteractionFaultTarget(db, c.req.method, path)
-    if (interaction) path = interaction.path
-    // Token-free interaction selectors are never reachable by sending their
-    // pseudo-paths directly; only a verified native request consumes them.
-    else if (parseRestFaultInteractionSelector(c.req.method, path)) {
+    const target = resolveRestFaultRequestTarget(
+      db,
+      c.req.method,
+      c.req.path,
+      bot?.user_id
+    )
+    if (target.forgedInteractionPath) {
       await next()
       return
     }
-    // The native voice-state read resolves `@me` (or `%40me`, which decodeURI
-    // keeps) to the calling bot, so the fault selector for that bot's numeric
-    // user ID is consumed by either spelling.
-    if (c.req.method === 'GET' && bot?.user_id)
-      path = path.replace(
-        /^(\/guilds\/\d{1,20}\/voice-states)\/(?:@|%40)me$/,
-        (_, prefix: string) => `${prefix}/${bot.user_id}`
-      )
+    const { path } = target
     let recipientId: string | undefined
     if (path === '/users/@me/channels' && c.req.method === 'POST') {
       const payload: unknown = await c.req.raw
@@ -68,7 +54,7 @@ export function createRestFaultMiddleware(
       db,
       c.req.method,
       path,
-      interaction?.ownerToken ?? bot?.token,
+      target.interactionOwner ?? bot?.token,
       new URL(c.req.url).searchParams,
       recipientId,
       // Bearer callers never set `bot`; application-scoped selectors also

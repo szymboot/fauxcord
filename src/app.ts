@@ -18,6 +18,7 @@ import { rateLimitMiddleware } from './middleware/rate-limit'
 import { createLatencyMiddleware } from './middleware/latency'
 import { createRemovedSetupMiddleware } from './middleware/removed-setup'
 import { createRestFaultMiddleware } from './middleware/rest-faults'
+import { createRestObservationMiddleware } from './middleware/rest-observations'
 import { createRestPageHoldMiddleware } from './middleware/rest-page-holds'
 import { getRestPageHolds } from './services/rest-page-holds'
 import { createRestMemberReadHoldMiddleware } from './middleware/rest-member-read-holds'
@@ -214,6 +215,9 @@ export function buildApp(
   const latencyMiddleware = createLatencyMiddleware(config.latencyMs ?? 0)
 
   app.use('*', authMiddleware)
+  // Outermost after auth: counts requests that latency, rate limits, faults or
+  // holds answer themselves, with the final status they produce.
+  app.use('*', createRestObservationMiddleware(db))
   app.use('*', latencyMiddleware)
   app.use('*', rateLimitMiddleware)
   app.use('*', createRemovedSetupMiddleware(db))
