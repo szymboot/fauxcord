@@ -2459,6 +2459,7 @@ curl -X POST http://localhost:3000/_test/oauth2/tokens \
 | `user_id`    | ✅       | ID of an existing user (register humans with `POST /_test/users`). Unknown users return `404` / `10013`. |
 | `scope`      | ✅       | Space-separated scopes: one or more printable, non-space ASCII names separated by single spaces.   |
 | `expires_in` | —        | Lifetime in seconds, an integer from `1` to `2592000` (30 days). Defaults to `604800` (7 days).    |
+| `client_secret` | —     | Non-empty string (up to 200 characters). Creates the client with this secret, or replaces the stored secret of an existing client, so a test can register the secret the system under test sends to the `refresh_token` grant. Without it a new client gets `mock_secret` and an existing client keeps its secret. |
 
 The response is `201` with a standard token response. Missing or malformed
 fields, an unsupported field or a non-object body return `400` (field errors use
@@ -2470,6 +2471,14 @@ application ID convention), the client is linked to that setup, so the token is
 deleted with `DELETE /_test/setup/:token` like other OAuth2 tokens of the setup.
 `/oauth2/authorize`, `authorization_code` and `client_credentials` are unchanged;
 client-credentials tokens still have no user.
+
+The returned `refresh_token` can be exchanged with `POST /oauth2/token` and
+`grant_type=refresh_token` (client authentication by `client_id` +
+`client_secret` in the form body or in an `Authorization: Basic` header). The
+refresh is single-use, replaces the access and refresh tokens, and keeps the
+user, client, scope and setup link; see
+[Refreshing an OAuth2 token](./getting-started.md#refreshing-an-oauth2-token).
+Rejected requests (`400` or unknown user) never change a stored client secret.
 
 With the `applications.commands.permissions.update` scope, a user-bound token
 authorizes command permission edits subject to that user's guild permissions,

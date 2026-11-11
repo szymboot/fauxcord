@@ -1,7 +1,8 @@
 /**
  * OAuth2 flow service
  *
- * Implements the Authorization Code Flow and the Client Credentials Flow.
+ * Implements the Authorization Code Flow, the Client Credentials Flow and the
+ * refresh token grant.
  */
 
 import type { Database } from '../db'
@@ -240,6 +241,81 @@ export function revokeToken(db: Database, token: string): void {
 }
 
 /**
+ * Checks OAuth2 client credentials against the stored client secret.
+ * @param db - Database
+ * @param clientId - Client ID
+ * @param clientSecret - Client secret presented by the caller
+ * @returns True when the client exists and the secret matches
+ */
+export function authenticateClient(
+  db: Database,
+  clientId: string,
+  clientSecret: string
+): boolean {
+  const client = db
+    .prepare('SELECT client_secret FROM oauth2_clients WHERE client_id = ?')
+    .get(clientId) as { client_secret: string } | undefined
+  return client?.client_secret === clientSecret
+}
+
+/**
+ * Exchanges a refresh token for a new access token and refresh token (the
+ * `refresh_token` grant). Refresh tokens are single-use: the token pair that
+ * carried the presented refresh token is deleted, so neither the old access
+ * token nor the old refresh token works afterwards. The new pair keeps the
+ * user, client (and therefore the test setup link) and scope, and has the
+ * default lifetime.
+ * @param db - Database
+ * @param clientId - Authenticated client ID
+ * @param refreshToken - Refresh token to exchange
+ * @returns Token response, or null when the refresh token is unknown, revoked,
+ * already used or issued to another client
+ */
+export function refreshAccessToken(
+  db: Database,
+  clientId: string,
+  refreshToken: string
+): TokenResponse | null {
+  return db.transaction((): TokenResponse | null => {
+    const previous = db
+      .prepare(
+        `SELECT token, user_id, scope FROM oauth2_access_tokens
+         WHERE refresh_token = ? AND client_id = ?`
+      )
+      .get(refreshToken, clientId) as
+      { token: string; user_id: string | null; scope: string } | undefined
+    if (!previous) return null
+
+    db.prepare('DELETE FROM oauth2_access_tokens WHERE token = ?').run(
+      previous.token
+    )
+
+    const accessToken = generateToken('mock_access_token')
+    const newRefreshToken = generateToken('mock_refresh_token')
+    const expiresAt = new Date(Date.now() + TOKEN_EXPIRES_IN * 1000)
+    db.prepare(
+      `INSERT INTO oauth2_access_tokens (token, client_id, user_id, scope, expires_at, refresh_token)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      accessToken,
+      clientId,
+      previous.user_id,
+      previous.scope,
+      expiresAt.toISOString(),
+      newRefreshToken
+    )
+
+    return {
+      access_token: accessToken,
+      token_type: 'Bearer',
+      expires_in: TOKEN_EXPIRES_IN,
+      refresh_token: newRefreshToken,
+      scope: previous.scope,
+    }
+  })()
+}
+
+/**
  * Retrieves access token information (/oauth2/@me).
  * @param db - Database
  * @param token - Access token
@@ -331,6 +407,8 @@ export interface UserTokenParams {
   userId: string
   scope: string
   expiresIn: number
+  /** Client secret to register; an existing client's secret is replaced. */
+  clientSecret?: string
 }
 
 /**
@@ -338,7 +416,8 @@ export interface UserTokenParams {
  * bypassing the authorization-code flow. The client is created like the other
  * grants do. When the client ID is the user ID of a registered bot (the mock's
  * application ID convention), an unlinked client is linked to that bot's
- * setup so the token is removed together with the setup.
+ * setup so the token is removed together with the setup. A given client
+ * secret is stored for a new client and replaces the secret of an existing one.
  * @param db - Database
  * @param params - Client, user, scope and lifetime of the token
  * @returns Token response
@@ -347,10 +426,17 @@ export function createUserBoundToken(
   db: Database,
   params: UserTokenParams
 ): TokenResponse {
-  const { clientId, userId, scope, expiresIn } = params
-  db.prepare(
-    'INSERT OR IGNORE INTO oauth2_clients (client_id, client_secret) VALUES (?, ?)'
-  ).run(clientId, 'mock_secret')
+  const { clientId, userId, scope, expiresIn, clientSecret } = params
+  if (clientSecret === undefined) {
+    db.prepare(
+      'INSERT OR IGNORE INTO oauth2_clients (client_id, client_secret) VALUES (?, ?)'
+    ).run(clientId, 'mock_secret')
+  } else {
+    db.prepare(
+      `INSERT INTO oauth2_clients (client_id, client_secret) VALUES (?, ?)
+       ON CONFLICT(client_id) DO UPDATE SET client_secret = excluded.client_secret`
+    ).run(clientId, clientSecret)
+  }
   db.prepare(
     `UPDATE oauth2_clients
      SET bot_token = (SELECT token FROM bots WHERE user_id = ? LIMIT 1)

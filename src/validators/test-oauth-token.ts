@@ -30,8 +30,8 @@ function fieldError(
 /**
  * Validates the user-bound OAuth token control payload: a non-empty
  * `client_id` and `user_id`, a space-separated `scope`, and an optional
- * positive integer `expires_in` bounded to 30 days. Unsupported fields are
- * rejected.
+ * positive integer `expires_in` bounded to 30 days, and an optional non-empty
+ * `client_secret`. Unsupported fields are rejected.
  * @param payload - Parsed JSON value
  * @returns The normalized request or field errors, or undefined when the body
  * is not a JSON object
@@ -45,7 +45,15 @@ export function validateTestOAuthToken(
   const errors = Object.create(null) as ValidationErrors
 
   for (const field of Object.keys(body)) {
-    if (!['client_id', 'user_id', 'scope', 'expires_in'].includes(field))
+    if (
+      ![
+        'client_id',
+        'user_id',
+        'scope',
+        'expires_in',
+        'client_secret',
+      ].includes(field)
+    )
       errors[field] = fieldError('UNKNOWN_FIELD', 'Unsupported fixture field.')
   }
   for (const field of ['client_id', 'user_id'] as const) {
@@ -81,6 +89,14 @@ export function validateTestOAuthToken(
       `expires_in must be an integer from 1 to ${MAX_TEST_TOKEN_EXPIRES_IN} seconds.`
     )
 
+  if (
+    body.client_secret !== undefined &&
+    (typeof body.client_secret !== 'string' ||
+      body.client_secret.length === 0 ||
+      body.client_secret.length > 200)
+  )
+    errors.client_secret = { _errors: [typeError('non-empty string')] }
+
   return Object.keys(errors).length > 0
     ? { ok: false, errors }
     : {
@@ -92,6 +108,9 @@ export function validateTestOAuthToken(
           expiresIn:
             (body.expires_in as number | undefined) ??
             DEFAULT_TEST_TOKEN_EXPIRES_IN,
+          ...(body.client_secret !== undefined && {
+            clientSecret: body.client_secret as string,
+          }),
         },
       }
 }
