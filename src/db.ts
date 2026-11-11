@@ -946,7 +946,10 @@ export function initializeDatabase(dbPath: string): Database {
       updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_applications_owner ON applications(owner_id);
-    CREATE TRIGGER IF NOT EXISTS trg_applications_delete_legacy_state
+    -- Recreated on every start so databases created before the
+    -- application-level permissions table also clean it up.
+    DROP TRIGGER IF EXISTS trg_applications_delete_legacy_state;
+    CREATE TRIGGER trg_applications_delete_legacy_state
       AFTER DELETE ON applications
       BEGIN
         DELETE FROM application_command_permissions

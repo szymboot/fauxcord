@@ -956,6 +956,42 @@ describe('application commands / interactions tables', () => {
     db.close()
   })
 
+  it('upgrades an old application cleanup trigger to cover application-level permissions', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-trigger-'))
+    const file = path.join(dir, 'old.db')
+    try {
+      const first = initializeDatabase(file)
+      first.exec(`
+        DROP TRIGGER trg_applications_delete_legacy_state;
+        CREATE TRIGGER trg_applications_delete_legacy_state
+          AFTER DELETE ON applications
+          BEGIN
+            DELETE FROM application_command_permissions
+              WHERE application_id = OLD.id;
+            DELETE FROM application_commands WHERE application_id = OLD.id;
+            DELETE FROM interactions WHERE application_id = OLD.id;
+          END;`)
+      first.close()
+
+      const db = initializeDatabase(file)
+      const { guildId, applicationId } = seedDomainRoots(db)
+      db.prepare(
+        `INSERT INTO application_level_command_permissions
+           (application_id, guild_id) VALUES (?, ?)`
+      ).run(applicationId, guildId)
+      db.prepare('DELETE FROM applications WHERE id = ?').run(applicationId)
+      expect(
+        db
+          .prepare('SELECT COUNT(*) FROM application_level_command_permissions')
+          .pluck()
+          .get()
+      ).toBe(0)
+      db.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('creates the application_level_command_permissions table', () => {
     const db = initializeDatabase(':memory:')
     const columns = db
