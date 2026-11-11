@@ -285,17 +285,69 @@ describe('REST observations', () => {
       }
     )
 
-    it('matches the application ID used as command ID', async () => {
+    it.each([
+      ['exactly', `${commandsPath()}/${APP}/permissions`],
+      ['via the command wildcard', `${commandsPath()}/*/permissions`],
+    ])(
+      'counts an application-level permissions PUT observed %s',
+      async (_, selector) => {
+        const observation = await observe('PUT', selector)
+        const path = `${commandsPath()}/${APP}/permissions`
+        // Both the bot and an application Bearer token may set the
+        // application-level permissions with the application ID as command ID.
+        expect(await code(request(path, 'PUT', permissionBody))).toBe(200)
+        expect(await code(request(path, 'PUT', permissionBody, BEARER))).toBe(
+          200
+        )
+        const snapshot = await read(observation.id)
+        expect(snapshot.count).toBe(2)
+        expect(snapshot.requests).toEqual([
+          expect.objectContaining({
+            method: 'PUT',
+            path,
+            status: 200,
+            credential: 'bot',
+          }),
+          expect.objectContaining({
+            method: 'PUT',
+            path,
+            status: 200,
+            credential: 'bearer',
+          }),
+        ])
+        // The counted edit took effect.
+        const stored = await request(path)
+        expect(stored.status).toBe(200)
+        await expect(stored.json()).resolves.toMatchObject({
+          id: APP,
+          application_id: APP,
+          guild_id: GUILD,
+          permissions: permissionBody.permissions,
+        })
+      }
+    )
+
+    it('counts an application-level permissions GET via the wildcard', async () => {
       const observation = await observe(
-        'PUT',
+        'GET',
         `${commandsPath()}/*/permissions`
       )
-      await request(
-        `${commandsPath()}/${APP}/permissions`,
-        'PUT',
-        permissionBody
-      )
+      const path = `${commandsPath()}/${APP}/permissions`
+      expect(await code(request(path))).toBe(200)
       expect(await field(observation.id, 'count')).toBe(1)
+    })
+
+    it('counts an application-level permissions PUT that is rejected', async () => {
+      const observation = await observe(
+        'PUT',
+        `${commandsPath()}/${APP}/permissions`
+      )
+      const path = `${commandsPath()}/${APP}/permissions`
+      expect(await code(request(path, 'PUT', { permissions: 'invalid' }))).toBe(
+        400
+      )
+      const [entry] = await field(observation.id, 'requests')
+      expect(entry.status).toBe(400)
     })
 
     it('does not match other methods, guilds or the permissions listing', async () => {
