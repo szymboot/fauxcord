@@ -6656,6 +6656,8 @@ channel can no longer read, edit or delete messages there:
 | No `VIEW_CHANNEL` (`1024`)                            | `403` / `50001` Missing Access | same                  |
 | `VIEW_CHANNEL` but no `READ_MESSAGE_HISTORY` (`65536`) | `403` / `50013` Missing Permissions | allowed         |
 
+Messages in threads (`10`, `11`, `12`) are resolved against the parent
+channel's overwrites, as threads inherit their parent's permissions.
 An unknown channel answers `404` / `10003` first. The access check then runs before the message lookup, the authorship rule (`PATCH` still
 answers `50005` afterwards), body validation, writes and Gateway dispatch, so a
 refused request stores and dispatches nothing. DM channels

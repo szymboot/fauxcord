@@ -96,7 +96,8 @@ export function getMessageSendError(
  * sends do: owner and guild-level ADMINISTRATOR bypass, a non-member is denied,
  * and a missing VIEW_CHANNEL is `403` / `50001` (`Missing Access`). Reading
  * additionally requires READ_MESSAGE_HISTORY; real Discord answers a visible
- * channel without it with `403` / `50013` (`Missing Permissions`). Unknown
+ * channel without it with `403` / `50013` (`Missing Permissions`). Threads
+ * resolve against their parent channel's overwrites. Unknown
  * channels and DM channels pass through (their existing behavior is kept), and
  * so does a channel without a guild.
  * @param db - Database
@@ -115,10 +116,16 @@ export function getMessageAccessError(
   const channel = getChannel(db, channelId)
   if (!channel?.guild_id) return null
 
+  // Threads (types 10, 11, 12) inherit their parent channel's permissions and
+  // carry no overwrites of their own.
+  const parent =
+    [10, 11, 12].includes(channel.type) && channel.parent_id
+      ? getChannel(db, channel.parent_id)
+      : null
   const resolved = resolveChannelPermissions(
     db,
     channel.guild_id,
-    channel.permission_overwrites,
+    (parent ?? channel).permission_overwrites,
     userId
   )
   if (!resolved)

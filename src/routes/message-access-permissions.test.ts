@@ -222,6 +222,37 @@ describe('single-message access checks', () => {
     expectUntouched()
   })
 
+  it('resolves thread messages against the parent channel overwrites', async () => {
+    const thread = '888888888888888801'
+    fixture.db
+      .prepare(
+        `INSERT INTO channels (id, guild_id, type, name, parent_id)
+         VALUES (?, ?, 11, 'thread', ?)`
+      )
+      .run(thread, GUILD, CHANNEL)
+    const message = seedMessage(fixture.db, thread, BOT, TOKEN, 'in thread')
+    const url = `/api/v10/channels/${thread}/messages/${message}`
+    await everyone(VIEW)
+    // Parent lacks READ_MESSAGE_HISTORY: GET refused, PATCH allowed.
+    expect(await statusOf(request(url))).toBe(403)
+    await overwrite(BOT, 1, HISTORY, 0n)
+    expect(await statusOf(request(url))).toBe(200)
+    // Parent denies VIEW_CHANNEL: everything refused.
+    await overwrite(BOT, 1, 0n, VIEW)
+    for (const method of ['GET', 'PATCH', 'DELETE']) {
+      const response = await request(
+        url,
+        method,
+        method === 'PATCH' ? { content: 'x' } : undefined
+      )
+      expect(response.status).toBe(403)
+      expect(await response.json()).toEqual(MISSING_ACCESS)
+    }
+    // Parent overwrite re-allows access.
+    await overwrite(BOT, 1, VIEW | HISTORY, 0n)
+    expect(await statusOf(request(url, 'DELETE'))).toBe(204)
+  })
+
   it('keeps the authorship rule after the access check', async () => {
     const response = await calls.PATCH(foreignMessage)
     expect(response.status).toBe(403)
