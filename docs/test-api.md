@@ -1205,6 +1205,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | `GET`    | `/guilds/{guildId}/members`                         | A specific member page      |
 | `GET`    | `/guilds/{guildId}/bans`                            | A specific ban page         |
 | `GET`    | `/channels/{channelId}/messages`                    | A specific history page     |
+| `GET`    | `/channels/{channelId}/messages/{messageId}`        | Single message read         |
 
 `path` must be a bare path with no query, version prefix, wildcard, or trailing
 slash. It selects the exact Channel, Channel/Message, or Guild/User/Role IDs, so
@@ -1545,7 +1546,19 @@ successful edits after failures.
 (`guilds.bot_token`). Nonowner Bots and Bearer callers run the ordinary route
 without consuming the control. Guild GETs derive their scope from the path; an
 optional `guild_id` must equal that path's Guild ID. Channel GETs derive the
-Guild and owning Bot from the Channel; do not supply `guild_id` for these selectors. Global `/users/{userId}` GETs
+Guild and owning Bot from the Channel; do not supply `guild_id` for these selectors.
+The single message read (`GET /channels/{channelId}/messages/{messageId}`) is
+such a Channel GET with no pagination, so `query` and `recipient_id` are
+rejected (`400`) as well. It matches only that exact Message ID: a read of another
+Message in the Channel, the list route (`GET /channels/{channelId}/messages`),
+and `PATCH`/`DELETE` of the same Message never consume it. The Message need not
+exist yet; a consumed attempt reads nothing and has no side effects, and after
+exhaustion the route answers normally (including `404` / `10008` for a missing
+Message). It supports every mode above (`rate_limit`, `delay`, `disconnect`), and
+the same `409` and cleanup rules apply, and `POST /_test/rest-observations`
+accepts the same selector.
+
+Global `/users/{userId}` GETs
 **require** an explicit numeric `guild_id` of an existing Guild:
 
 ```json

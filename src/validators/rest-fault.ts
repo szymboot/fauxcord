@@ -111,6 +111,13 @@ export function isRestFaultGuildLeave(method: unknown, path: string): boolean {
   return method === 'DELETE' && /^\/users\/@me\/guilds\/\d{1,20}$/.test(path)
 }
 
+/** Identifies the exact single message read selector (`GET /channels/{id}/messages/{id}`). */
+export function isRestFaultMessageRead(method: unknown, path: string): boolean {
+  return (
+    method === 'GET' && /^\/channels\/\d{1,20}\/messages\/\d{1,20}$/.test(path)
+  )
+}
+
 /** Identifies list routes whose faults select a page rather than ignoring queries. */
 export function isRestFaultPagePath(path: string): boolean {
   return (
@@ -230,6 +237,7 @@ export function validateRestFaultSelector(
     body.path
   )
   const pageRead = body.method === 'GET' && isRestFaultPagePath(body.path)
+  const messageRead = isRestFaultMessageRead(body.method, body.path)
   const query = pageRead
     ? normalizeRestFaultQuery(
         body.path,
@@ -239,7 +247,9 @@ export function validateRestFaultSelector(
   if (
     (pageRead && !query) ||
     (!pageRead && body.query !== undefined) ||
-    (pageRead && !guildRead && body.guild_id !== undefined)
+    (pageRead && !guildRead && body.guild_id !== undefined) ||
+    // The single message read derives its Guild from the Channel, like the list.
+    (messageRead && body.guild_id !== undefined)
   )
     return undefined
   if (
@@ -265,6 +275,7 @@ export function validateRestFaultSelector(
     guildChannelCreate ||
     guildRead ||
     pageRead ||
+    messageRead ||
     applicationCommand !== undefined ||
     guildLeave ||
     interactionSelector ||
