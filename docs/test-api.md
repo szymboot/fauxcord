@@ -6769,12 +6769,42 @@ message-create events stay in their originating server database.
 `POST /_test/reset` retains guild membership, roles and overwrites, so it does
 not restore a denied permission. Delete an overwrite through Discord REST to
 restore its inherited permissions, or delete/recreate the setup to clear its
-guild fixtures. There is no queued permission state to cancel. This enforcement
-is scoped to channel message creation: it does not add permission checks to
-message reads, edits, deletes, or other Discord endpoints, and does not yet
-enforce feature-specific send permissions such as TTS, attachments, replies,
-stickers or polls. It supplies Fauxcord prerequisites for bot integration tests;
+guild fixtures. There is no queued permission state to cancel. Send enforcement
+does not yet cover feature-specific send permissions such as TTS, attachments,
+replies, stickers or polls; single-message access is described in
+[Single-message access](#single-message-access-get-patch-and-delete). It supplies Fauxcord prerequisites for bot integration tests;
 the bot harness and end-to-end handler coverage remain downstream work.
+
+### Single-message access (GET, PATCH and DELETE)
+
+`GET`, `PATCH` and `DELETE /channels/:channelId/messages/:messageId` (also under
+`/api` and `/api/v10`) apply the same persisted permission resolution as sends
+(`@everyone` and role permissions, then everyone, role and member overwrites;
+owner and guild-level `ADMINISTRATOR` bypass), so a bot that lost access to a
+channel can no longer read, edit or delete messages there:
+
+| Condition (bot caller, guild channel)                 | `GET`                          | `PATCH` / `DELETE`    |
+| ----------------------------------------------------- | ------------------------------ | --------------------- |
+| Not a member of the channel's guild                   | `403` / `50001` Missing Access | same                  |
+| No `VIEW_CHANNEL` (`1024`)                            | `403` / `50001` Missing Access | same                  |
+| `VIEW_CHANNEL` but no `READ_MESSAGE_HISTORY` (`65536`) | `403` / `50013` Missing Permissions | allowed         |
+
+Messages in threads (`10`, `11`, `12`) are resolved against the parent
+channel's overwrites, as threads inherit their parent's permissions.
+An unknown channel answers `404` / `10003` first. The access check then runs before the message lookup, the authorship rule (`PATCH` still
+answers `50005` afterwards), body validation, writes and Gateway dispatch, so a
+refused request stores and dispatches nothing. DM channels
+and non-Bot callers (Bearer/OAuth credentials) keep their previous behavior;
+the list route `GET /channels/:channelId/messages` is not checked, and `DELETE`
+still does not model `MANAGE_MESSAGES` for other users' messages. A denial from
+a missing `READ_MESSAGE_HISTORY` uses `50013` because Discord documents the
+permission for "Get Channel Message" without giving the code; the code is the
+one libraries report in practice (discord.py `Forbidden: 403 ... error code:
+50013: Missing Permissions` from `fetch_message`), and `spec/openapi.json` does
+not list it. Under `DISABLE_AUTH=true` an unregistered token acts as the
+placeholder `MockBot` user, which is not a guild member and is refused like on
+sends; register the bot (for example with `POST /_test/setup`) to read guild
+messages.
 
 ## Member role permissions
 

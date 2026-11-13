@@ -13,6 +13,7 @@ import {
   seedBot,
   seedChannel,
   seedGuild,
+  seedMember,
   type RealServerContext,
 } from './test-helpers'
 import type { RestFault } from './services/rest-faults'
@@ -198,7 +199,12 @@ describe('exact message edit REST fault controls through buildApp', () => {
       )
     ).toBe(200)
     const otherGuild = seedGuild(db, otherToken, '222222222222222223')
-    for (const scope of [guild, otherGuild]) {
+    // The caller owns `guild`, so a wrong channel there is an unknown message;
+    // it is not a member of `otherGuild`, whose channel it cannot access.
+    for (const [scope, status] of [
+      [guild, 404],
+      [otherGuild, 403],
+    ] as const) {
       const otherChannel = seedChannel(db, scope, scope)
       expect(
         await responseStatus(
@@ -208,7 +214,7 @@ describe('exact message edit REST fault controls through buildApp', () => {
             edit
           )
         )
-      ).toBe(404)
+      ).toBe(status)
     }
     expect(await responseStatus(request(`${path}/`, 'PATCH', edit))).toBe(404)
     expect(await inspect(fault.id)).toMatchObject({ consumed: 0, remaining: 2 })
@@ -223,6 +229,13 @@ describe('exact message edit REST fault controls through buildApp', () => {
   })
 
   it('preserves legacy authenticated-caller semantics and native authorship/validation', async () => {
+    // The other bot must be a guild member who can view the channel to reach
+    // the authorship rule (seedGuild creates no @everyone role).
+    seedMember(db, guild, otherAuthor)
+    db.prepare(
+      `INSERT INTO roles (id, guild_id, name, color, hoist, position, permissions, mentionable)
+       VALUES (?, ?, '@everyone', 0, 0, 0, ?, 0)`
+    ).run(guild, guild, String(1n << 10n))
     seedEditableMessage(db, channel)
     const before = storedMessage(db)
     const fault = await arm()
@@ -280,6 +293,13 @@ describe('exact message edit REST fault controls through buildApp', () => {
   })
 
   it('keeps channel DELETE and exact message PATCH controls independent', async () => {
+    // The other bot must be a guild member who can view the channel to reach
+    // the authorship rule (seedGuild creates no @everyone role).
+    seedMember(db, guild, otherAuthor)
+    db.prepare(
+      `INSERT INTO roles (id, guild_id, name, color, hoist, position, permissions, mentionable)
+       VALUES (?, ?, '@everyone', 0, 0, 0, ?, 0)`
+    ).run(guild, guild, String(1n << 10n))
     seedEditableMessage(db, channel)
     const before = storedMessage(db)
     const patch = await arm()

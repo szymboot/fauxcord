@@ -1,4 +1,4 @@
-/** Guild permission checks scoped to creating messages through channel REST. */
+/** Guild permission checks scoped to message REST: sends and single-message access. */
 import type { Database } from '../db'
 import {
   DiscordErrorCode,
@@ -8,7 +8,8 @@ import {
 import { getChannel } from './channels'
 import { PermissionBit, resolveChannelPermissions } from './guild-permissions'
 
-const { VIEW_CHANNEL, SEND_MESSAGES, EMBED_LINKS } = PermissionBit
+const { VIEW_CHANNEL, SEND_MESSAGES, EMBED_LINKS, READ_MESSAGE_HISTORY } =
+  PermissionBit
 
 /** A send denial with the HTTP statuses produced by this permission check. */
 export interface MessageSendError extends DiscordErrorResponse {
@@ -81,6 +82,60 @@ export function getMessageSendError(
     (Array.isArray(payload.embeds) &&
       payload.embeds.length > 0 &&
       !(permissions & EMBED_LINKS))
+    ? sendError(
+        DiscordErrorCode.MISSING_PERMISSIONS,
+        'Missing Permissions',
+        403
+      )
+    : null
+}
+
+/**
+ * Checks that a bot may reach one message of a channel (read, edit or delete a
+ * single message). It resolves the caller's guild permissions exactly like
+ * sends do: owner and guild-level ADMINISTRATOR bypass, a non-member is denied,
+ * and a missing VIEW_CHANNEL is `403` / `50001` (`Missing Access`). Reading
+ * additionally requires READ_MESSAGE_HISTORY; real Discord answers a visible
+ * channel without it with `403` / `50013` (`Missing Permissions`). Threads
+ * resolve against their parent channel's overwrites. Unknown
+ * channels and DM channels pass through (their existing behavior is kept), and
+ * so does a channel without a guild.
+ * @param db - Database
+ * @param channelId - Channel holding the message
+ * @param userId - Bot user making the request
+ * @param options - `read` also requires READ_MESSAGE_HISTORY
+ * @param options.read - Whether the request reads the message (GET)
+ * @returns The denial, or null when the request may proceed
+ */
+export function getMessageAccessError(
+  db: Database,
+  channelId: string,
+  userId: string,
+  options: { read?: boolean } = {}
+): MessageSendError | null {
+  const channel = getChannel(db, channelId)
+  if (!channel?.guild_id) return null
+
+  // Threads (types 10, 11, 12) inherit their parent channel's permissions and
+  // carry no overwrites of their own.
+  const parent =
+    [10, 11, 12].includes(channel.type) && channel.parent_id
+      ? getChannel(db, channel.parent_id)
+      : null
+  const resolved = resolveChannelPermissions(
+    db,
+    channel.guild_id,
+    (parent ?? channel).permission_overwrites,
+    userId
+  )
+  if (!resolved)
+    return sendError(DiscordErrorCode.MISSING_ACCESS, 'Missing Access', 403)
+  if (resolved.privileged) return null
+  const { permissions } = resolved
+
+  if (!(permissions & VIEW_CHANNEL))
+    return sendError(DiscordErrorCode.MISSING_ACCESS, 'Missing Access', 403)
+  return options.read && !(permissions & READ_MESSAGE_HISTORY)
     ? sendError(
         DiscordErrorCode.MISSING_PERMISSIONS,
         'Missing Permissions',
