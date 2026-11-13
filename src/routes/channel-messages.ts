@@ -94,6 +94,14 @@ export function createChannelMessageRoutes(
   // GET /channels/:channelId/messages/:messageId — Retrieve a specific message
   app.get('/channels/:channelId/messages/:messageId', (c) => {
     const { channelId, messageId } = c.req.param()
+    const channel = requireEntity(
+      c,
+      getChannel(db, channelId),
+      DiscordErrorCode.UNKNOWN_CHANNEL,
+      'Unknown Channel'
+    )
+    if (channel instanceof Response) return channel
+
     const message = getMessage(db, messageId, baseUrl)
     if (
       message &&
@@ -342,6 +350,14 @@ export function createChannelMessageRoutes(
     const { channelId, messageId } = c.req.param()
     const bot = c.get('bot')
 
+    const channel = requireEntity(
+      c,
+      getChannel(db, channelId),
+      DiscordErrorCode.UNKNOWN_CHANNEL,
+      'Unknown Channel'
+    )
+    if (channel instanceof Response) return channel
+
     const existing = requireEntity(
       c,
       getMessage(db, messageId, baseUrl),
@@ -390,6 +406,14 @@ export function createChannelMessageRoutes(
   // Discord permits deleting other users' messages with that permission.
   app.delete('/channels/:channelId/messages/:messageId', (c) => {
     const { channelId, messageId } = c.req.param()
+    const channel = requireEntity(
+      c,
+      getChannel(db, channelId),
+      DiscordErrorCode.UNKNOWN_CHANNEL,
+      'Unknown Channel'
+    )
+    if (channel instanceof Response) return channel
+
     const deleted = deleteMessage(db, messageId, channelId)
     if (!deleted) {
       const err = discordError(
