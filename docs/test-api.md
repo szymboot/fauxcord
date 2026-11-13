@@ -3523,6 +3523,53 @@ and `404` `{"message": "Unknown Channel", "code": 10003}` when `channel_id` does
 not exist, belongs to a different guild than `guild_id`, or belongs to a guild
 the bot left or was removed from.
 
+### Permissions in interactions (`member.permissions`, `app_permissions`)
+
+Every interaction Fauxcord creates (slash and user commands, autocomplete,
+button clicks and modal submissions, in the `201` response and in the
+Gateway `INTERACTION_CREATE`) carries the computed permissions Discord sends,
+as decimal strings:
+
+| Field                | Where       | Value                                                                                                                                                  |
+| -------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `member.permissions` | Guild only  | The invoking member's total permissions in `channel_id`: `@everyone` and role permissions, then `@everyone`, role and member overwrites (member wins)   |
+| `app_permissions`    | Always      | The application's (bot's) total permissions in the same channel, computed the same way; `"0"` if the bot is not a member                                |
+
+- The guild owner and members with guild-level `ADMINISTRATOR` get every
+  permission Discord documents (`8866461766385663`: bits 0–46 and 48–52,
+  `ADMINISTRATOR` included), as in Discord's
+  [computed permissions](https://discord.com/developers/docs/topics/permissions#permission-overwrites)
+  ("return ALL"). An `ADMINISTRATOR` bit granted by a channel overwrite does
+  not count.
+- A member with an active timeout keeps only `VIEW_CHANNEL` and
+  `READ_MESSAGE_HISTORY` (owners and administrators are exempt), per Discord's
+  timed-out member rules.
+- An interaction without `channel_id` uses the guild-level permissions (no
+  overwrites); one in a thread uses its parent channel's overwrites, as
+  threads inherit them on Discord.
+- In DMs there is no `member` (the payload has `user`), and `app_permissions`
+  is the set Discord documents for DMs: `ATTACH_FILES | EMBED_LINKS |
+  MENTION_EVERYONE` (`180224`) in a group DM or a DM without the bot, plus
+  `USE_EXTERNAL_EMOJIS`
+  (`442368`) in the DM with the app's own bot user (also used for a DM
+  interaction without `channel_id`).
+- Both values are a snapshot computed when the interaction is created; later
+  role, overwrite, ownership or timeout changes are not reflected in an
+  interaction that already exists (a new interaction sees them).
+
+```json
+{
+  "guild_id": "222222222222222222",
+  "channel_id": "333333333333333333",
+  "member": {
+    "user": { "id": "555555555555555555" },
+    "roles": [],
+    "permissions": "68608"
+  },
+  "app_permissions": "8866461766385663"
+}
+```
+
 ### User context commands
 
 Register a USER command (`type: 2`) and invoke it on a user. `target_id`
@@ -3558,7 +3605,12 @@ shape of a user command, with no `options`:
   "locale": "en-US",
   "guild_id": "222222222222222222",
   "channel_id": "333333333333333333",
-  "member": { "user": { "id": "555555555555555555" }, "roles": [] },
+  "member": {
+    "user": { "id": "555555555555555555" },
+    "roles": [],
+    "permissions": "68608"
+  },
+  "app_permissions": "8866461766385663",
   "data": {
     "id": "<command id>",
     "name": "Mute",
@@ -3721,7 +3773,12 @@ The interaction, its response and the Gateway event carry the Discord shape:
   "locale": "en-US",
   "guild_id": "222222222222222222",
   "channel_id": "333333333333333333",
-  "member": { "user": { "id": "555555555555555555" }, "roles": [] },
+  "member": {
+    "user": { "id": "555555555555555555" },
+    "roles": [],
+    "permissions": "68608"
+  },
+  "app_permissions": "8866461766385663",
   "data": { "custom_id": "approve_unban_appeal:42", "component_type": 2 },
   "message": { "id": "666666666666666666", "components": ["…"], "…": "…" }
 }
@@ -3731,8 +3788,10 @@ The interaction, its response and the Gateway event carry the Discord shape:
 `GET /channels/:id/messages/:id` returns it at click time, including its
 `components`; in DMs the payload has `user` instead of `member`. A snapshot is
 kept, so later edits do not change what that interaction (or modals opened
-from it) carries. Like all interactions here, no `app_permissions`, `channel`
-or `entitlements` fields are sent.
+from it) carries. Like all interactions here, `member.permissions` and
+`app_permissions` are
+[computed at creation](#permissions-in-interactions-memberpermissions-app_permissions);
+no `channel` or `entitlements` fields are sent.
 
 Callbacks behave as for commands: `4` and `5` create the original response
 (`EPHEMERAL` honored; the response is a message of type `0`), and `9` shows a
@@ -4135,7 +4194,11 @@ identical to the Gateway payload (for the modal in the observation example above
   "locale": "en-US",
   "guild_id": "222222222222222222",
   "channel_id": "333333333333333333",
-  "member": { "user": { "id": "555555555555555555" } },
+  "member": {
+    "user": { "id": "555555555555555555" },
+    "permissions": "68608"
+  },
+  "app_permissions": "8866461766385663",
   "data": {
     "custom_id": "user_mute:444444444444444444",
     "components": [
