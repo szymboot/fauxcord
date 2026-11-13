@@ -379,7 +379,8 @@ export function setTestGuildVoiceState(
 export type VoiceStateWriteError = VoiceStateFixtureError | 'CHANNEL_FULL'
 
 /** Permissions a timed-out member keeps: VIEW_CHANNEL and READ_MESSAGE_HISTORY. */
-const TIMED_OUT_PERMISSIONS = PermissionBit.VIEW_CHANNEL | (1n << 16n)
+const TIMED_OUT_PERMISSIONS =
+  PermissionBit.VIEW_CHANNEL | PermissionBit.READ_MESSAGE_HISTORY
 
 /**
  * Whether a user holds MOVE_MEMBERS in a channel. Owners and guild-level

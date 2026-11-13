@@ -10,6 +10,7 @@ export const PermissionBit = {
   VIEW_CHANNEL: 1n << 10n,
   SEND_MESSAGES: 1n << 11n,
   EMBED_LINKS: 1n << 14n,
+  READ_MESSAGE_HISTORY: 1n << 16n,
   CONNECT: 1n << 20n,
   MUTE_MEMBERS: 1n << 22n,
   DEAFEN_MEMBERS: 1n << 23n,

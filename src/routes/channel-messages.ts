@@ -24,7 +24,10 @@ import {
   unusableMessageStickersError,
 } from '../validators/message-stickers'
 import { getChannel } from '../services/channels'
-import { getMessageSendError } from '../services/message-permissions'
+import {
+  getMessageAccessError,
+  getMessageSendError,
+} from '../services/message-permissions'
 import { isDmClosed } from '../services/closed-dms'
 import {
   getMessage,
@@ -102,6 +105,11 @@ export function createChannelMessageRoutes(
     )
     if (channel instanceof Response) return channel
 
+    const bot = c.get('bot')
+    const accessError = bot
+      ? getMessageAccessError(db, channelId, bot.user_id, { read: true })
+      : null
+    if (accessError) return c.json(accessError.body, accessError.status)
     const message = getMessage(db, messageId, baseUrl)
     if (
       message &&
@@ -349,6 +357,10 @@ export function createChannelMessageRoutes(
   app.patch('/channels/:channelId/messages/:messageId', async (c) => {
     const { channelId, messageId } = c.req.param()
     const bot = c.get('bot')
+    const accessError = bot
+      ? getMessageAccessError(db, channelId, bot.user_id)
+      : null
+    if (accessError) return c.json(accessError.body, accessError.status)
 
     const channel = requireEntity(
       c,
@@ -414,6 +426,11 @@ export function createChannelMessageRoutes(
     )
     if (channel instanceof Response) return channel
 
+    const bot = c.get('bot')
+    const accessError = bot
+      ? getMessageAccessError(db, channelId, bot.user_id)
+      : null
+    if (accessError) return c.json(accessError.body, accessError.status)
     const deleted = deleteMessage(db, messageId, channelId)
     if (!deleted) {
       const err = discordError(
