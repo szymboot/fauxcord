@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { getGuildMember, updateGuildMember } from './services/guild-members'
 import { isInteractionTokenExpired } from './services/interactions'
+import { findInteractionCallbackDeadlineAt } from './services/interaction-callback-deadlines'
 import { prepareMemberDateFixture } from './services/test-control'
 import {
   createInteraction,
@@ -1138,6 +1139,50 @@ describe('application commands / interactions tables', () => {
       expect(isInteractionTokenExpired(migrated, 'app', 'stale-token')).toBe(
         true
       )
+      migrated.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('adds the callback deadline columns to legacy interactions, which never have a deadline', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-interaction-late-'))
+    const dbPath = path.join(dir, 'legacy.db')
+    try {
+      const legacy = initializeDatabase(dbPath)
+      for (const column of [
+        'created_at_ms',
+        'deadline_control_id',
+        'rejected_reason',
+        'rejected_at',
+      ])
+        legacy.exec(`ALTER TABLE interactions DROP COLUMN ${column}`)
+      legacy
+        .prepare(
+          `INSERT INTO interactions (id, application_id, token, type, user_id)
+           VALUES ('old', 'app', 'old-token', 2, 'user')`
+        )
+        .run()
+      legacy.close()
+
+      const migrated = initializeDatabase(dbPath)
+      expect(
+        migrated
+          .prepare(
+            'SELECT created_at_ms, rejected_reason, rejected_at FROM interactions'
+          )
+          .get()
+      ).toEqual({
+        created_at_ms: null,
+        rejected_reason: null,
+        rejected_at: null,
+      })
+      expect(
+        findInteractionCallbackDeadlineAt(migrated, {
+          created_at_ms: null,
+          deadline_control_id: 'control',
+        })
+      ).toBeNull()
       migrated.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })

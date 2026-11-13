@@ -10,6 +10,10 @@ import { getRestFaultRuntime, pruneRestFaults } from './rest-faults'
 import { getRestPageHolds } from './rest-page-holds'
 import { getRestMemberReadHolds } from './rest-member-read-holds'
 import { pruneClosedDms, resetClosedDms } from './closed-dms'
+import {
+  pruneInteractionCallbackDeadlines,
+  resetInteractionCallbackDeadlines,
+} from './interaction-callback-deadlines'
 import { randomBytes } from 'node:crypto'
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
@@ -684,6 +688,7 @@ export function setupTestEnvironment(
 
   const result = setup()
   pruneClosedDms(db)
+  pruneInteractionCallbackDeadlines(db)
   pruneRestFaults(db)
   getRestObservations(db).prune()
   // Emit only after the transaction has committed successfully.
@@ -743,6 +748,7 @@ export function resetTestData(db: Database, token?: string): void {
   getRestObservations(db).reset(token)
   resetRestFaults(db, token)
   resetClosedDms(db, token)
+  resetInteractionCallbackDeadlines(db, token)
   resetAuditLogResponses(db, token)
   if (token) {
     db.prepare(

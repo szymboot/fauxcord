@@ -19,6 +19,10 @@ import { gatewayBus } from '../gateway/bus'
 import { getGuildMember } from './guild-members'
 import { getUser } from './users'
 import { createMessage, MESSAGE_FLAGS, type MessageObject } from './messages'
+import {
+  findArmedCallbackDeadlineId,
+  findInteractionCallbackDeadlineAt,
+} from './interaction-callback-deadlines'
 
 /** How long an interaction token stays valid, as documented by Discord. */
 export const INTERACTION_TOKEN_TTL_MS = 15 * 60 * 1000
@@ -64,6 +68,10 @@ interface InteractionRow {
   rejected_callback_type: number | null
   message_json: string | null
   token_expires_at: number | null
+  created_at_ms: number | null
+  deadline_control_id: string | null
+  rejected_reason: string | null
+  rejected_at: number | null
   created_at: string
 }
 
@@ -150,10 +158,11 @@ export function createInteraction(
   db: Database,
   params: CreateInteractionParams
 ): InteractionObject {
+  const createdAt = Date.now()
   db.prepare(
     `INSERT INTO interactions
-       (id, application_id, token, type, locale, guild_id, channel_id, command_id, data, user_id, message_json, token_expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (id, application_id, token, type, locale, guild_id, channel_id, command_id, data, user_id, message_json, token_expires_at, created_at_ms, deadline_control_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     params.interactionId,
     params.applicationId,
@@ -166,7 +175,13 @@ export function createInteraction(
     JSON.stringify(params.data ?? {}),
     params.userId,
     params.message ? JSON.stringify(params.message) : null,
-    Date.now() + INTERACTION_TOKEN_TTL_MS
+    createdAt + INTERACTION_TOKEN_TTL_MS,
+    createdAt,
+    findArmedCallbackDeadlineId(db, {
+      application_id: params.applicationId,
+      guild_id: params.guildId ?? null,
+      channel_id: params.channelId ?? null,
+    })
   )
 
   const row = db
@@ -327,6 +342,14 @@ export interface InteractionCallbackObservation {
    * acknowledge the interaction.
    */
   rejected_callback_type?: number
+  /**
+   * Why the latest callback was refused for a reason other than its type:
+   * `deadline` when it arrived after an armed initial callback deadline.
+   * Absent when no callback was refused that way.
+   */
+  rejected_reason?: 'deadline'
+  /** ISO 8601 instant of the latest `deadline` refusal; present with it. */
+  rejected_at?: string
 }
 
 /**
@@ -346,7 +369,7 @@ export function getInteractionCallbackObservation(
   const row = db
     .prepare(
       `SELECT id, application_id, responded, initial_callback_type, modal_json,
-              choices_json, rejected_callback_type
+              choices_json, rejected_callback_type, rejected_reason, rejected_at
        FROM interactions WHERE id = ? AND application_id = ? AND token = ?`
     )
     .get(interactionId, applicationId, token) as
@@ -359,6 +382,8 @@ export function getInteractionCallbackObservation(
         | 'modal_json'
         | 'choices_json'
         | 'rejected_callback_type'
+        | 'rejected_reason'
+        | 'rejected_at'
       >
     | undefined
   return row
@@ -379,6 +404,11 @@ export function getInteractionCallbackObservation(
         ...(row.rejected_callback_type !== null && {
           rejected_callback_type: row.rejected_callback_type,
         }),
+        ...(row.rejected_reason === 'deadline' &&
+          row.rejected_at !== null && {
+            rejected_reason: 'deadline' as const,
+            rejected_at: new Date(row.rejected_at).toISOString(),
+          }),
       }
     : null
 }
@@ -422,6 +452,7 @@ export type InteractionCallbackResult =
   | { ok: true; response: InteractionCallbackResponse }
   | { ok: false; reason: 'not_found' }
   | { ok: false; reason: 'already_responded' }
+  | { ok: false; reason: 'deadline_passed' }
   | { ok: false; reason: 'modal_not_allowed' }
   | { ok: false; reason: 'autocomplete_only' }
   | { ok: false; reason: 'autocomplete_result_not_allowed' }
@@ -437,6 +468,10 @@ export type InteractionCallbackResult =
  * A callback type refused for the interaction's type is recorded as
  * `rejected_callback_type` without acknowledging the interaction. Types 6/7
  * retain this mock's acknowledgement-only behavior.
+ * When a guild's initial callback deadline is armed, a callback arriving
+ * after it is refused as `deadline_passed` before anything else is checked
+ * or stored; it is recorded as `rejected_reason` and leaves the interaction
+ * unacknowledged.
  * @param db - Database
  * @param interactionId - `:interactionId` route param
  * @param token - `:interactionToken` route param
@@ -456,6 +491,15 @@ export function handleInteractionCallback(
     .get(interactionId, token) as InteractionRow | undefined
   if (!row) return { ok: false, reason: 'not_found' }
   if (row.responded === 1) return { ok: false, reason: 'already_responded' }
+  const deadlineAt = findInteractionCallbackDeadlineAt(db, row)
+  if (deadlineAt !== null && Date.now() > deadlineAt) {
+    // Remember the lateness so a harness can fail fast instead of waiting for
+    // an acknowledgement that can no longer come.
+    db.prepare(
+      "UPDATE interactions SET rejected_reason = 'deadline', rejected_at = ? WHERE id = ?"
+    ).run(Date.now(), row.id)
+    return { ok: false, reason: 'deadline_passed' }
+  }
   // Discord only lets commands and message components open a modal; PING,
   // autocomplete, and modal submissions cannot. An autocomplete interaction
   // takes only an autocomplete result, which no other interaction takes.

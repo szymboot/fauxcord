@@ -78,6 +78,7 @@ import { validateRestFault } from '../validators/rest-fault'
 import { validateRestObservation } from '../validators/rest-observation'
 import { getRestObservations } from '../services/rest-observations'
 import { createClosedDmRoutes } from './test-closed-dms'
+import { createInteractionCallbackDeadlineRoutes } from './test-interaction-callback-deadlines'
 import { createDmChannelRoutes } from './test-dm-channels'
 import { createTestInviteRoutes } from './test-invites'
 import { validateTestJoinInviteCode } from '../validators/test-invite'
@@ -173,6 +174,7 @@ export function createTestRoutes(
   app.route('/', createAuditLogResponseRoutes(db))
   app.route('/', createTestVoiceStateRoutes(db))
   app.route('/', createClosedDmRoutes(db))
+  app.route('/', createInteractionCallbackDeadlineRoutes(db))
   app.route('/', createDmChannelRoutes(db))
   app.route('/', createTestInviteRoutes(db))
   app.route('/', createTestGuildBotRoutes(db))

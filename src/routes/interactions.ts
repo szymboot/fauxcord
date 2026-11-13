@@ -60,6 +60,14 @@ export function createInteractionRoutes(db: Database, baseUrl: string): Hono {
           )
           return c.json(err.body, 404)
         }
+        if (result.reason === 'deadline_passed') {
+          const err = discordError(
+            DiscordErrorCode.UNKNOWN_INTERACTION,
+            'Unknown interaction',
+            404
+          )
+          return c.json(err.body, 404)
+        }
         if (result.reason !== 'already_responded') {
           return c.json(
             validationError({
