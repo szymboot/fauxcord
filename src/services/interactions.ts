@@ -18,6 +18,7 @@ import { generateSnowflake } from '../snowflake'
 import { gatewayBus } from '../gateway/bus'
 import { getGuildMember } from './guild-members'
 import { getUser } from './users'
+import { computeInteractionPermissions } from './interaction-permissions'
 import { createMessage, MESSAGE_FLAGS, type MessageObject } from './messages'
 import {
   findArmedCallbackDeadlineId,
@@ -36,8 +37,11 @@ export interface InteractionObject {
   data?: Record<string, unknown>
   guild_id?: string
   channel_id?: string
+  /** Invoking member, with `permissions` computed in the channel. */
   member?: Record<string, unknown>
   user?: Record<string, unknown>
+  /** The application's computed permissions in the source location. */
+  app_permissions: string
   /**
    * The message a component click happened on, as REST returned it when the
    * click was made; also carried by a modal submitted from that click.
@@ -79,7 +83,9 @@ interface InteractionRow {
  * Converts a DB interaction record into the API response / Gateway payload
  * format. Re-fetches the command's name/type from `application_commands`
  * (when `command_id` is set) so `data` always reflects the current command
- * registration rather than a stale snapshot.
+ * registration rather than a stale snapshot. Called once, when the
+ * interaction is created, so `member.permissions` and `app_permissions` are
+ * computed from the permissions at that moment, like Discord's payload.
  * @param db - Database
  * @param row - DB record
  * @returns Interaction object
@@ -109,6 +115,12 @@ function toInteractionObject(
     ? getGuildMember(db, row.guild_id, row.user_id)
     : null
   const user = row.guild_id ? null : getUser(db, row.user_id)
+  const permissions = computeInteractionPermissions(db, {
+    applicationId: row.application_id,
+    guildId: row.guild_id,
+    channelId: row.channel_id,
+    userId: row.user_id,
+  })
 
   const result: InteractionObject = {
     id: row.id,
@@ -120,8 +132,14 @@ function toInteractionObject(
     ...(data && { data }),
     ...(row.channel_id && { channel_id: row.channel_id }),
     ...(row.guild_id && { guild_id: row.guild_id }),
-    ...(member && { member: member as unknown as Record<string, unknown> }),
+    ...(member && {
+      member: {
+        ...member,
+        permissions: permissions.memberPermissions ?? '0',
+      },
+    }),
     ...(user && { user: user as unknown as Record<string, unknown> }),
+    app_permissions: permissions.appPermissions,
     ...(row.message_json && {
       message: JSON.parse(row.message_json) as Record<string, unknown>,
     }),

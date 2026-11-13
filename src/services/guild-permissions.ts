@@ -10,13 +10,25 @@ export const PermissionBit = {
   VIEW_CHANNEL: 1n << 10n,
   SEND_MESSAGES: 1n << 11n,
   EMBED_LINKS: 1n << 14n,
+  ATTACH_FILES: 1n << 15n,
   READ_MESSAGE_HISTORY: 1n << 16n,
+  MENTION_EVERYONE: 1n << 17n,
+  USE_EXTERNAL_EMOJIS: 1n << 18n,
   CONNECT: 1n << 20n,
   MUTE_MEMBERS: 1n << 22n,
   DEAFEN_MEMBERS: 1n << 23n,
   MOVE_MEMBERS: 1n << 24n,
   MANAGE_ROLES: 1n << 28n,
 } as const
+
+/**
+ * Every permission bit Discord documents, which is what Discord's computed
+ * permissions return for the guild owner and for guild-level ADMINISTRATOR
+ * ("return ALL" in the Permissions page's computation pseudocode). Bits 0-46
+ * and 48-52 (CREATE_INSTANT_INVITE through BYPASS_SLOWMODE); bit 47 is not
+ * assigned. Source: https://discord.com/developers/docs/topics/permissions
+ */
+export const ALL_PERMISSIONS = ((1n << 53n) - 1n) & ~(1n << 47n)
 
 /** A member's resolved channel permissions. */
 export interface ResolvedChannelPermissions {
