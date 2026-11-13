@@ -190,6 +190,41 @@ describe('single-message access checks', () => {
     expectUntouched()
   })
 
+  it('re-checks access after the PATCH body has been read', async () => {
+    const encoder = new TextEncoder()
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(encoder.encode('{"content":'))
+        await gate
+        controller.enqueue(encoder.encode('"edited"}'))
+        controller.close()
+      },
+    })
+    const pending = fixture.app.request(
+      `/api/v10/channels/${CHANNEL}/messages/${ownMessage}`,
+      {
+        method: 'PATCH',
+        headers: { Authorization: TOKEN, 'Content-Type': 'application/json' },
+        body,
+        duplex: 'half',
+      } as RequestInit
+    )
+    // Revoke access while the request body is still streaming.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    fixture.db
+      .prepare('DELETE FROM guild_members WHERE guild_id = ? AND user_id = ?')
+      .run(GUILD, BOT)
+    release()
+    const response = await pending
+    expect(response.status).toBe(403)
+    expect(await response.json()).toEqual(MISSING_ACCESS)
+    expectUntouched()
+  })
+
   it('keeps the authorship rule after the access check', async () => {
     const response = await calls.PATCH(foreignMessage)
     expect(response.status).toBe(403)

@@ -403,6 +403,12 @@ export function createChannelMessageRoutes(
       'content' | 'embeds' | 'components'
     >
 
+    // Reading the body awaits IO; access may have been revoked meanwhile.
+    const currentError = bot
+      ? getMessageAccessError(db, channelId, bot.user_id)
+      : null
+    if (currentError) return c.json(currentError.body, currentError.status)
+
     const errors = validateMessageCreate(payload)
     if (Object.keys(errors).length > 0) {
       return c.json(validationError(errors).body, 400)
