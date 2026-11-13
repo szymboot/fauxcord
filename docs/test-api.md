@@ -3920,6 +3920,37 @@ number next to `responded: false`:
   read `responded` and `initial_callback_type` for the outcome.
 - It survives database reopen and is removed with the interaction.
 
+### Late callbacks (`rejected_reason`)
+
+When a guild has an armed
+[initial callback deadline](#post-_testinteraction-callback-deadlines--arm-the-3-second-initial-callback-deadline)
+and the bot's callback arrives after it, the callback gets `404` / `10062` and
+the interaction **stays unacknowledged**. The observation then carries two extra
+fields next to `responded: false`:
+
+```json
+{
+  "interaction_id": "123456789",
+  "application_id": "111111111111111111",
+  "responded": false,
+  "initial_callback_type": null,
+  "rejected_reason": "deadline",
+  "rejected_at": "2026-01-01T12:00:03.512Z"
+}
+```
+
+- `rejected_reason` is `"deadline"` (the only value today); `rejected_at` is the
+  ISO 8601 instant of the **latest** late callback. Both are absent when no
+  callback was refused for lateness, so existing consumers see an unchanged
+  shape. A harness can fail fast as soon as `rejected_reason` appears instead of
+  waiting for an acknowledgement that can no longer come.
+- A late callback is refused before its type is checked, so it never sets
+  `rejected_callback_type`. The two fields are independent records.
+- A callback with an invalid body (`400`), a wrong token or a REST-faulted
+  request (the fault runs first) never reaches the deadline check and is not
+  recorded. The record survives removal of the deadline control and is removed
+  with the interaction.
+
 A harness can poll while `responded` is `false`, then distinguish direct `4` from
 deferred `5`. Any other type, or `true` with `null`, must be handled as a separate
 or unknown mode. Read the original message separately for completed output:
@@ -4159,6 +4190,106 @@ modals. This Fauxcord-specific route has no Discord OpenAPI manifest entry.
 
 ---
 
+## `POST /_test/interaction-callback-deadlines` — Arm the 3-second initial callback deadline
+
+Discord requires the initial interaction callback
+(`POST /interactions/{id}/{token}/callback`) within **3 seconds** of the
+interaction's creation. A later callback fails with
+`404 {"message": "Unknown interaction", "code": 10062}` and the user sees "This
+interaction failed". Fauxcord models this deadline **only when you arm it**, so
+existing tests running under load never become flaky. Use it to show that a bot
+which answers only after slow Discord REST calls or database writes fails its
+users.
+
+```bash
+curl -X POST http://localhost:3000/_test/interaction-callback-deadlines \
+  -H "Content-Type: application/json" \
+  -d '{"guild_id": "222222222222222222", "deadline_ms": 3000}'
+```
+
+| Field         | Required | Description                                                                  |
+| ------------- | -------- | ---------------------------------------------------------------------------- |
+| `guild_id`    | ✅       | Nonzero Snowflake string (1–20 digits, no leading zeros) of an existing guild. |
+| `deadline_ms` |          | Integer from `1` to `60000`; defaults to `3000`. A short value keeps tests fast. |
+
+Extra fields are rejected. Invalid bodies (including malformed JSON) return
+`400` with Discord's `Invalid Form Body` / `50035` field errors (`guild_id`,
+`deadline_ms`, or `body` for a non-object or unknown field). An unknown guild
+returns `404` / `10004`. A guild that already has an active control returns
+`409 {"message": "409: Conflict", "code": 0}`; remove it first to change the
+deadline.
+
+**Response**: `201`:
+
+```json
+{
+  "id": "<control UUID>",
+  "guild_id": "222222222222222222",
+  "bot_id": "111111111111111111",
+  "deadline_ms": 3000,
+  "created_at": "2026-01-01T12:00:00.000Z"
+}
+```
+
+**Scope.** The control covers every interaction created for the guild's owning
+bot **after** `created_at`: slash and context commands and autocomplete
+(`POST /_test/interactions`), button clicks (`type: 3`), modal submissions
+(`POST /_test/interactions/:id/modal-submit`) and native `INTERACTION_CREATE`
+dispatches. Interactions created earlier, interactions in other guilds, and
+other bot setups are unaffected, and so is a guild without a control. Without
+an armed control the behavior is exactly as before: there is no deadline.
+
+**The deadline.** It is measured with Fauxcord's own clock from the moment the
+interaction was created (the instant `INTERACTION_CREATE` is dispatched). An
+initial callback that arrives at or before `created + deadline_ms` works exactly
+as today. A later one is rejected with `404` `{"message": "Unknown
+interaction", "code": 10062}`, regardless of the callback type, and:
+
+- stores nothing: no message (also no `LOADING` message for type `5`), no modal,
+  no autocomplete choices, no deferred state;
+- dispatches nothing to the Gateway;
+- leaves the interaction **unacknowledged**: `responded` stays `false`, and the
+  [callback observation](#get-_testinteractionsinteractionidcallback--observe-the-initial-callback)
+  gains [`rejected_reason: "deadline"` and `rejected_at`](#late-callbacks-rejected_reason).
+
+A callback body that fails validation still gets its `400` first, and a
+callback for an interaction that was already acknowledged keeps its `400` /
+`40060`: the deadline only governs the first accepted callback. After an
+accepted callback (including deferred types `5`/`6`) the existing 15-minute
+token rules for followups and `@original` edits apply unchanged, however late
+they are relative to the 3-second deadline.
+
+**Interaction with other controls**
+
+- An armed [REST fault](#post-_testrest-faults--fail-bounded-exact-rest-attempts)
+  on `POST /interactions/{id}/callback` runs first, as for every route. A
+  faulted late callback returns the injected failure and records nothing; once
+  the fault is exhausted the next callback gets the deadline `404`.
+- [`expire-token`](#post-_testinteractionsinteractionidexpire-token--expire-an-interaction-token)
+  and this deadline are independent: expiring a token does not lift the
+  deadline, and a deadline rejection does not expire the token (webhook routes
+  keep their 15-minute rules).
+
+## `GET /_test/interaction-callback-deadlines/:id` — Inspect a deadline control
+
+Returns `200` with the creation response and `Cache-Control: no-store`. An
+unknown or cleaned-up control returns `404`
+(`{"message": "404: Not Found", "code": 0}`).
+
+## `DELETE /_test/interaction-callback-deadlines/:id` — Disarm the deadline
+
+Returns `204`; an unknown or already removed control returns `404` / code `0`.
+The deadline stops applying immediately, including to interactions still
+waiting for their callback.
+
+**Cleanup.** `POST /_test/reset` clears all controls, or only those owned by the
+supplied `token`; `DELETE /_test/setup/:token`, deletion of the guild, and
+reassignment of the guild to another setup also remove them. Controls of other
+bots survive a scoped reset. This Fauxcord-specific route has no Discord OpenAPI
+manifest entry.
+
+---
+
 ## `POST /_test/interactions/:interactionId/expire-token` — Expire an interaction token
 
 Discord interaction tokens are valid for **15 minutes**
@@ -4217,8 +4348,10 @@ earliest `token_expires_at`. Only that interaction is affected.
   (`POST /_test/interactions` with `type: 3`) creates a new interaction with a fresh
   token.
 - The initial callback (`POST /interactions/{id}/{token}/callback`) keeps its existing
-  behavior and is not rejected after expiry. Discord documents a separate 3-second
-  deadline for it, which Fauxcord does not model either.
+  behavior and is not rejected after expiry. Discord's separate 3-second deadline for
+  it is modeled only on request, per guild, with
+  [`POST /_test/interaction-callback-deadlines`](#post-_testinteraction-callback-deadlines--arm-the-3-second-initial-callback-deadline);
+  expiring a token neither arms, extends nor lifts that deadline.
 - An armed [REST fault](#post-_testrest-faults--fail-bounded-exact-rest-attempts) selector for a route
   still runs before the native route (the existing middleware order); expiry is native
   route behavior, so a faulted request returns the injected failure and, once the

@@ -340,6 +340,29 @@ function migrateInteractionTokenExpiry(db: Database): void {
   }
 }
 
+/**
+ * Adds the creation instant (epoch milliseconds) the opt-in initial callback
+ * deadline is measured from, the deadline control armed when the interaction
+ * was created, and the latest deadline rejection. Rows without a control
+ * predate it (or were created unarmed) and never have a deadline.
+ * @param db - Database instance
+ */
+function migrateInteractionCallbackDeadline(db: Database): void {
+  const columns = db.prepare('PRAGMA table_info(interactions)').all() as {
+    name: string
+  }[]
+  for (const [name, type] of [
+    ['created_at_ms', 'INTEGER'],
+    ['deadline_control_id', 'TEXT'],
+    ['rejected_reason', 'TEXT'],
+    ['rejected_at', 'INTEGER'],
+  ] as const) {
+    if (columns.every((column) => column.name !== name)) {
+      db.exec(`ALTER TABLE interactions ADD COLUMN ${name} ${type}`)
+    }
+  }
+}
+
 /** Preserves legacy controls while admitting bot-scoped user route selectors. */
 function migrateRestFaultSelectors(db: Database): void {
   db.transaction(() => {
@@ -548,6 +571,17 @@ export function initializeDatabase(dbPath: string): Database {
     );
     CREATE INDEX IF NOT EXISTS idx_closed_dms_owner
       ON test_closed_dms(owner_token);
+
+    CREATE TABLE IF NOT EXISTS test_interaction_callback_deadlines (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL UNIQUE REFERENCES guilds(id) ON DELETE CASCADE,
+      bot_id TEXT NOT NULL,
+      owner_token TEXT NOT NULL REFERENCES bots(token) ON DELETE CASCADE,
+      deadline_ms INTEGER NOT NULL,
+      created_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_callback_deadlines_owner
+      ON test_interaction_callback_deadlines(owner_token);
 
     CREATE TABLE IF NOT EXISTS test_rest_faults (
       id TEXT PRIMARY KEY,
@@ -915,6 +949,10 @@ export function initializeDatabase(dbPath: string): Database {
       rejected_callback_type      INTEGER,
       message_json                TEXT,
       token_expires_at            INTEGER,
+      created_at_ms               INTEGER,
+      deadline_control_id         TEXT,
+      rejected_reason             TEXT,
+      rejected_at                 INTEGER,
       created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_interactions_app ON interactions(application_id);
@@ -1313,6 +1351,7 @@ export function initializeDatabase(dbPath: string): Database {
   migrateInteractionAutocomplete(db)
   migrateInteractionMessage(db)
   migrateInteractionTokenExpiry(db)
+  migrateInteractionCallbackDeadline(db)
   migrateRestFaultSelectors(db)
   migrateReactionTypes(db)
   recoverRestFaultOutcomes(db)
