@@ -6656,9 +6656,9 @@ channel can no longer read, edit or delete messages there:
 | No `VIEW_CHANNEL` (`1024`)                            | `403` / `50001` Missing Access | same                  |
 | `VIEW_CHANNEL` but no `READ_MESSAGE_HISTORY` (`65536`) | `403` / `50013` Missing Permissions | allowed         |
 
-The check runs before the message lookup, the authorship rule (`PATCH` still
+An unknown channel answers `404` / `10003` first. The access check then runs before the message lookup, the authorship rule (`PATCH` still
 answers `50005` afterwards), body validation, writes and Gateway dispatch, so a
-refused request stores and dispatches nothing. An unknown channel, DM channels
+refused request stores and dispatches nothing. DM channels
 and non-Bot callers (Bearer/OAuth credentials) keep their previous behavior;
 the list route `GET /channels/:channelId/messages` is not checked, and `DELETE`
 still does not model `MANAGE_MESSAGES` for other users' messages. A denial from

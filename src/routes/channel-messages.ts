@@ -356,12 +356,6 @@ export function createChannelMessageRoutes(
   // PATCH /channels/:channelId/messages/:messageId — Edit a message
   app.patch('/channels/:channelId/messages/:messageId', async (c) => {
     const { channelId, messageId } = c.req.param()
-    const bot = c.get('bot')
-    const accessError = bot
-      ? getMessageAccessError(db, channelId, bot.user_id)
-      : null
-    if (accessError) return c.json(accessError.body, accessError.status)
-
     const channel = requireEntity(
       c,
       getChannel(db, channelId),
@@ -369,6 +363,12 @@ export function createChannelMessageRoutes(
       'Unknown Channel'
     )
     if (channel instanceof Response) return channel
+
+    const bot = c.get('bot')
+    const accessError = bot
+      ? getMessageAccessError(db, channelId, bot.user_id)
+      : null
+    if (accessError) return c.json(accessError.body, accessError.status)
 
     const existing = requireEntity(
       c,

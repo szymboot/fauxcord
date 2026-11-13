@@ -192,14 +192,11 @@ describe('single-message access checks', () => {
 
   it('re-checks access after the PATCH body has been read', async () => {
     const encoder = new TextEncoder()
-    let release: () => void = () => {}
-    const gate = new Promise<void>((resolve) => {
-      release = resolve
-    })
+    const gate = Promise.withResolvers<undefined>()
     const body = new ReadableStream<Uint8Array>({
       async start(controller) {
         controller.enqueue(encoder.encode('{"content":'))
-        await gate
+        await gate.promise
         controller.enqueue(encoder.encode('"edited"}'))
         controller.close()
       },
@@ -218,7 +215,7 @@ describe('single-message access checks', () => {
     fixture.db
       .prepare('DELETE FROM guild_members WHERE guild_id = ? AND user_id = ?')
       .run(GUILD, BOT)
-    release()
+    gate.resolve(undefined)
     const response = await pending
     expect(response.status).toBe(403)
     expect(await response.json()).toEqual(MISSING_ACCESS)
@@ -358,12 +355,16 @@ describe('single-message access checks', () => {
     expect(await statusOf(calls.GET(ownMessage))).toBe(200)
   })
 
-  it('keeps the unknown-channel behavior', async () => {
-    const response = await request(
-      '/api/v10/channels/999999999999999999/messages/999999999999999999'
-    )
-    expect(response.status).toBe(404)
-    expect(await response.json()).toMatchObject({ code: 10_008 })
+  it('answers an unknown channel before any access check', async () => {
+    for (const method of ['GET', 'PATCH', 'DELETE']) {
+      const response = await request(
+        '/api/v10/channels/999999999999999999/messages/999999999999999999',
+        method,
+        method === 'PATCH' ? { content: 'x' } : undefined
+      )
+      expect(response.status).toBe(404)
+      expect(await response.json()).toMatchObject({ code: 10_003 })
+    }
   })
 
   it('keeps the message list unchanged', async () => {
