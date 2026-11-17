@@ -13,6 +13,7 @@ import {
   ALL_PERMISSIONS,
   PermissionBit,
   resolveChannelPermissions,
+  type ResolvedChannelPermissions,
 } from './guild-permissions'
 
 /**
@@ -39,6 +40,57 @@ export const BOT_DM_APP_PERMISSIONS =
   DM_APP_PERMISSIONS | PermissionBit.USE_EXTERNAL_EMOJIS
 
 /**
+ * Finds the channel whose overwrites apply, using the parent for a thread.
+ * @param db - Database
+ * @param channelId - Interaction channel ID, or null for guild-level checks
+ * @returns The channel whose permissions apply, or null
+ */
+export function getInteractionPermissionChannel(
+  db: Database,
+  channelId: string | null
+): string | null {
+  if (!channelId) return null
+  const channel = db
+    .prepare('SELECT type, parent_id FROM channels WHERE id = ?')
+    .get(channelId) as { type: number; parent_id: string | null } | undefined
+  return channel && [10, 11, 12].includes(channel.type) && channel.parent_id
+    ? channel.parent_id
+    : channelId
+}
+
+/**
+ * Resolves channel permissions including a member's active timeout.
+ * @param db - Database
+ * @param guildId - Guild ID
+ * @param permissionChannel - Channel supplying overwrites, or null
+ * @param userId - Invoking user ID
+ * @returns The resolved permissions, or null for a non-member
+ */
+export function resolveInteractionMemberPermissions(
+  db: Database,
+  guildId: string,
+  permissionChannel: string | null,
+  userId: string
+): ResolvedChannelPermissions | null {
+  const overwrites = permissionChannel
+    ? getChannelOverwrites(db, permissionChannel)
+    : []
+  const resolved = resolveChannelPermissions(db, guildId, overwrites, userId)
+  if (!resolved || resolved.privileged) return resolved
+  const timeout = db
+    .prepare(
+      'SELECT communication_disabled_until FROM guild_members WHERE guild_id = ? AND user_id = ?'
+    )
+    .get(guildId, userId) as
+    { communication_disabled_until: string | null } | undefined
+  const until = timeout?.communication_disabled_until
+  if (until && Date.parse(until) > Date.now()) {
+    resolved.permissions &= TIMED_OUT_PERMISSIONS
+  }
+  return resolved
+}
+
+/**
  * Computes a user's total permissions in a guild channel the way Discord's
  * computed permissions do: the owner and guild-level ADMINISTRATOR get every
  * permission, everyone else gets base role permissions with the channel's
@@ -57,32 +109,16 @@ export function computeGuildChannelPermissions(
   channelId: string | null,
   userId: string
 ): bigint | null {
-  const channel = channelId
-    ? (db
-        .prepare('SELECT type, parent_id FROM channels WHERE id = ?')
-        .get(channelId) as
-        { type: number; parent_id: string | null } | undefined)
-    : undefined
-  // Threads carry no overwrites of their own and use their parent's.
-  const source =
-    channel && [10, 11, 12].includes(channel.type) && channel.parent_id
-      ? channel.parent_id
-      : channelId
-  const overwrites = source ? getChannelOverwrites(db, source) : []
-  const resolved = resolveChannelPermissions(db, guildId, overwrites, userId)
-  if (!resolved) return null
-  if (resolved.privileged) return ALL_PERMISSIONS
-  const timeout = db
-    .prepare(
-      'SELECT communication_disabled_until FROM guild_members WHERE guild_id = ? AND user_id = ?'
-    )
-    .get(guildId, userId) as
-    { communication_disabled_until: string | null } | undefined
-  const until = timeout?.communication_disabled_until
-  const timedOut = until !== null && until !== undefined
-  return timedOut && Date.parse(until) > Date.now()
-    ? resolved.permissions & TIMED_OUT_PERMISSIONS
-    : resolved.permissions
+  const permissionChannel = getInteractionPermissionChannel(db, channelId)
+  const resolved = resolveInteractionMemberPermissions(
+    db,
+    guildId,
+    permissionChannel,
+    userId
+  )
+  return resolved?.privileged
+    ? ALL_PERMISSIONS
+    : (resolved?.permissions ?? null)
 }
 
 /** Where an interaction happened, as stored on its row. */

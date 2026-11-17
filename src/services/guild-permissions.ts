@@ -19,6 +19,7 @@ export const PermissionBit = {
   DEAFEN_MEMBERS: 1n << 23n,
   MOVE_MEMBERS: 1n << 24n,
   MANAGE_ROLES: 1n << 28n,
+  USE_APPLICATION_COMMANDS: 1n << 31n,
 } as const
 
 /**

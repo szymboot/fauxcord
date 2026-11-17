@@ -74,6 +74,7 @@ describe('POST /_test/interactions for USER commands', () => {
       channel_id: channelId,
       user_id: caller,
       locale: 'pl',
+      enforce_command_permissions: false,
     })
     expect(response.status).toBe(201)
     const interaction = (await response.json()) as Record<string, unknown>

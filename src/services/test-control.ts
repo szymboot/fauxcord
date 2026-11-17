@@ -67,6 +67,7 @@ import { addReaction, removeReaction, type ReactionBurst } from './reactions'
 import { findGuildEmoji, parseReactionEmoji } from './reaction-emoji'
 import { createInteraction } from './interactions'
 import { resolveInteractionScope } from './interaction-scope'
+import { checkGuildSlashCommandAccess } from './command-permission-access'
 import type { InteractionObject } from './interactions'
 
 /** Test setup request type */
@@ -1474,6 +1475,8 @@ export interface TestInteractionRequest {
   guild_id?: string
   channel_id?: string
   user_id?: string
+  /** Enforce application-command permissions for a guild slash invocation. */
+  enforce_command_permissions?: boolean
   options?: Record<string, unknown>[]
 }
 
@@ -1483,12 +1486,19 @@ export type CreateTestInteractionResult =
   | {
       ok: false
       reason:
-        'unknown_command' | 'unknown_guild' | 'unknown_channel' | 'unknown_user'
+        | 'unknown_command'
+        | 'unknown_guild'
+        | 'unknown_channel'
+        | 'unknown_user'
+        | 'unknown_member'
+        | 'missing_permissions'
     }
 
 /** Minimal row shape needed to resolve a command by name */
-interface CommandIdRow {
+interface TestCommandRow {
   id: string
+  application_id: string
+  default_member_permissions: string | null
 }
 
 /**
@@ -1533,6 +1543,7 @@ function userCommandData(
  * guilds the bot left or lost, so that no interaction is created for them. A
  * request with only a guild `channel_id` is created in that channel's guild.
  * A USER command's `target_id` must be an existing user.
+ * Opted-in guild slash invocations are checked before creating an interaction.
  * @param db - Database
  * @param request - Test interaction request body
  * @returns The created interaction, or why no interaction was created
@@ -1549,30 +1560,47 @@ export function createTestInteraction(
   )
   if (!scope.ok) return scope
   const commandType = request.command_type ?? (request.target_id ? 2 : 1)
+  const interactionType = request.type ?? 2
   const guildCommand = request.guild_id
     ? (db
         .prepare(
-          'SELECT id FROM application_commands WHERE application_id = ? AND guild_id = ? AND type = ? AND name = ?'
+          'SELECT id, application_id, default_member_permissions FROM application_commands WHERE application_id = ? AND guild_id = ? AND type = ? AND name = ?'
         )
         .get(
           request.application_id,
           request.guild_id,
           commandType,
           request.command_name
-        ) as CommandIdRow | undefined)
+        ) as TestCommandRow | undefined)
     : undefined
 
   const globalCommand = guildCommand
     ? undefined
     : (db
         .prepare(
-          'SELECT id FROM application_commands WHERE application_id = ? AND guild_id IS NULL AND type = ? AND name = ?'
+          'SELECT id, application_id, default_member_permissions FROM application_commands WHERE application_id = ? AND guild_id IS NULL AND type = ? AND name = ?'
         )
         .get(request.application_id, commandType, request.command_name) as
-        CommandIdRow | undefined)
+        TestCommandRow | undefined)
 
   const command = guildCommand ?? globalCommand
   if (!command) return { ok: false, reason: 'unknown_command' }
+  if (
+    commandType === 1 &&
+    interactionType === 2 &&
+    request.enforce_command_permissions === true &&
+    scope.guildId !== undefined
+  ) {
+    if (!request.user_id) return { ok: false, reason: 'unknown_member' }
+    const refusal = checkGuildSlashCommandAccess(
+      db,
+      scope.guildId,
+      request.channel_id ?? null,
+      command,
+      request.user_id
+    )
+    if (refusal) return { ok: false, reason: refusal }
+  }
 
   let data: Record<string, unknown> = { options: request.options ?? [] }
   if (commandType === 2) {
@@ -1592,7 +1620,7 @@ export function createTestInteraction(
     interactionId,
     applicationId: request.application_id,
     token: interactionToken,
-    type: request.type ?? 2,
+    type: interactionType,
     locale: request.locale,
     guildId: scope.guildId,
     channelId: request.channel_id,
