@@ -1009,6 +1009,16 @@ export function createTestRoutes(
         : createTestInteraction(db, raw as TestInteractionRequest)
     if (result.ok) return c.json(result.interaction, 201)
     switch (result.reason) {
+      case 'missing_permissions': {
+        return c.json(
+          discordError(
+            DiscordErrorCode.MISSING_PERMISSIONS,
+            'Missing Permissions',
+            403
+          ).body,
+          403
+        )
+      }
       case 'unknown_message': {
         return c.json(
           discordError(DiscordErrorCode.UNKNOWN_MESSAGE, 'Unknown Message', 404)

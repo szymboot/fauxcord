@@ -162,10 +162,41 @@ export interface TestInteractionFields {
   type?: unknown
   options?: unknown
   locale?: unknown
+  enforce_command_permissions?: unknown
 }
 
 /** Snowflake string check shared by component interaction identifiers. */
 const SNOWFLAKE = /^[1-9]\d{0,19}$/
+
+/** Validates the permission opt-in and requires a caller for enforcement. */
+function validateCommandPermissionFlag(
+  fields: TestInteractionFields,
+  supportsEnforcement: boolean,
+  errors: ValidationErrors
+): void {
+  const enforce = fields.enforce_command_permissions
+  if (enforce === undefined || enforce === false) return
+  if (enforce !== true) {
+    errors.enforce_command_permissions = { _errors: [typeError('boolean')] }
+  } else if (!supportsEnforcement) {
+    errors.enforce_command_permissions = {
+      _errors: [
+        {
+          code: 'BASE_TYPE_BAD_VALUE',
+          message:
+            'Only slash-command invocations support command permission enforcement.',
+        },
+      ],
+    }
+  } else if (fields.user_id === undefined) {
+    errors.user_id = { _errors: [requiredError()] }
+  } else if (
+    typeof fields.user_id !== 'string' ||
+    !SNOWFLAKE.test(fields.user_id)
+  ) {
+    errors.user_id = { _errors: [typeError('Snowflake string')] }
+  }
+}
 
 /**
  * Validates a simulated MESSAGE_COMPONENT (type 3) interaction request: the
@@ -178,6 +209,7 @@ function validateTestComponentInteraction(
   fields: TestInteractionFields
 ): ValidationErrors {
   const errors = validateInteractionLocale(fields.locale)
+  validateCommandPermissionFlag(fields, false, errors)
   for (const key of [
     'application_id',
     'channel_id',
@@ -343,6 +375,11 @@ export function validateTestInteraction(body: unknown): ValidationErrors {
     return errors
   }
   const kind = commandType ?? (targetId === undefined ? 1 : 2)
+  validateCommandPermissionFlag(
+    fields,
+    kind === 1 && (fields.type === undefined || fields.type === 2),
+    errors
+  )
   if (kind === 1) {
     if (targetId !== undefined) {
       errors.target_id = bad(

@@ -3500,17 +3500,18 @@ curl -X POST http://localhost:3000/_test/interactions \
 
 **Fields**
 
-| Field            | Required | Description                                                                                                                                                                                 |
-| ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `application_id` | ✅       | The bot's application ID (same as its `user.id`)                                                                                                                                            |
-| `command_name`   | ✅       | Name of a command already registered via the Application Commands API                                                                                                                       |
-| `command_type`   | —        | Kind of command to invoke: `1` CHAT_INPUT (default) or `2` USER (default when `target_id` is set). Only commands of this kind match, so a slash command and a user command may share a name |
-| `target_id`      | —        | USER commands only: ID of the user the command is invoked on (`data.target_id`); must be an existing user                                                                                   |
-| `type`           | —        | Interaction type (default: `2`, APPLICATION_COMMAND); `4` is [AUTOCOMPLETE](#autocomplete-interactions-type-4), `3` a [button click](#button-clicks-message_component)                       |
-| `guild_id`       | —        | Guild ID. When set, prefers a guild-scoped command match, falling back to a global command of the same name                                                                                 |
-| `channel_id`     | —        | Channel ID the interaction is bound to (needed for `type: 4`/`5` original responses and followups)                                                                                          |
-| `user_id`        | —        | Invoking user ID (auto-generated if omitted)                                                                                                                                                |
-| `options`        | —        | Command option values, passed through into the interaction's `data.options`. Exactly one option has `focused: true` for `type: 4` and none does for `type: 2`                               |
+| Field                         | Required | Description                                                                                                                                                                                 |
+| ----------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `application_id`              | ✅       | The bot's application ID (same as its `user.id`)                                                                                                                                            |
+| `command_name`                | ✅       | Name of a command already registered via the Application Commands API                                                                                                                       |
+| `command_type`                | —        | Kind of command to invoke: `1` CHAT_INPUT (default) or `2` USER (default when `target_id` is set). Only commands of this kind match, so a slash command and a user command may share a name |
+| `target_id`                   | —        | USER commands only: ID of the user the command is invoked on (`data.target_id`); must be an existing user                                                                                   |
+| `type`                        | —        | Interaction type (default: `2`, APPLICATION_COMMAND); `4` is [AUTOCOMPLETE](#autocomplete-interactions-type-4), `3` a [button click](#button-clicks-message_component)                      |
+| `guild_id`                    | —        | Guild ID. When set, prefers a guild-scoped command match, falling back to a global command of the same name                                                                                 |
+| `channel_id`                  | —        | Channel ID the interaction is bound to (needed for `type: 4`/`5` original responses and followups)                                                                                          |
+| `user_id`                     | —        | Invoking user ID. Required when `enforce_command_permissions` is `true`; otherwise auto-generated if omitted.                                                                               |
+| `options`                     | —        | Command option values, passed through into the interaction's `data.options`. Exactly one option has `focused: true` for `type: 4` and none does for `type: 2`                               |
+| `enforce_command_permissions` | —        | Boolean, defaults to `false`. Set to `true` on a guild slash-command invocation to check Discord-side access for the supplied `user_id`.                                                    |
 
 **Response**: `201` with the created interaction object (matches the
 Discord `Interaction` shape). `404` (`{"message": "404: Not Found", "code": 0}`)
@@ -3522,6 +3523,37 @@ left or was removed; the surviving guild gets no interaction),
 and `404` `{"message": "Unknown Channel", "code": 10003}` when `channel_id` does
 not exist, belongs to a different guild than `guild_id`, or belongs to a guild
 the bot left or was removed from.
+
+### Enforcing guild slash-command permissions
+
+To exercise Discord-side access from Go Harness, send
+`"enforce_command_permissions": true` with the invoking guild member's
+`user_id` and the target `channel_id`. Set up the member with View Channel and
+Use Application Commands in that channel, then use the Application Command
+Permissions API to configure command access. The permission check applies to
+both guild and global commands invoked in a guild. Threads use their parent
+channel's permissions. Command-specific entries override application-wide
+entries for the same user, role, or channel. Other application-wide entries
+still apply. A command-specific user or role allow can override
+`default_member_permissions`. A channel deny blocks the command even for a
+user explicitly allowed to run it elsewhere. Guild owners and administrators
+bypass these checks. [Discord's application command permissions](https://docs.discord.com/developers/interactions/application-commands#permissions), [Discord's command permissions update](https://support-apps.discord.com/hc/en-us/articles/26501842915607-Updates-to-Command-Permissions).
+
+A refused invocation returns HTTP `403` with the following JSON body. No
+interaction is stored and no `INTERACTION_CREATE` is dispatched.
+
+```json
+{ "message": "Missing Permissions", "code": 50013 }
+```
+
+Omit the flag or set it to `false` to force dispatch and test the bot's own
+authorization independently. `false` is accepted for every interaction type.
+Set `true` only for slash-command invocations (`type: 2` and `command_type: 1`,
+both defaults). Enforcement applies in guilds. Non-boolean flag values return
+HTTP `400` with a field validation error. With `true`, a missing or invalid
+`user_id`, a USER command, or any other interaction type also returns `400`.
+A user ID outside the guild returns HTTP `404` with
+`{"message": "Unknown Member", "code": 10007}` when enforcement is on.
 
 ### Permissions in interactions (`member.permissions`, `app_permissions`)
 

@@ -1,8 +1,5 @@
 /**
- * Authorization of command permission edits by a user-bound OAuth token.
- *
- * Fauxcord's approximation of Discord's rules for
- * `PUT /applications/{app}/guilds/{guild}/commands/{command}/permissions`.
+ * Application-command permissions for guild invocations and permission edits.
  */
 import type { Database } from '../db'
 import { PermissionBit, resolveChannelPermissions } from './guild-permissions'
@@ -15,13 +12,27 @@ import {
   getApplicationLevelPermissionEntries,
   getCommandPermissions,
 } from './application-commands'
+import {
+  getInteractionPermissionChannel,
+  resolveInteractionMemberPermissions,
+} from './interaction-permissions'
 
 /** Command permission overwrite types. */
-const OverwriteType = { ROLE: 1, USER: 2 } as const
+const OverwriteType = { ROLE: 1, USER: 2, CHANNEL: 3 } as const
 
 /** Both permissions a non-privileged editor needs. */
 const MANAGE_GUILD_AND_ROLES =
   PermissionBit.MANAGE_GUILD | PermissionBit.MANAGE_ROLES
+
+/** Channel permissions required to find and use slash commands. */
+const SLASH_COMMAND_PERMISSIONS =
+  PermissionBit.VIEW_CHANNEL | PermissionBit.USE_APPLICATION_COMMANDS
+
+/** Command fields needed to evaluate its guild permissions. */
+type CommandPermissionTarget = Pick<
+  ApplicationCommandObject,
+  'id' | 'application_id' | 'default_member_permissions'
+>
 
 /** The position/ID pair Discord uses to order roles. */
 interface RankedRole {
@@ -58,73 +69,137 @@ function getHeldRoles(
  * @param guildId - Guild ID
  * @param userId - User ID
  * @param heldRoles - Roles the user holds besides `@everyone`
- * @returns The decision, or undefined when no entry applies to the user
+ * @returns The deciding entry, or undefined when no entry applies to the user
  */
 function evaluateEntries(
   entries: CommandPermissionEntry[],
   guildId: string,
   userId: string,
   heldRoles: RankedRole[]
-): boolean | undefined {
+): CommandPermissionEntry | undefined {
   const personal = entries.find(
     (entry) => entry.type === OverwriteType.USER && entry.id === userId
   )
-  if (personal) return personal.permission
+  if (personal) return personal
 
   const roleIds = new Set(heldRoles.map((role) => role.id))
   const roleEntries = entries.filter(
     (entry) => entry.type === OverwriteType.ROLE && roleIds.has(entry.id)
   )
-  return roleEntries.length > 0
-    ? roleEntries.some((entry) => entry.permission)
-    : entries.find(
-        (entry) => entry.type === OverwriteType.ROLE && entry.id === guildId
-      )?.permission
+  return (
+    roleEntries.find((entry) => entry.permission) ??
+    roleEntries.at(0) ??
+    entries.find(
+      (entry) => entry.type === OverwriteType.ROLE && entry.id === guildId
+    )
+  )
 }
 
-/**
- * Whether the user can run the command. The command's own stored overwrites
- * decide when it has any; a command with none falls back to the
- * application-level list (Discord applies it to every command without
- * explicit overwrites). Each list is evaluated as the user's own entry, then
- * the user's roles (any allow winning over denies), then the `@everyone` entry.
- * When no entry applies, `default_member_permissions` decides. Channel
- * overwrites are ignored.
- * @param db - Database
- * @param guildId - Guild ID
- * @param command - Command being edited
- * @param userId - User ID
- * @param permissions - The user's computed guild permissions
- * @param heldRoles - Roles the user holds besides `@everyone`
- * @returns True when the user can run the command
- */
-function canRunCommand(
+/** Gets the permission entries stored for this command in the guild. */
+function getOwnEntries(
   db: Database,
   guildId: string,
-  command: ApplicationCommandObject,
-  userId: string,
-  permissions: bigint,
-  heldRoles: RankedRole[]
-): boolean {
-  const ownEntries: CommandPermissionEntry[] =
+  command: CommandPermissionTarget
+): CommandPermissionEntry[] {
+  return (
     getCommandPermissions(db, command.application_id, guildId, command.id)
       ?.permissions ?? []
-  const entries =
-    ownEntries.length > 0
-      ? ownEntries
-      : getApplicationLevelPermissionEntries(
-          db,
-          command.application_id,
-          guildId
-        )
+  )
+}
 
-  const decided = evaluateEntries(entries, guildId, userId, heldRoles)
-  if (decided !== undefined) return decided
+/** Gets the overwrite list used for the existing permission-edit check. */
+function getEditPermissionEntries(
+  db: Database,
+  guildId: string,
+  command: CommandPermissionTarget
+): CommandPermissionEntry[] {
+  const ownEntries = getOwnEntries(db, guildId, command)
+  return ownEntries.length > 0
+    ? ownEntries
+    : getApplicationLevelPermissionEntries(db, command.application_id, guildId)
+}
 
-  const required = command.default_member_permissions
+/** Checks whether the member's permissions meet the command's defaults. */
+function meetsCommandDefaults(permissions: bigint, required: string | null) {
   if (required === null) return true
   const bits = BigInt(required)
   return bits !== 0n && (permissions & bits) === bits
+}
+
+/**
+ * Resolves access to a slash command in a guild. The command can override
+ * particular app-wide entries with its own entries for the same targets.
+ * The channel and the member must both be allowed. A command-level allow
+ * for the member bypasses command defaults; an app-wide allow still checks them.
+ * @param db - Database
+ * @param guildId - Guild where the command was invoked
+ * @param channelId - Invoking channel ID, or null for a guild-only fixture
+ * @param command - Resolved command
+ * @param userId - Invoking member ID
+ * @returns The cause of refusal, or null when the invocation is allowed
+ */
+export function checkGuildSlashCommandAccess(
+  db: Database,
+  guildId: string,
+  channelId: string | null,
+  command: CommandPermissionTarget,
+  userId: string
+): 'unknown_member' | 'missing_permissions' | null {
+  const permissionChannel = getInteractionPermissionChannel(db, channelId)
+  const member = resolveInteractionMemberPermissions(
+    db,
+    guildId,
+    permissionChannel,
+    userId
+  )
+  if (!member) return 'unknown_member'
+  if (member.privileged) return null
+  if (
+    (member.permissions & SLASH_COMMAND_PERMISSIONS) !==
+    SLASH_COMMAND_PERMISSIONS
+  )
+    return 'missing_permissions'
+
+  // Keep command entries first so a command-level role allow takes priority
+  // over an app-wide role allow when a member holds both roles.
+  const ownEntries = getOwnEntries(db, guildId, command)
+  const appEntries = getApplicationLevelPermissionEntries(
+    db,
+    command.application_id,
+    guildId
+  )
+  const entries = [
+    ...ownEntries,
+    ...appEntries.filter((appEntry) =>
+      ownEntries.every(
+        (ownEntry) =>
+          ownEntry.type !== appEntry.type || ownEntry.id !== appEntry.id
+      )
+    ),
+  ]
+  const allChannels = /^\d+$/.test(guildId)
+    ? (BigInt(guildId) - 1n).toString()
+    : undefined
+  const channels = entries.filter(
+    (entry) => entry.type === OverwriteType.CHANNEL
+  )
+  const channelAllowed =
+    channels.find((entry) => entry.id === permissionChannel)?.permission ??
+    channels.find((entry) => entry.id === allChannels)?.permission
+  if (channelAllowed === false) return 'missing_permissions'
+
+  const decision = evaluateEntries(
+    entries,
+    guildId,
+    userId,
+    getHeldRoles(db, guildId, userId)
+  )
+  if (decision?.permission === false) return 'missing_permissions'
+  const commandAllowsMember = decision && ownEntries.includes(decision)
+  return commandAllowsMember ||
+    meetsCommandDefaults(member.permissions, command.default_member_permissions)
+    ? null
+    : 'missing_permissions'
 }
 
 /**
@@ -157,13 +232,17 @@ function canEditPermissions(
   if (
     command &&
     !resolved.privileged &&
-    !canRunCommand(
-      db,
-      guildId,
-      command,
-      userId,
-      resolved.permissions,
-      heldRoles
+    !(
+      evaluateEntries(
+        getEditPermissionEntries(db, guildId, command),
+        guildId,
+        userId,
+        heldRoles
+      )?.permission ??
+      meetsCommandDefaults(
+        resolved.permissions,
+        command.default_member_permissions
+      )
     )
   )
     return false

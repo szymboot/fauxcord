@@ -144,7 +144,10 @@ describe('POST /_test/interactions for MESSAGE_COMPONENT clicks', () => {
 
   describe('success', () => {
     it('creates a native type-3 interaction with the full message', async () => {
-      const response = await click({ locale: 'pl' })
+      const response = await click({
+        locale: 'pl',
+        enforce_command_permissions: false,
+      })
       expect(response.status).toBe(201)
       const interaction = (await response.json()) as Record<string, unknown>
       const rest = await context.app.request(

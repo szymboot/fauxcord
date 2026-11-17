@@ -94,7 +94,11 @@ describe('autocomplete interactions', () => {
   async function startAutocomplete(
     options: unknown = [{ name: 'query', type: 3, value: 'ab', focused: true }]
   ): Promise<Started> {
-    const response = await create({ type: 4, options })
+    const response = await create({
+      type: 4,
+      options,
+      enforce_command_permissions: false,
+    })
     expect(response.status).toBe(201)
     return (await response.json()) as Started
   }
