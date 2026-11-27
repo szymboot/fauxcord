@@ -31,7 +31,7 @@ async function bodyOf(
   return resolved.json()
 }
 
-describe('single-message access checks', () => {
+describe('message access checks', () => {
   let fixture: ReturnType<typeof createFullTestApp>
   let ownMessage: string
   let foreignMessage: string
@@ -398,12 +398,6 @@ describe('single-message access checks', () => {
     }
   })
 
-  it('keeps the message list unchanged', async () => {
-    await everyone(0n)
-    const response = await request(`/api/v10/channels/${CHANNEL}/messages`)
-    expect(response.status).toBe(200)
-  })
-
   it('does not apply guild checks to DM channels', async () => {
     const other = '777777777777777777'
     fixture.db
@@ -416,5 +410,313 @@ describe('single-message access checks', () => {
       `/api/v10/channels/${other}/messages/${message}`
     )
     expect(response.status).toBe(200)
+  })
+
+  describe('message history list', () => {
+    let newest: string
+
+    beforeEach(() => {
+      newest = seedMessage(fixture.db, CHANNEL, BOT, TOKEN, 'newest')
+    })
+
+    /** Every page shape of the list route with the IDs a reader receives. */
+    const shapes: [string, () => { query: string; ids: string[] }][] = [
+      [
+        'no cursor',
+        () => ({ query: '', ids: [newest, foreignMessage, ownMessage] }),
+      ],
+      ['limit', () => ({ query: '?limit=1', ids: [newest] })],
+      [
+        'maximum limit',
+        () => ({
+          query: '?limit=100',
+          ids: [newest, foreignMessage, ownMessage],
+        }),
+      ],
+      [
+        'before',
+        () => ({
+          query: `?before=${newest}`,
+          ids: [foreignMessage, ownMessage],
+        }),
+      ],
+      [
+        'after',
+        () => ({
+          query: `?after=${ownMessage}`,
+          ids: [newest, foreignMessage],
+        }),
+      ],
+      [
+        'around',
+        () => ({
+          query: `?around=${foreignMessage}&limit=3`,
+          ids: [newest, foreignMessage, ownMessage],
+        }),
+      ],
+    ]
+
+    /** Requests one history page of a channel. */
+    function history(
+      query = '',
+      channel = CHANNEL,
+      prefix = '/api/v10',
+      token = TOKEN
+    ) {
+      return request(
+        `${prefix}/channels/${channel}/messages${query}`,
+        'GET',
+        undefined,
+        token
+      )
+    }
+
+    /** Asserts a successful page and returns its message IDs. */
+    async function idsOf(response: Response | Promise<Response>) {
+      const resolved = await response
+      expect(resolved.status).toBe(200)
+      const messages = (await resolved.json()) as { id: string }[]
+      return messages.map(({ id }) => id)
+    }
+
+    /** Asserts a `403` / `50001` refusal. */
+    async function expectMissingAccess(response: Response | Promise<Response>) {
+      const resolved = await response
+      expect(resolved.status).toBe(403)
+      expect(await resolved.json()).toEqual(MISSING_ACCESS)
+    }
+
+    /** Removes the bot from the guild. */
+    function removeBot() {
+      fixture.db
+        .prepare('DELETE FROM guild_members WHERE guild_id = ? AND user_id = ?')
+        .run(GUILD, BOT)
+    }
+
+    describe.each(shapes)('page shape: %s', (_name, shape) => {
+      it('returns the page with VIEW_CHANNEL and READ_MESSAGE_HISTORY', async () => {
+        await everyone(VIEW | HISTORY)
+        const { query, ids } = shape()
+        expect(await idsOf(history(query))).toEqual(ids)
+      })
+
+      it('refuses a caller that is not a member of the guild', async () => {
+        removeBot()
+        await expectMissingAccess(history(shape().query))
+      })
+
+      it('refuses a caller without VIEW_CHANNEL', async () => {
+        await everyone(HISTORY | SEND)
+        await expectMissingAccess(history(shape().query))
+      })
+
+      it('returns no messages without READ_MESSAGE_HISTORY', async () => {
+        await everyone(VIEW | SEND)
+        expect(await idsOf(history(shape().query))).toEqual([])
+      })
+    })
+
+    it.each(['/api/v10', '/api', ''])(
+      'applies each check through the %s prefix',
+      async (prefix) => {
+        expect(await idsOf(history('', CHANNEL, prefix))).toHaveLength(3)
+        await everyone(VIEW)
+        expect(await idsOf(history('', CHANNEL, prefix))).toEqual([])
+        await everyone(HISTORY)
+        await expectMissingAccess(history('', CHANNEL, prefix))
+      }
+    )
+
+    it('reports a missing VIEW_CHANNEL even without READ_MESSAGE_HISTORY', async () => {
+      await everyone(0n)
+      await expectMissingAccess(history())
+    })
+
+    it('answers an unknown channel before any access check', async () => {
+      removeBot()
+      const response = await history('', '999999999999999999')
+      expect(response.status).toBe(404)
+      expect(await response.json()).toMatchObject({ code: 10_003 })
+    })
+
+    it('checks access before reading the query parameters', async () => {
+      const query = '?limit=abc&before=abc&after=abc'
+      await everyone(VIEW)
+      expect(await idsOf(history(query))).toEqual([])
+      await everyone(0n)
+      await expectMissingAccess(history(query))
+    })
+
+    it('exempts the guild owner from overwrites and permissions', async () => {
+      const owner = '555555555555555555'
+      const owned = setupTestEnvironment(fixture.db, {
+        token: 'Bot owned',
+        user: { id: owner },
+        guilds: [{ name: 'Owned', channels: [{ name: 'rules' }] }],
+      }).guilds[0]
+      const channel = owned.channels[0].id
+      const put = await request(
+        `/api/v10/channels/${channel}/permissions/${owned.id}`,
+        'PUT',
+        { type: 0, allow: '0', deny: String(VIEW | HISTORY) },
+        'Bot owned'
+      )
+      expect(put.status).toBe(204)
+      const message = seedMessage(fixture.db, channel, owner, 'Bot owned')
+      expect(
+        await idsOf(history('', channel, '/api/v10', 'Bot owned'))
+      ).toEqual([message])
+    })
+
+    it('exempts a guild-level ADMINISTRATOR but not an overwrite ADMINISTRATOR', async () => {
+      await everyone(0n)
+      await overwrite(BOT, 1, ADMIN, VIEW | HISTORY)
+      await expectMissingAccess(history())
+      await role(ADMIN)
+      expect(await idsOf(history())).toHaveLength(3)
+    })
+
+    it('combines @everyone and role permissions', async () => {
+      await everyone(VIEW)
+      expect(await idsOf(history())).toEqual([])
+      await role(HISTORY, false)
+      expect(await idsOf(history())).toEqual([])
+      await role(HISTORY)
+      expect(await idsOf(history())).toHaveLength(3)
+    })
+
+    it.each([
+      ['@everyone', GUILD, 0],
+      ['an assigned role', undefined, 0],
+      ['the member', BOT, 1],
+    ] as const)(
+      'lets an overwrite for %s deny a role-granted READ_MESSAGE_HISTORY',
+      async (_name, target, type) => {
+        await everyone(0n)
+        const reader = await role(VIEW | HISTORY)
+        expect(await idsOf(history())).toHaveLength(3)
+        await overwrite(target ?? reader, type, 0n, HISTORY)
+        expect(await idsOf(history())).toEqual([])
+      }
+    )
+
+    it.each([
+      ['@everyone', GUILD, 0],
+      ['an assigned role', undefined, 0],
+      ['the member', BOT, 1],
+    ] as const)(
+      'lets an overwrite for %s grant a READ_MESSAGE_HISTORY the role lacks',
+      async (_name, target, type) => {
+        await everyone(0n)
+        const viewer = await role(VIEW)
+        expect(await idsOf(history())).toEqual([])
+        await overwrite(target ?? viewer, type, HISTORY, 0n)
+        expect(await idsOf(history())).toHaveLength(3)
+      }
+    )
+
+    it.each([
+      ['@everyone', GUILD, 0],
+      ['an assigned role', undefined, 0],
+      ['the member', BOT, 1],
+    ] as const)(
+      'lets an overwrite for %s deny a role-granted VIEW_CHANNEL',
+      async (_name, target, type) => {
+        await everyone(0n)
+        const reader = await role(VIEW | HISTORY)
+        await overwrite(target ?? reader, type, 0n, VIEW)
+        await expectMissingAccess(history())
+      }
+    )
+
+    it('applies everyone, role and member overwrites in order', async () => {
+      const reader = await role(0n)
+      await everyone(VIEW | HISTORY)
+      await overwrite(GUILD, 0, 0n, HISTORY)
+      expect(await idsOf(history())).toEqual([])
+      await overwrite(reader, 0, HISTORY, 0n)
+      expect(await idsOf(history())).toHaveLength(3)
+      await overwrite(BOT, 1, 0n, HISTORY)
+      expect(await idsOf(history())).toEqual([])
+      await overwrite(reader, 0, 0n, HISTORY)
+      await overwrite(BOT, 1, HISTORY, 0n)
+      expect(await idsOf(history())).toHaveLength(3)
+    })
+
+    it('resolves thread history against the parent channel overwrites', async () => {
+      const thread = '888888888888888801'
+      fixture.db
+        .prepare(
+          `INSERT INTO channels (id, guild_id, type, name, parent_id)
+           VALUES (?, ?, 11, 'thread', ?)`
+        )
+        .run(thread, GUILD, CHANNEL)
+      const message = seedMessage(fixture.db, thread, BOT, TOKEN, 'in thread')
+      await everyone(VIEW | HISTORY)
+      await overwrite(BOT, 1, 0n, HISTORY)
+      expect(await idsOf(history('', thread))).toEqual([])
+      await overwrite(BOT, 1, 0n, VIEW)
+      await expectMissingAccess(history('', thread))
+      await everyone(0n)
+      await overwrite(BOT, 1, VIEW | HISTORY, 0n)
+      expect(await idsOf(history('', thread))).toEqual([message])
+    })
+
+    it('runs a history page fault before the permission check', async () => {
+      await everyone(0n)
+      const armed = await request('/_test/rest-faults', 'POST', {
+        method: 'GET',
+        path: `/channels/${CHANNEL}/messages`,
+        status: 500,
+        code: 0,
+        message: 'Page failed',
+        times: 2,
+      })
+      expect(armed.status).toBe(201)
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const faulted = await history()
+        expect(faulted.status).toBe(500)
+        expect(await faulted.json()).toEqual({
+          code: 0,
+          message: 'Page failed',
+        })
+      }
+      await expectMissingAccess(history())
+    })
+
+    it('leaves the control endpoint unchecked', async () => {
+      removeBot()
+      const response = await request(`/_test/messages/${CHANNEL}`)
+      expect(response.status).toBe(200)
+      const { messages } = (await response.json()) as { messages: unknown[] }
+      expect(messages).toHaveLength(3)
+    })
+
+    it('does not apply guild checks to Bearer callers', async () => {
+      removeBot()
+      const issued = await request('/_test/oauth2/tokens', 'POST', {
+        client_id: BOT,
+        user_id: BOT,
+        scope: 'identify',
+      })
+      expect(issued.status).toBe(201)
+      const { access_token: token } = (await issued.json()) as {
+        access_token: string
+      }
+      expect(
+        await idsOf(history('', CHANNEL, '/api/v10', `Bearer ${token}`))
+      ).toHaveLength(3)
+    })
+
+    it('does not apply guild checks to DM channels', async () => {
+      const dm = '777777777777777777'
+      fixture.db
+        .prepare(
+          'INSERT INTO channels (id, type, guild_id, name) VALUES (?, 1, NULL, NULL)'
+        )
+        .run(dm)
+      const message = seedMessage(fixture.db, dm, BOT, TOKEN, 'dm')
+      expect(await idsOf(history('', dm))).toEqual([message])
+    })
   })
 })

@@ -80,6 +80,18 @@ export function createChannelMessageRoutes(
     )
     if (channel instanceof Response) return channel
 
+    const bot = c.get('bot')
+    const accessError = bot
+      ? getMessageAccessError(db, channelId, bot.user_id, { read: true })
+      : null
+    if (accessError) {
+      // Discord answers a visible channel without READ_MESSAGE_HISTORY with
+      // no messages instead of an error; that is the only 50013 denial here.
+      return accessError.body.code === DiscordErrorCode.MISSING_PERMISSIONS
+        ? c.json([])
+        : c.json(accessError.body, accessError.status)
+    }
+
     const limit = parseLimitQuery(c, 50, 100)
     const before = c.req.query('before')
     const after = c.req.query('after')
