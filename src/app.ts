@@ -220,8 +220,10 @@ export function buildApp(
   app.use('*', createRestObservationMiddleware(db))
   app.use('*', latencyMiddleware)
   app.use('*', rateLimitMiddleware)
-  app.use('*', createRemovedSetupMiddleware(db))
   app.use('*', createRestPageHoldMiddleware(db))
+  // After page holds: a released request is checked against takeovers that
+  // happened while it waited. A removed setup can never claim a hold itself.
+  app.use('*', createRemovedSetupMiddleware(db))
   app.use('*', createRestFaultMiddleware(db))
   // Inside the fault middleware: a matching fault pre-empts a member read hold.
   app.use('*', createRestMemberReadHoldMiddleware(db))

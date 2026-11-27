@@ -692,6 +692,7 @@ export function setupTestEnvironment(
   pruneInteractionCallbackDeadlines(db)
   pruneRestFaults(db)
   getRestObservations(db).prune()
+  getRestPageHolds(db).pruneScopes()
   // Emit only after the transaction has committed successfully.
   for (const emit of pendingEvents) emit()
   return result

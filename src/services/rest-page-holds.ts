@@ -1,6 +1,9 @@
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
-import type { RestPageHoldRequest } from '../validators/rest-page-hold'
+import {
+  isRestMessagePagePath,
+  type RestPageHoldRequest,
+} from '../validators/rest-page-hold'
 
 /** Observable lifecycle of a one-shot page hold. */
 type HoldState =
@@ -21,10 +24,15 @@ export interface RestPageHold extends RestPageHoldRequest {
 interface HoldEntry {
   status: RestPageHold
   token: string
+  /** Selected channel of a message history hold; absent for guild pages. */
+  channelId?: string
   deadline: number
   timer: ReturnType<typeof setTimeout>
   resume?: () => void
 }
+
+/** Guild channel types with a message history: text, voice, announcement, threads and stage. */
+const MESSAGE_CHANNEL_TYPES = new Set([0, 2, 5, 10, 11, 12, 13])
 
 /** Manages bounded, single-request holds and their retained status evidence. */
 export class RestPageHolds {
@@ -45,28 +53,63 @@ export class RestPageHolds {
     resume?.()
   }
 
-  /** Removes controls whose scope has gone away or changed ownership. */
-  private prune(): void {
+  /** Looks up a channel's current type and guild. */
+  private channel(
+    channelId: string
+  ): { guild_id: string | null; type: number } | undefined {
+    return this.db
+      .prepare('SELECT guild_id, type FROM channels WHERE id = ?')
+      .get(channelId) as { guild_id: string | null; type: number } | undefined
+  }
+
+  /** Whether a control's guild keeps its owner and its channel stays in it. */
+  private hasCurrentScope(entry: HoldEntry): boolean {
+    const guild = this.db
+      .prepare('SELECT bot_token FROM guilds WHERE id = ?')
+      .get(entry.status.guild_id) as { bot_token: string } | undefined
+    return (
+      guild?.bot_token === entry.token &&
+      (entry.channelId === undefined ||
+        this.channel(entry.channelId)?.guild_id === entry.status.guild_id)
+    )
+  }
+
+  /**
+   * Removes controls whose scope has gone away or changed ownership, unblocking
+   * their requests. Call after such a change commits.
+   */
+  pruneScopes(): void {
     for (const [id, entry] of this.entries) {
-      const guild = this.db
-        .prepare('SELECT bot_token FROM guilds WHERE id = ?')
-        .get(entry.status.guild_id) as { bot_token: string } | undefined
-      if (guild?.bot_token !== entry.token) {
-        this.finish(entry, 'cancelled')
-        this.entries.delete(id)
-      } else if (Date.now() >= entry.deadline) {
-        this.finish(entry, 'timed_out')
-      }
+      if (!this.hasCurrentScope(entry)) this.remove(id)
+    }
+  }
+
+  /** Removes out-of-scope controls and expires those past their deadline. */
+  private prune(): void {
+    this.pruneScopes()
+    for (const entry of this.entries.values()) {
+      if (Date.now() >= entry.deadline) this.finish(entry, 'timed_out')
     }
   }
 
   /** Arms a unique exact cursor for the guild's current owning bot. */
   create(
     request: RestPageHoldRequest
-  ): RestPageHold | 'UNKNOWN_SCOPE' | 'CONFLICT' {
+  ): RestPageHold | 'UNKNOWN_SCOPE' | 'UNSUPPORTED_SCOPE' | 'CONFLICT' {
     if (this.closed) return 'CONFLICT'
     this.prune()
-    const guildId = request.path.split('/', 3)[2]
+    const resourceId = request.path.split('/', 3)[2]
+    let guildId = resourceId
+    let channelId: string | undefined
+    if (isRestMessagePagePath(request.path)) {
+      const channel = this.channel(resourceId)
+      if (!channel) return 'UNKNOWN_SCOPE'
+      // A hold binds to a guild's owning bot, which DM channels do not have.
+      if (!channel.guild_id || !MESSAGE_CHANNEL_TYPES.has(channel.type))
+        return 'UNSUPPORTED_SCOPE'
+      guildId = channel.guild_id
+      channelId = resourceId
+    }
     const guild = this.db
       .prepare('SELECT bot_token FROM guilds WHERE id = ?')
       .get(guildId) as { bot_token: string } | undefined
@@ -76,7 +119,8 @@ export class RestPageHolds {
         ['armed', 'holding'].includes(entry.status.state) &&
         entry.status.path === request.path &&
         entry.status.after === request.after &&
-        entry.status.before === request.before
+        entry.status.before === request.before &&
+        entry.status.around === request.around
       )
         return 'CONFLICT'
     }
@@ -94,6 +138,7 @@ export class RestPageHolds {
     const entry: HoldEntry = {
       status,
       token: guild.bot_token,
+      channelId,
       deadline,
       timer: setTimeout(() => {
         this.finish(entry, 'timed_out')
@@ -157,14 +202,20 @@ export class RestPageHolds {
     if (this.closed || signal.aborted) return
     this.prune()
     for (const entry of this.entries.values()) {
+      // `around` is an unrelated parameter on guild pages.
+      const cursors =
+        entry.channelId === undefined
+          ? (['after', 'before'] as const)
+          : (['after', 'before', 'around'] as const)
       if (
         entry.status.state !== 'armed' ||
         entry.token !== token ||
         entry.status.path !== path ||
-        query.getAll('after').length > 1 ||
-        query.getAll('before').length > 1 ||
-        (query.get('after') ?? null) !== entry.status.after ||
-        (query.get('before') ?? null) !== entry.status.before
+        cursors.some(
+          (name) =>
+            query.getAll(name).length > 1 ||
+            query.get(name) !== entry.status[name]
+        )
       )
         continue
       entry.status.state = 'holding'
