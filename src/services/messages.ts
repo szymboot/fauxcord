@@ -10,8 +10,13 @@ import {
   normalizeMessageComponents,
   type MessageComponents,
 } from '../validators/message-components'
-import { snowflakeToTimestamp } from '../snowflake'
-import { toDiscordTimestamp } from '../timestamp'
+import { parseSnowflakeTimestamp } from '../snowflake'
+import {
+  formatStoredTimestamp,
+  parseStoredTimestamp,
+  storedTimestampFromSnowflake,
+  toStoredTimestamp,
+} from '../timestamp'
 import { gatewayBus } from '../gateway/bus'
 import { getGuildMember } from './guild-members'
 import { getUser, type UserObject } from './users'
@@ -257,9 +262,9 @@ export function toMessageObject(
       primary_guild: null,
     },
     content: row.content,
-    timestamp: toDiscordTimestamp(new Date(row.created_at)),
+    timestamp: formatStoredTimestamp(row.created_at),
     edited_timestamp: row.edited_at
-      ? toDiscordTimestamp(new Date(row.edited_at))
+      ? formatStoredTimestamp(row.edited_at)
       : null,
     tts: row.tts === 1,
     mention_everyone: row.mention_everyone === 1,
@@ -572,8 +577,8 @@ export function createMessage(
 ): MessageObject {
   const msg = db.transaction(() => {
     db.prepare(
-      `INSERT INTO messages (id, channel_id, author_id, author_token, content, tts, flags, referenced_message_id, type, components)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO messages (id, channel_id, author_id, author_token, content, tts, flags, referenced_message_id, type, components, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`
     ).run(
       params.messageId,
       params.channelId,
@@ -584,7 +589,9 @@ export function createMessage(
       params.flags ?? 0,
       params.messageReference?.message_id ?? null,
       params.type ?? 0,
-      JSON.stringify(normalizeMessageComponents(params.components))
+      JSON.stringify(normalizeMessageComponents(params.components)),
+      // As on Discord, the ID carries the creation time. Other IDs use "now".
+      storedTimestampFromSnowflake(params.messageId)
     )
 
     // Save embeds
@@ -669,17 +676,22 @@ export function updateMessage(
     .get(messageId) as MessageRow | undefined
   if (!row) return null
 
+  // Same clock and precision as the creation time, so that an immediate edit
+  // never appears to precede its message.
+  const editedAt = toStoredTimestamp(new Date())
+
   if (payload.content !== undefined) {
     db.prepare(
-      "UPDATE messages SET content = ?, edited_at = datetime('now') WHERE id = ?"
-    ).run(payload.content, messageId)
+      'UPDATE messages SET content = ?, edited_at = ? WHERE id = ?'
+    ).run(payload.content, editedAt, messageId)
   }
 
   if (payload.components !== undefined) {
     db.prepare(
-      "UPDATE messages SET components = ?, edited_at = datetime('now') WHERE id = ?"
+      'UPDATE messages SET components = ?, edited_at = ? WHERE id = ?'
     ).run(
       JSON.stringify(normalizeMessageComponents(payload.components)),
+      editedAt,
       messageId
     )
   }
@@ -857,17 +869,14 @@ export function isTooOldForBulkDelete(
   messageId: string
 ): boolean {
   // Recover the timestamp from the Snowflake ID to make the determination (same behavior as real Discord)
-  try {
-    const createdAt = snowflakeToTimestamp(messageId).getTime()
-    return Date.now() - createdAt > TWO_WEEKS_MS
-  } catch {
-    // For IDs that cannot be interpreted as Snowflakes, fall back to the DB's created_at
+  let createdAt = parseSnowflakeTimestamp(messageId)
+  if (!createdAt) {
+    // For IDs that are not valid Snowflakes, fall back to the DB's created_at
     const row = db
       .prepare('SELECT created_at FROM messages WHERE id = ?')
       .get(messageId) as { created_at: string } | undefined
     if (!row) return false
-
-    const createdAt = new Date(row.created_at).getTime()
-    return Date.now() - createdAt > TWO_WEEKS_MS
+    createdAt = parseStoredTimestamp(row.created_at)
   }
+  return Date.now() - createdAt.getTime() > TWO_WEEKS_MS
 }

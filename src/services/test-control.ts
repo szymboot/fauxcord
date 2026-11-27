@@ -824,6 +824,7 @@ export function getTestMessages(
   content: string
   author_token: string | null
   created_at: string
+  timestamp: string
   components: MessageComponents
   sticker_items?: APIStickerItem[]
 }[] {
@@ -842,6 +843,7 @@ export function getTestMessages(
     const items = getMessageStickerItems(db, message.id)
     return {
       ...message,
+      timestamp: formatStoredTimestamp(message.created_at),
       components: JSON.parse(message.components) as MessageComponents,
       ...(items.length > 0 && { sticker_items: items }),
     }

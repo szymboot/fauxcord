@@ -2254,6 +2254,39 @@ observations, so `DELETE /channels/{channelId}` can be counted and read back.
 
 ---
 
+## Message timestamps
+
+As on Discord, a message's Snowflake ID carries its creation time. `timestamp`
+is that time (`(id >> 22) + 1420070400000` milliseconds since the Unix epoch)
+with millisecond precision, for example
+`2026-06-07T05:30:01.205000+00:00` for ID `1513052391153471489`. Every surface
+that returns the message agrees: create and edit responses, single-message and
+history reads, both pin APIs, webhook and interaction messages, Gateway
+`MESSAGE_CREATE` / `MESSAGE_UPDATE`, and `GET /_test/messages/:channelId`.
+Editing never changes it; `edited_timestamp` records the edit.
+
+The same time decides the two-week bulk-delete limit (`400` / `50034`) and the
+message deletion window of a ban (`delete_message_seconds` or
+`delete_message_days`), so a bot that filters by `timestamp` agrees with the
+emulator.
+
+To test such time windows,
+[inject](#post-_testchannelschannelidmessages--inject-a-message-from-a-specific-user)
+a message with an old explicit `id`. This prints a Snowflake for 15 days ago:
+
+```bash
+node -p '((BigInt(Date.now() - 15 * 86400000) - 1420070400000n) << 22n).toString()'
+```
+
+Explicit IDs are not checked against the clock, so a future-dated ID produces a
+future `timestamp`. A value that is not a valid Snowflake (the injection
+endpoint also accepts 20-digit numbers above `18446744073709551615`) carries no
+time: its `timestamp` is when the message was stored, to the whole second.
+Opening an existing database re-derives the creation time of its stored
+messages.
+
+---
+
 ## Message embed validation
 
 The ordinary channel message create/edit routes, webhook execution/followups,
@@ -2407,7 +2440,8 @@ curl http://localhost:3000/_test/messages/333333333333333333
       "id": "1513052391153471489",
       "content": "Hello, Fauxcord!",
       "author_token": "Bot mytoken",
-      "created_at": "2026-06-07 10:00:00"
+      "created_at": "2026-06-07 05:30:01.205",
+      "timestamp": "2026-06-07T05:30:01.205000+00:00"
     }
   ]
 }
@@ -2416,6 +2450,9 @@ curl http://localhost:3000/_test/messages/333333333333333333
 If `author_token` is `"webhook"`, the message was posted via a Webhook.
 If `author_token` is an empty string, the message was injected via
 `POST /_test/channels/:channelId/messages` (see below) as a non-bot user.
+`timestamp` is the same value that Discord API reads return, and `created_at`
+is that instant as a zone-less UTC datetime (see
+[Message timestamps](#message-timestamps)).
 Every inspected message includes `components` (an empty array when absent).
 Messages with stickers also include `sticker_items`, with the same catalog-derived
 `id`, `name`, and `format_type` as ordinary message reads. The field is omitted
@@ -3027,14 +3064,14 @@ Returns the created message object (same shape as
 
 **Fields**
 
-| Field                 | Required | Description                                                                                                                       |
-| --------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `content`             | —        | Message content, up to 2,000 characters. Optional when valid stickers or attachments are supplied.                                |
-| `attachments`         | —        | Up to 10 byte-preserving base64 file fixtures; see below.                                                                         |
-| `sticker_ids`         | —        | Up to three distinct existing sticker IDs as snowflake strings. Omitted, `null`, or `[]` means no stickers.                       |
-| `author.id`           | ✅       | ID of a user already registered via `POST /_test/users` (or any other existing user). Returns `404` if unregistered.              |
-| `id`                  | —        | Explicit numeric Message ID (1–20 digits), otherwise generated. An existing Message ID returns `409` without mutations or events. |
-| `remove_after_create` | —        | Boolean, default `false`. Atomically remove after capturing its create snapshot; queue create then delete after commit.           |
+| Field                 | Required | Description                                                                                                                                                                                                                                    |
+| --------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `content`             | —        | Message content, up to 2,000 characters. Optional when valid stickers or attachments are supplied.                                                                                                                                             |
+| `attachments`         | —        | Up to 10 byte-preserving base64 file fixtures; see below.                                                                                                                                                                                      |
+| `sticker_ids`         | —        | Up to three distinct existing sticker IDs as snowflake strings. Omitted, `null`, or `[]` means no stickers.                                                                                                                                    |
+| `author.id`           | ✅       | ID of a user already registered via `POST /_test/users` (or any other existing user). Returns `404` if unregistered.                                                                                                                           |
+| `id`                  | —        | Explicit numeric Message ID (1–20 digits), otherwise generated. `timestamp` is derived from this Snowflake, so an old ID creates a [backdated message](#message-timestamps). An existing Message ID returns `409` without mutations or events. |
+| `remove_after_create` | —        | Boolean, default `false`. Atomically remove after capturing its create snapshot; queue create then delete after commit.                                                                                                                        |
 
 In a DM or group-DM channel the `author` must be a recipient; otherwise the
 request returns `403` with `{"message":"Missing Access","code":50001}` and

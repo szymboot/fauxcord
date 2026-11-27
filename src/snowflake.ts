@@ -7,6 +7,8 @@
 
 /** Discord Epoch: 2015-01-01T00:00:00.000Z */
 const DISCORD_EPOCH = 1_420_070_400_000n
+/** Largest unsigned 64-bit integer, the upper bound of a Snowflake */
+const MAX_SNOWFLAKE = 18_446_744_073_709_551_615n
 const WORKER_ID = 1n
 const PROCESS_ID = 1n
 
@@ -56,4 +58,16 @@ export function snowflakeToTimestamp(snowflake: string): Date {
   const id = BigInt(snowflake)
   const timestamp = (id >> 22n) + DISCORD_EPOCH
   return new Date(Number(timestamp))
+}
+
+/**
+ * Restores the timestamp of an ID only when it is a valid Snowflake: an
+ * unsigned 64-bit integer written in decimal.
+ * @param id - Candidate ID
+ * @returns Date object of the timestamp, or null for any other ID
+ */
+export function parseSnowflakeTimestamp(id: string): Date | null {
+  return /^\d{1,20}$/.test(id) && BigInt(id) <= MAX_SNOWFLAKE
+    ? snowflakeToTimestamp(id)
+    : null
 }
