@@ -6748,8 +6748,9 @@ quoted strings or raw JSON integers (preserved without floating-point rounding).
 Malformed bodies/IDs and duplicates return `400` / `50035`; invalid counts return
 `400` / `50016`; any ID older than two weeks returns `400` / `50034`, even when
 missing or belonging to another channel. Unknown channels return `404` / `10003`,
-DM channels return `400` / `50024`, and normal bot authentication is required.
-Invalid requests change no data and queue no deletion events.
+DM channels return `400` / `50024`, and REST authentication is required (`401`
+without it). The permission checks below apply to `Bot` callers. Invalid
+requests change no data and queue no deletion events.
 
 Missing IDs count toward the limit and are ignored during deletion. IDs in other
 channels and ephemeral interaction responses are also ignored; they are never
@@ -6758,8 +6759,56 @@ attachment metadata, reactions, pins, polls, answers, and votes commit together
 before dispatch. Attachment files on disk retain the same lifecycle as ordinary
 single-message deletion.
 
-Emulator limitations: Fauxcord does not enforce `MANAGE_MESSAGES` permissions.
-Its guild model has one owning bot; bulk dispatch goes only to that bot's
+A bot caller in a guild channel must be able to see the channel and manage its
+messages. Permissions come from the same persisted resolution as
+[single-message access](#single-message-access-get-patch-and-delete)
+(`@everyone` and role permissions, then everyone, role and member overwrites;
+the guild owner and guild-level `ADMINISTRATOR` bypass), and threads (`10`,
+`11`, `12`) are resolved against the parent channel's overwrites:
+
+| Condition (bot caller, guild channel)            | Response                            |
+| ------------------------------------------------ | ----------------------------------- |
+| Not a member of the channel's guild              | `403` / `50001` Missing Access      |
+| No `VIEW_CHANNEL` (`1024`)                       | `403` / `50001` Missing Access      |
+| `VIEW_CHANNEL` but no `MANAGE_MESSAGES` (`8192`) | `403` / `50013` Missing Permissions |
+
+`MANAGE_MESSAGES` is required even when every target is the bot's own message.
+An unknown channel answers `404` / `10003` first, and a DM channel keeps
+`400` / `50024`. The access check then runs before body validation, writes and
+Gateway dispatch, and again after the body has been read, so a refused request
+changes no data and queues no `MESSAGE_DELETE_BULK`. Non-Bot callers
+(Bearer/OAuth credentials) are not checked. Under `DISABLE_AUTH=true` an
+unregistered `Bot` token, or an unrecognized authorization scheme, acts as the
+placeholder `MockBot` user (`000000000000000000`). It goes through the same
+checks as any bot, including the owner bypass, so it is refused unless a fixture
+makes that ID the guild owner or a member with the required permissions. An
+unregistered `Bearer` token stays unchecked like any other Bearer credential.
+
+The default setup bot owns its guild and therefore passes. To test a denial,
+pass a registered human's ID as `guilds[].owner_id` to `POST /_test/setup`, as
+described in
+[Exercise actual message-send permissions](#exercise-actual-message-send-permissions).
+The `@everyone` role created there does not include `MANAGE_MESSAGES`, so that
+bot receives `50013` until a role or a channel overwrite grants it. For example,
+grant it to the bot's user ID in one channel:
+
+```bash
+curl -X PUT http://localhost:3000/api/v10/channels/333333333333333333/permissions/111111111111111111 \
+  -H 'Authorization: Bot testtoken' \
+  -H 'Content-Type: application/json' \
+  -d '{"type":1,"allow":"8192","deny":"0"}'
+```
+
+Emulator limitations: this check does not consider member timeouts, `CONNECT` on
+voice channels, thread archive or lock state, or private-thread (`12`) access.
+Discord also requires a private thread's invitation or
+[`MANAGE_THREADS`](https://docs.discord.com/developers/topics/threads#permissions),
+while Fauxcord resolves only the parent channel's permissions. Deleting a parent
+channel through REST leaves its threads in Fauxcord; such a thread resolves with
+the guild-level role permissions plus any overwrites stored on the thread itself,
+here, on the single-message routes and on the history list.
+
+Fauxcord's guild model has one owning bot; bulk dispatch goes only to that bot's
 sessions in this database with the Guild Messages intent. For partial requests,
 `ids` contains only messages actually removed, in request order (possibly one
 ID); all-missing requests return `204` without an event. Discord documents
@@ -6869,9 +6918,11 @@ restore its inherited permissions, or delete/recreate the setup to clear its
 guild fixtures. There is no queued permission state to cancel. Send enforcement
 does not yet cover feature-specific send permissions such as TTS, attachments,
 replies, stickers or polls; single-message access is described in
-[Single-message access](#single-message-access-get-patch-and-delete) and history
-reads in [Message history access](#message-history-access-list). It supplies
-Fauxcord prerequisites for bot integration tests;
+[Single-message access](#single-message-access-get-patch-and-delete), history
+reads in [Message history access](#message-history-access-list) and bulk delete
+in
+[Bulk-delete injected messages](#bulk-delete-injected-messages-through-discord-rest).
+It supplies Fauxcord prerequisites for bot integration tests;
 the bot harness and end-to-end handler coverage remain downstream work.
 
 ### Single-message access (GET, PATCH and DELETE)
@@ -6894,7 +6945,8 @@ An unknown channel answers `404` / `10003` first. The access check then runs bef
 answers `50005` afterwards), body validation, writes and Gateway dispatch, so a
 refused request stores and dispatches nothing. DM channels
 and non-Bot callers (Bearer/OAuth credentials) keep their previous behavior,
-and `DELETE` still does not model `MANAGE_MESSAGES` for other users' messages.
+and `DELETE` still does not model `MANAGE_MESSAGES` for other users' messages
+(unlike [bulk delete](#bulk-delete-injected-messages-through-discord-rest)).
 The list route is covered in
 [Message history access](#message-history-access-list). A denial from
 a missing `READ_MESSAGE_HISTORY` uses `50013` because Discord documents the
