@@ -2282,8 +2282,12 @@ Explicit IDs are not checked against the clock, so a future-dated ID produces a
 future `timestamp`. A value that is not a valid Snowflake carries no time: its
 `timestamp` is when the message was stored, to the whole second. The injection
 endpoint also accepts such values, namely numbers with a leading zero (such as
-`01`) and 20-digit numbers above `18446744073709551615`. Opening an existing
-database re-derives the creation time of its stored messages.
+`01`) and 20-digit numbers above `18446744073709551615`.
+
+Opening an existing database re-derives the creation time of its stored
+messages. A message snapshot that a
+[button click](#button-clicks-message_component) captured before then keeps the
+values the click saw.
 
 ---
 

@@ -14,8 +14,7 @@ import {
 import { parseModal, type ModalObject } from '../validators/modal'
 
 import type { Database } from '../db'
-import { generateSnowflake, parseSnowflakeTimestamp } from '../snowflake'
-import { toDiscordTimestamp } from '../timestamp'
+import { generateSnowflake } from '../snowflake'
 import { gatewayBus } from '../gateway/bus'
 import { getGuildMember } from './guild-members'
 import { getUser } from './users'
@@ -81,44 +80,6 @@ interface InteractionRow {
 }
 
 /**
- * Recovers the edit time of a snapshot stored by an older version, which read
- * the stored UTC datetime as the host's local time. Assumes that the host's
- * timezone has not changed since.
- * @param value - Edit timestamp captured by the older version
- * @param createdAt - Creation time derived from the message ID
- * @returns Discord timestamp of the edit, never before the creation time
- */
-function recoverLegacyEditTime(value: string, createdAt: Date): string {
-  const read = new Date(value)
-  const stored = read.getTime() - read.getTimezoneOffset() * 60_000
-  // A whole-second edit time of the creation second would precede creation.
-  return toDiscordTimestamp(new Date(Math.max(stored, createdAt.getTime())))
-}
-
-/**
- * Reads a stored message snapshot, deriving its creation time from its ID so
- * that a snapshot stored by an older version agrees with the message.
- * @param json - Serialized message snapshot
- * @returns Message snapshot
- */
-function readMessageSnapshot(json: string): Record<string, unknown> {
-  const message = JSON.parse(json) as Record<string, unknown>
-  const createdAt =
-    typeof message.id === 'string' ? parseSnowflakeTimestamp(message.id) : null
-  if (!createdAt) return message
-  const timestamp = toDiscordTimestamp(createdAt)
-  if (message.timestamp === timestamp) return message
-  const edited = message.edited_timestamp
-  return {
-    ...message,
-    timestamp,
-    ...(typeof edited === 'string' && {
-      edited_timestamp: recoverLegacyEditTime(edited, createdAt),
-    }),
-  }
-}
-
-/**
  * Converts a DB interaction record into the API response / Gateway payload
  * format. Re-fetches the command's name/type from `application_commands`
  * (when `command_id` is set) so `data` always reflects the current command
@@ -180,7 +141,7 @@ function toInteractionObject(
     ...(user && { user: user as unknown as Record<string, unknown> }),
     app_permissions: permissions.appPermissions,
     ...(row.message_json && {
-      message: readMessageSnapshot(row.message_json),
+      message: JSON.parse(row.message_json) as Record<string, unknown>,
     }),
   }
 

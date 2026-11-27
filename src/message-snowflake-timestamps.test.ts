@@ -587,51 +587,6 @@ describe('stored message creation times', () => {
     }
   })
 
-  it.each(['UTC', 'Europe/Warsaw', 'Pacific/Kiritimati'])(
-    'serves message snapshots stored by an older version on a %s host',
-    (timezone) => {
-      const id = snowflakeAt(NOW.getTime())
-      const futureId = snowflakeAt(NOW.getTime() + DAY_MS)
-      // A separate process owns TZ; parallel tests keep their own timezone.
-      const script = `
-        import { createInteraction } from './src/services/interactions.ts'
-        import { createFullTestApp, seedBot } from './src/test-helpers.ts'
-        import { toDiscordTimestamp } from './src/timestamp.ts'
-        const context = createFullTestApp()
-        try {
-          seedBot(context.db)
-          /** Serializes a stored datetime as older versions did: host-local. */
-          const legacy = (stored) => toDiscordTimestamp(new Date(stored))
-          const snapshots = [null, '2026-06-15 12:30:45', '2026-06-15 12:40:45'].map((edited) => ({
-            id: '${id}',
-            timestamp: legacy('2026-06-15 12:30:45'),
-            edited_timestamp: edited && legacy(edited),
-          }))
-          // A current snapshot of a future-dated ID keeps its real edit time.
-          snapshots.push({ id: '${futureId}', timestamp: '${timestampOf(futureId)}', edited_timestamp: '${timestampOf(id)}' })
-          console.log(JSON.stringify(snapshots.map((message, index) => createInteraction(context.db, {
-            interactionId: String(index + 1), applicationId: '111111111111111111', token: 'snapshot-' + index, type: 3, userId: '111111111111111111', message,
-          }).message)))
-        } finally {
-          context.cleanup()
-        }
-      `
-
-      const timestamp = '2026-06-15T12:30:45.678000+00:00'
-      expect(runInTimezone(timezone, script)).toEqual([
-        { id, timestamp, edited_timestamp: null },
-        // An edit within the creation second must not precede it.
-        { id, timestamp, edited_timestamp: timestamp },
-        { id, timestamp, edited_timestamp: '2026-06-15T12:40:45.000000+00:00' },
-        {
-          id: futureId,
-          timestamp: '2026-06-16T12:30:45.678000+00:00',
-          edited_timestamp: timestamp,
-        },
-      ])
-    }
-  )
-
   it('are read as UTC on non-UTC hosts', () => {
     // A separate process owns TZ; parallel tests keep their own timezone.
     const script = `
