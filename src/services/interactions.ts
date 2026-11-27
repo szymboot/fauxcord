@@ -92,15 +92,15 @@ function readMessageSnapshot(json: string): Record<string, unknown> {
     typeof message.id === 'string' ? parseSnowflakeTimestamp(message.id) : null
   if (!createdAt) return message
   const timestamp = toDiscordTimestamp(createdAt)
+  if (message.timestamp === timestamp) return message
+  // An older snapshot: its coarser, host-local edit time must not precede
+  // the creation time. Both strings share one format, so they compare in order.
   const edited = message.edited_timestamp
-  // A whole-second edit time of the creation second would precede it.
-  const editedEarlier =
-    typeof edited === 'string' &&
-    edited === `${timestamp.slice(0, 19)}.000000+00:00`
   return {
     ...message,
     timestamp,
-    ...(editedEarlier && { edited_timestamp: timestamp }),
+    ...(typeof edited === 'string' &&
+      edited < timestamp && { edited_timestamp: timestamp }),
   }
 }
 

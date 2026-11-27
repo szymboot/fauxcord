@@ -286,23 +286,45 @@ describe('message timestamps derived from Snowflake IDs', () => {
 
   it.each([
     {
-      name: 'creation time',
+      name: 'without an edit',
+      stored: '2026-06-15T12:30:45.000000+00:00',
       edited: null,
       expected: null,
     },
     {
-      name: 'creation-second edit',
+      name: 'edited within the creation second',
+      stored: '2026-06-15T12:30:45.000000+00:00',
       edited: '2026-06-15T12:30:45.000000+00:00',
       expected: '2026-06-15T12:30:45.678000+00:00',
     },
     {
-      name: 'later edit',
+      name: 'edited later',
+      stored: '2026-06-15T12:30:45.000000+00:00',
       edited: '2026-06-15T12:30:46.000000+00:00',
       expected: '2026-06-15T12:30:46.000000+00:00',
     },
+    {
+      name: 'edited within the creation second on a UTC+2 host',
+      stored: '2026-06-15T10:30:45.000000+00:00',
+      edited: '2026-06-15T10:30:45.000000+00:00',
+      expected: '2026-06-15T12:30:45.678000+00:00',
+    },
+    {
+      name: 'edited minutes later on a UTC+2 host',
+      stored: '2026-06-15T10:30:45.000000+00:00',
+      edited: '2026-06-15T10:40:45.000000+00:00',
+      expected: '2026-06-15T12:30:45.678000+00:00',
+    },
+    {
+      // A current snapshot of a future-dated ID keeps its real edit time.
+      name: 'that already agrees with its ID',
+      stored: '2026-06-15T12:30:45.678000+00:00',
+      edited: '2026-06-01T00:00:00.000000+00:00',
+      expected: '2026-06-01T00:00:00.000000+00:00',
+    },
   ])(
-    'derives the $name of a stored component message snapshot',
-    ({ edited, expected }) => {
+    'derives the creation time of a stored message snapshot $name',
+    ({ stored, edited, expected }) => {
       const id = snowflakeAt(NOW.getTime())
       const interaction = createInteraction(context.db, {
         interactionId: generateSnowflake(),
@@ -312,12 +334,8 @@ describe('message timestamps derived from Snowflake IDs', () => {
         guildId,
         channelId,
         userId: humanId,
-        // As stored by an older version: whole seconds from its own clock.
-        message: {
-          id,
-          timestamp: '2026-06-15T12:30:45.000000+00:00',
-          edited_timestamp: edited,
-        },
+        // Older versions stored whole seconds, read as the host's local time.
+        message: { id, timestamp: stored, edited_timestamp: edited },
       })
 
       expect(interaction.message).toEqual({
@@ -572,6 +590,41 @@ describe('stored message creation times', () => {
         ])
         closeDatabase(db)
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps an edit committed while the database is being re-derived', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fauxcord-db-'))
+    const dbPath = path.join(dir, 'concurrent.db')
+    try {
+      let db = initializeDatabase(dbPath)
+      const channelId = seedChannel(db, seedGuild(db, seedBot(db)))
+      const first = snowflakeAt(Date.parse('2026-01-02T03:04:05.006Z'))
+      const second = snowflakeAt(Date.parse('2026-01-02T03:04:06.007Z'))
+      const insert = db.prepare(
+        "INSERT INTO messages (id, channel_id, author_id, created_at) VALUES (?, ?, '1', '2026-06-07 10:00:00')"
+      )
+      insert.run(first, channelId)
+      insert.run(second, channelId)
+      // Edits the second row after the rows were read, before its own update.
+      db.exec(`
+        CREATE TRIGGER concurrent_edit AFTER UPDATE OF created_at ON messages
+        WHEN new.id = '${first}'
+        BEGIN
+          UPDATE messages SET edited_at = '2026-06-08 09:00:00'
+          WHERE id = '${second}';
+        END
+      `)
+      closeDatabase(db)
+
+      db = initializeDatabase(dbPath)
+
+      expect(
+        db.prepare('SELECT edited_at FROM messages WHERE id = ?').get(second)
+      ).toEqual({ edited_at: '2026-06-08 09:00:00' })
+      closeDatabase(db)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
