@@ -5,6 +5,7 @@
  */
 
 import { getRestFaultRuntime } from './rest-faults'
+import { getRestPageHolds } from './rest-page-holds'
 import { disconnectGuildVoiceChannelMembers } from './voice-states'
 import { publishGuildVoiceStateMutation } from './voice-state-events'
 import { runInTransaction, type Database } from '../db'
@@ -630,6 +631,7 @@ export function deleteChannel(
   if (!deleted) return null
   const { channel: result, children, childScope, disconnects } = deleted
   getRestFaultRuntime(db).prune()
+  getRestPageHolds(db).pruneScopes()
 
   for (const mutation of disconnects)
     publishGuildVoiceStateMutation(db, mutation)

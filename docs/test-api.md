@@ -2330,6 +2330,14 @@ delivered (`204`). A request is recorded when its response is produced, so a
 delayed or held request appears once it finishes. Fauxcord does not count a
 request it rejects for authentication (`401`), since it cannot attribute it.
 
+A request paused by a [page hold](#rest-pagination-page-holds) is counted once,
+not while it is held: after release or timeout its entry carries the final status
+(for example `200`, a fault's status, or `404` if its channel was deleted), and
+`at` is that completion time. The observation is selected when the request
+arrives, so one created while the request is already held does not count it. If
+the client disconnects during the hold, the entry records `204`, which was never
+delivered. Use the hold's own `arrived` / `arrived_at` for arrival evidence.
+
 Returns `201` with `id`, `method`, `path`, `guild_id` (the resolved guild),
 `message_id` (only when supplied), `count: 0`, `requests: []` and
 `expires_at`. After `timeout_ms` the observation
@@ -7162,8 +7170,9 @@ model that.
 for a history page run before this check: each attempt that an active control
 matches receives the configured failure, even if the bot would be refused. A
 request that no active control matches uses the bot's current permissions.
-[Page holds](#rest-pagination-page-holds) select only member and ban pages, so
-none applies to this route.
+[Page holds](#rest-pagination-page-holds) for a history page run before both:
+the permission check applies when the released request runs, using the bot's
+permissions at that time, not when the request is held.
 
 ## Member role permissions
 
@@ -7537,10 +7546,11 @@ re-adds it. `DELETE /_test/setup/:token` removes the guild and everything in it.
 ## REST pagination page holds
 
 Use these controls to pause the **next matching authenticated GET** for a
-member or ban page while a harness inspects the importer's previously persisted
-page and stops its bot. These controls are separate from `LATENCY_MS`, Gateway
-replay, and REST faults. They never change member/ban fixtures or the importer's
-checkpoints.
+member, ban or message history page: for example, while a harness inspects an
+importer's previously persisted page and stops its bot, or to keep one command's
+history read waiting while another command is still deleting. These controls are
+separate from `LATENCY_MS`, Gateway replay, and REST faults. They never change
+member, ban or message fixtures or a bot's checkpoints.
 
 ### `POST /_test/rest-page-holds`
 
@@ -7554,24 +7564,53 @@ curl -X POST http://localhost:3000/_test/rest-page-holds \
   }'
 ```
 
-| Field        | Required | Meaning                                                                                                                                              |
-| ------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `path`       | yes      | Bare `/guilds/{id}/members` or `/guilds/{id}/bans`, without query parameters. Guild must exist; its owning bot is captured at creation.              |
-| `after`      | yes      | Exact decimal string cursor, or `null` to require absence of `after`. `null` and `"0"` are distinct.                                                 |
-| `before`     | no       | Ban page's exact decimal string cursor; default `null` requires absence. A non-null `before` requires `after: null`; members cannot select `before`. |
-| `timeout_ms` | yes      | Integer from 1 to 60000. Deadline starts at **arming**, so an unused hold also expires.                                                              |
+| Page            | `path`                           | `after`                    | `before`                                               | `around`                  |
+| --------------- | -------------------------------- | -------------------------- | ------------------------------------------------------ | ------------------------- |
+| Guild members   | `/guilds/{id}/members`           | required: cursor or `null` | must be omitted or `null`                              | must be omitted or `null` |
+| Guild bans      | `/guilds/{id}/bans`              | required: cursor or `null` | optional, default `null`; non-null needs `after: null` | must be omitted or `null` |
+| Message history | `/channels/{channelId}/messages` | optional, default `null`   | optional, default `null`                               | optional, default `null`  |
+
+| Field                       | Meaning                                                                                                           |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `path`                      | Required. One bare path from the table, without query parameters. The guild or channel must exist.                |
+| `after`, `before`, `around` | Exact decimal string cursor, or `null` to require absence of that query parameter. `null` and `"0"` are distinct. |
+| `timeout_ms`                | Required. Integer from 1 to 60000. Deadline starts at **arming**, so an unused hold also expires.                 |
+
+`around` is a cursor of message history only. On member and ban pages it must be
+omitted or `null` in the control, and an `around` query parameter is ignored: it
+does not prevent a match.
 
 The selector matches GETs through bare, `/api`, and `/api/v10` paths. It requires
-the guild's owning Bot token and exact decoded cursor values; duplicate cursor
-parameters do not match. `limit` and other query parameters do not select a
-hold. Different bots, guilds, routes, and earlier/different cursors proceed
-normally, as do test-control and health endpoints. The first matching request
-claims the hold atomically. Further matching requests proceed normally, even
-while the first is held: this is a one-shot control, not a gate on retries.
+the guild's owning Bot token, captured at creation, and exact decoded cursor
+values; duplicate cursor parameters do not match. `limit` and other query
+parameters do not select a hold. Different bots, guilds, channels, routes, and
+earlier/different cursors proceed normally, as do test-control and health
+endpoints. The first matching request claims the hold atomically. Further
+matching requests proceed normally, even while the first is held: this is a
+one-shot control, not a gate on retries.
+
+Message history rules:
+
+- `path` must name an existing **guild** channel with a message history: text
+  (type `0`), voice (`2`), announcement (`5`), thread (`10`, `11`, `12`) or stage
+  (`13`). The hold binds to the bot owning that channel's guild, reported as
+  `guild_id`. An unknown channel returns `404`; a DM, group DM, category,
+  directory, forum or media channel returns `400`.
+- A cursor must be a Snowflake: an unsigned 64-bit decimal without leading
+  zeros.
+- At most one of `before`, `after` and `around` may be non-null, as in Discord's
+  history list. A held cursor requires the other two parameters to be absent, so
+  a request sending two cursors matches no hold. With all three `null`, only a
+  request without any cursor matches.
+- Only the list is selected: single-message reads, other message methods and
+  other channels are never held.
+- The route's [permission checks](#message-history-access-list) (`50001` without
+  View Channel, an empty array without Read Message History) run when the
+  released request runs, so a request that would be refused is held too.
 
 Returns `201` with the configuration and status below; invalid selectors return
-`400`, an unknown guild returns `404`, and an already armed/holding identical
-selector returns `409`. The API does not expose bot credentials.
+`400`, an unknown guild or channel returns `404`, and an already armed/holding
+identical selector returns `409`. The API does not expose bot credentials.
 
 ### `GET /_test/rest-page-holds/{id}`
 
@@ -7584,6 +7623,7 @@ Returns current status with `Cache-Control: no-store`, or `404` after removal:
   "path": "/guilds/222222222222222222/members",
   "after": "100000000000000001",
   "before": null,
+  "around": null,
   "timeout_ms": 30000,
   "state": "holding",
   "arrived": 1,
@@ -7596,9 +7636,9 @@ Returns current status with `Cache-Control: no-store`, or `404` after removal:
 `state` is `armed`, `holding`, `released`, `timed_out`, or `disconnected`.
 `arrived` is 0 or 1 and `arrived_at` records the first matching request reaching
 the hold middleware. This proves **request arrival only**. It does not prove
-that the importer persisted an earlier page or committed its checkpoint.
-`finished_at` is populated when the control disarms. Terminal status is retained
-until explicit deletion, reset, scope deletion, or server shutdown.
+that the bot persisted an earlier page, committed a checkpoint or finished other
+work. `finished_at` is populated when the control disarms. Terminal status is
+retained until explicit deletion, reset, scope deletion, or server shutdown.
 
 ### Release and removal
 
@@ -7611,17 +7651,26 @@ until explicit deletion, reset, scope deletion, or server shutdown.
 After release/removal or timeout, the original request proceeds through normal
 REST-fault middleware and native route handling. With no matching fault, the
 native handler produces its normal status, body, and headers. It reads current
-fixture data at that time; the hold does not snapshot a page.
+fixture data and permissions at that time; the hold does not snapshot a page.
 Page holds run before REST-fault matching. If the released request also matches
 an armed page-specific REST fault, it receives that fault and consumes its
 attempt then; holding or disconnecting the request alone consumes no fault.
 Fault query normalization and exhaustion behavior remain unchanged.
+A [REST observation](#post-_testrest-observations--count-exact-rest-requests-without-failing-them)
+of the same GET counts a held request once, with its final status, when it
+completes.
 A client disconnect ends the wait and disarms the control as `disconnected`;
-reconnecting or restarting that bot cannot reuse a claimed hold. Token-scoped
-`POST /_test/reset`, bot setup deletion, and guild deletion remove the affected
-controls and unblock requests. A global reset removes all controls. Shutdown
-unblocks requests before draining the HTTP server. Controls live only in memory
-and cannot survive a Fauxcord restart.
+reconnecting or restarting that bot cannot reuse a claimed hold. A request
+released after its setup was removed from the guild and another setup took the
+guild over gets `403` `50001` (`Missing Access`), like a new request.
+Token-scoped `POST /_test/reset`, bot setup deletion, guild deletion, and a
+`/_test/setup` that hands the guild to another setup remove the affected
+controls and unblock requests. Deleting a channel, or moving it into another
+guild through `/_test/setup`, does the same for that channel's message history
+holds; the released request then meets the channel's new state (`404` Unknown
+Channel after deletion). A global reset removes all controls. Shutdown unblocks
+requests before draining the HTTP server. Controls live only in memory and
+cannot survive a Fauxcord restart.
 
 For an import harness such as DSC-837:
 
@@ -7636,6 +7685,70 @@ For an import harness such as DSC-837:
 5. Always delete the control in harness cleanup **before restarting the bot**,
    including if it never reached the selected page. Use a fresh control ID for
    another run. If continuing without stopping, explicitly release instead.
+
+### Example: pause a message history read
+
+To see whether a second `/clear` command reads a channel's history while the
+first one is still deleting, count the first command's deletions and arm the
+hold **after** that command has done its own reads (the hold claims the next
+matching read, whichever command sends it):
+
+```bash
+# 1. Before the first command, observe its bulk deletions.
+DELETES=$(curl -s -X POST http://localhost:3000/_test/rest-observations \
+  -H 'Content-Type: application/json' \
+  -d '{"method":"POST","path":"/channels/333333333333333333/messages/bulk-delete"}' \
+  | jq -r .id)
+
+# 2. Trigger the first command. Once it has read the history, hold the next
+#    read without a cursor (for ?before=ID, send "before").
+HOLD=$(curl -s -X POST http://localhost:3000/_test/rest-page-holds \
+  -H 'Content-Type: application/json' \
+  -d '{"path":"/channels/333333333333333333/messages","timeout_ms":30000}' \
+  | jq -r .id)
+
+# 3. Trigger the second command, then poll. "holding" with "arrived": 1 means
+#    its read arrived (see "arrived_at"); "armed" with "arrived": 0 means not yet.
+curl http://localhost:3000/_test/rest-page-holds/$HOLD
+
+# 4. Once the first command has finished, read its deletions and then the hold
+#    again, in this order.
+curl http://localhost:3000/_test/rest-observations/$DELETES
+curl http://localhost:3000/_test/rest-page-holds/$HOLD
+
+# 5. Let the second read run; it returns the messages that exist now.
+curl -X POST http://localhost:3000/_test/rest-page-holds/$HOLD/release
+
+# 6. Cleanup.
+curl -X DELETE http://localhost:3000/_test/rest-page-holds/$HOLD
+curl -X DELETE http://localhost:3000/_test/rest-observations/$DELETES
+```
+
+`holding` alone does not show an overlap: the first command may have finished
+deleting before the second read arrived. Conclude that the second read arrived
+**before the first command finished deleting** only if all of these are true:
+
+1. The hold read **after** the observation is still `holding`. A finished hold,
+   for example `timed_out`, already let the second command continue, so its
+   deletions may be among the observed requests: treat the run as inconclusive.
+   While its read is held, a command that deletes only after reading cannot
+   delete anything.
+2. You know which entry is the first command's **final successful** deletion
+   without relying on timing, for example because your fixture needs a known
+   number of requests (150 recent messages: two entries with status `204`).
+3. The hold's `arrived_at` is **earlier** than that entry's `at`, which is when
+   that deletion completed. Equal milliseconds are inconclusive.
+
+These checks do not show that deleting had already begun: the first command may
+have paused after its read and sent every deletion after the second read
+arrived. To conclude that the read arrived **while** the first command was
+deleting, also require one of its earlier deletion entries to have an `at`
+earlier than `arrived_at`. This needs a fixture whose deletion takes at least two
+requests.
+
+A command that removes a single message uses
+`DELETE /channels/{channelId}/messages/{messageId}`, which needs its own
+observation.
 
 When embedding `buildApp`, call its `shutdownRestPageHolds()` before closing the
 HTTP server, then close the database after HTTP requests drain. The production
@@ -7656,8 +7769,9 @@ It differs from the other controls:
 
 - REST faults in `mode: "delay"` always end with an error, never the native
   response.
-- [Page holds](#rest-pagination-page-holds) select member/ban **list** pages and
-  read current fixture data after release; they do not snapshot.
+- [Page holds](#rest-pagination-page-holds) select member, ban and message
+  history **list** pages and read current fixture data after release; they do not
+  snapshot.
 
 ### `POST /_test/rest-member-read-holds`
 

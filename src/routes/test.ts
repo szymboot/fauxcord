@@ -260,6 +260,8 @@ export function createTestRoutes(
     const result = pageHolds.create(payload)
     if (result === 'UNKNOWN_SCOPE')
       return c.json({ message: '404: Not Found', code: 0 }, 404)
+    if (result === 'UNSUPPORTED_SCOPE')
+      return c.json({ message: '400: Bad Request', code: 0 }, 400)
     return result === 'CONFLICT'
       ? c.json({ message: '409: Conflict', code: 0 }, 409)
       : c.json(result, 201)
