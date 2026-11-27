@@ -14,9 +14,8 @@ import {
   isTooOldForBulkDelete,
   type MessageObject,
 } from './services/messages'
-import { createInteraction } from './services/interactions'
 import { createTestUser } from './services/test-control'
-import { generateSnowflake, snowflakeToTimestamp } from './snowflake'
+import { snowflakeToTimestamp } from './snowflake'
 import {
   createFullTestApp,
   createTestGatewayServer,
@@ -54,6 +53,26 @@ function snowflakeAt(ms: number, sequence = 0): string {
  */
 function timestampOf(id: string): string {
   return toDiscordTimestamp(snowflakeToTimestamp(id))
+}
+
+/**
+ * Runs an ES module script from the repository root in its own process.
+ * @param timezone - IANA timezone of that process
+ * @param script - Module source that prints one JSON value
+ * @returns Parsed output
+ */
+function runInTimezone(timezone: string, script: string): unknown {
+  const output = execFileSync(
+    process.execPath,
+    ['--import', 'tsx', '--input-type=module', '--eval', script],
+    {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      env: { ...process.env, TZ: timezone },
+      encoding: 'utf8',
+      timeout: 10_000,
+    }
+  )
+  return JSON.parse(output) as unknown
 }
 
 describe('message timestamps derived from Snowflake IDs', () => {
@@ -283,68 +302,6 @@ describe('message timestamps derived from Snowflake IDs', () => {
       expect(edited.timestamp).toBe(message.timestamp)
     }
   })
-
-  it.each([
-    {
-      name: 'without an edit',
-      stored: '2026-06-15T12:30:45.000000+00:00',
-      edited: null,
-      expected: null,
-    },
-    {
-      name: 'edited within the creation second',
-      stored: '2026-06-15T12:30:45.000000+00:00',
-      edited: '2026-06-15T12:30:45.000000+00:00',
-      expected: '2026-06-15T12:30:45.678000+00:00',
-    },
-    {
-      name: 'edited later',
-      stored: '2026-06-15T12:30:45.000000+00:00',
-      edited: '2026-06-15T12:30:46.000000+00:00',
-      expected: '2026-06-15T12:30:46.000000+00:00',
-    },
-    {
-      name: 'edited within the creation second on a UTC+2 host',
-      stored: '2026-06-15T10:30:45.000000+00:00',
-      edited: '2026-06-15T10:30:45.000000+00:00',
-      expected: '2026-06-15T12:30:45.678000+00:00',
-    },
-    {
-      name: 'edited minutes later on a UTC+2 host',
-      stored: '2026-06-15T10:30:45.000000+00:00',
-      edited: '2026-06-15T10:40:45.000000+00:00',
-      expected: '2026-06-15T12:30:45.678000+00:00',
-    },
-    {
-      // A current snapshot of a future-dated ID keeps its real edit time.
-      name: 'that already agrees with its ID',
-      stored: '2026-06-15T12:30:45.678000+00:00',
-      edited: '2026-06-01T00:00:00.000000+00:00',
-      expected: '2026-06-01T00:00:00.000000+00:00',
-    },
-  ])(
-    'derives the creation time of a stored message snapshot $name',
-    ({ stored, edited, expected }) => {
-      const id = snowflakeAt(NOW.getTime())
-      const interaction = createInteraction(context.db, {
-        interactionId: generateSnowflake(),
-        applicationId: APPLICATION_ID,
-        token: 'snapshot-token',
-        type: 3,
-        guildId,
-        channelId,
-        userId: humanId,
-        // Older versions stored whole seconds, read as the host's local time.
-        message: { id, timestamp: stored, edited_timestamp: edited },
-      })
-
-      expect(interaction.message).toEqual({
-        id,
-        timestamp: '2026-06-15T12:30:45.678000+00:00',
-        edited_timestamp: expected,
-      })
-    }
-  )
 
   it.each([
     { name: 'just inside', offset: 1, tooOld: false },
@@ -630,6 +587,51 @@ describe('stored message creation times', () => {
     }
   })
 
+  it.each(['UTC', 'Europe/Warsaw', 'Pacific/Kiritimati'])(
+    'serves message snapshots stored by an older version on a %s host',
+    (timezone) => {
+      const id = snowflakeAt(NOW.getTime())
+      const futureId = snowflakeAt(NOW.getTime() + DAY_MS)
+      // A separate process owns TZ; parallel tests keep their own timezone.
+      const script = `
+        import { createInteraction } from './src/services/interactions.ts'
+        import { createFullTestApp, seedBot } from './src/test-helpers.ts'
+        import { toDiscordTimestamp } from './src/timestamp.ts'
+        const context = createFullTestApp()
+        try {
+          seedBot(context.db)
+          /** Serializes a stored datetime as older versions did: host-local. */
+          const legacy = (stored) => toDiscordTimestamp(new Date(stored))
+          const snapshots = [null, '2026-06-15 12:30:45', '2026-06-15 12:40:45'].map((edited) => ({
+            id: '${id}',
+            timestamp: legacy('2026-06-15 12:30:45'),
+            edited_timestamp: edited && legacy(edited),
+          }))
+          // A current snapshot of a future-dated ID keeps its real edit time.
+          snapshots.push({ id: '${futureId}', timestamp: '${timestampOf(futureId)}', edited_timestamp: '${timestampOf(id)}' })
+          console.log(JSON.stringify(snapshots.map((message, index) => createInteraction(context.db, {
+            interactionId: String(index + 1), applicationId: '111111111111111111', token: 'snapshot-' + index, type: 3, userId: '111111111111111111', message,
+          }).message)))
+        } finally {
+          context.cleanup()
+        }
+      `
+
+      const timestamp = '2026-06-15T12:30:45.678000+00:00'
+      expect(runInTimezone(timezone, script)).toEqual([
+        { id, timestamp, edited_timestamp: null },
+        // An edit within the creation second must not precede it.
+        { id, timestamp, edited_timestamp: timestamp },
+        { id, timestamp, edited_timestamp: '2026-06-15T12:40:45.000000+00:00' },
+        {
+          id: futureId,
+          timestamp: '2026-06-16T12:30:45.678000+00:00',
+          edited_timestamp: timestamp,
+        },
+      ])
+    }
+  )
+
   it('are read as UTC on non-UTC hosts', () => {
     // A separate process owns TZ; parallel tests keep their own timezone.
     const script = `
@@ -654,18 +656,7 @@ describe('stored message creation times', () => {
         context.cleanup()
       }
     `
-    const output = execFileSync(
-      process.execPath,
-      ['--import', 'tsx', '--input-type=module', '--eval', script],
-      {
-        cwd: fileURLToPath(new URL('..', import.meta.url)),
-        env: { ...process.env, TZ: 'Pacific/Kiritimati' },
-        encoding: 'utf8',
-        timeout: 10_000,
-      }
-    )
-
-    expect(JSON.parse(output)).toEqual([
+    expect(runInTimezone('Pacific/Kiritimati', script)).toEqual([
       {
         timestamp: timestampOf('1456400000000000000'),
         editedAge: true,

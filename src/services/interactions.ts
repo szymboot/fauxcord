@@ -81,6 +81,21 @@ interface InteractionRow {
 }
 
 /**
+ * Recovers the edit time of a snapshot stored by an older version, which read
+ * the stored UTC datetime as the host's local time. Assumes that the host's
+ * timezone has not changed since.
+ * @param value - Edit timestamp captured by the older version
+ * @param createdAt - Creation time derived from the message ID
+ * @returns Discord timestamp of the edit, never before the creation time
+ */
+function recoverLegacyEditTime(value: string, createdAt: Date): string {
+  const read = new Date(value)
+  const stored = read.getTime() - read.getTimezoneOffset() * 60_000
+  // A whole-second edit time of the creation second would precede creation.
+  return toDiscordTimestamp(new Date(Math.max(stored, createdAt.getTime())))
+}
+
+/**
  * Reads a stored message snapshot, deriving its creation time from its ID so
  * that a snapshot stored by an older version agrees with the message.
  * @param json - Serialized message snapshot
@@ -93,14 +108,13 @@ function readMessageSnapshot(json: string): Record<string, unknown> {
   if (!createdAt) return message
   const timestamp = toDiscordTimestamp(createdAt)
   if (message.timestamp === timestamp) return message
-  // An older snapshot: its coarser, host-local edit time must not precede
-  // the creation time. Both strings share one format, so they compare in order.
   const edited = message.edited_timestamp
   return {
     ...message,
     timestamp,
-    ...(typeof edited === 'string' &&
-      edited < timestamp && { edited_timestamp: timestamp }),
+    ...(typeof edited === 'string' && {
+      edited_timestamp: recoverLegacyEditTime(edited, createdAt),
+    }),
   }
 }
 
