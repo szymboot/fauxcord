@@ -5,12 +5,23 @@ import { validateRestFaultSelector } from './rest-fault'
 export const REST_OBSERVATION_DEFAULT_TIMEOUT_MS = 60_000
 export const REST_OBSERVATION_MAX_TIMEOUT_MS = 600_000
 
+/** Request body fields an observation accepts; anything else is rejected. */
+const OBSERVATION_FIELDS = new Set([
+  'method',
+  'path',
+  'guild_id',
+  'message_id',
+  'timeout_ms',
+])
+
 /** Validated exact request selector observed without altering requests. */
 export interface RestObservationRequest {
   method: RestFaultRequest['method']
   /** Bare path with concrete numeric IDs; `*` may stand for a command ID. */
   path: string
   guild_id?: string
+  /** Counts only bulk-delete requests listing this message. */
+  message_id?: string
   timeout_ms: number
 }
 
@@ -49,8 +60,8 @@ export function isRestObservationWildcard(
 
 /**
  * Returns a validated observation request, or undefined for invalid input.
- * The selector (method, path, guild_id) follows exactly the rules of
- * `/_test/rest-faults`; the `*` command wildcard is the only addition.
+ * The selector (method, path, guild_id, message_id) follows exactly the rules
+ * of `/_test/rest-faults`; the `*` command wildcard is the only addition.
  */
 export function validateRestObservation(
   value: unknown
@@ -59,9 +70,7 @@ export function validateRestObservation(
     return undefined
   const body = value as Record<string, unknown>
   if (
-    Object.keys(body).some(
-      (key) => !['method', 'path', 'guild_id', 'timeout_ms'].includes(key)
-    ) ||
+    Object.keys(body).some((key) => !OBSERVATION_FIELDS.has(key)) ||
     typeof body.path !== 'string' ||
     (body.guild_id !== undefined &&
       (typeof body.guild_id !== 'string' || !/^\d{1,20}$/.test(body.guild_id)))
@@ -87,6 +96,9 @@ export function validateRestObservation(
         method: body.method as RestObservationRequest['method'],
         path: body.path,
         ...(typeof body.guild_id === 'string' && { guild_id: body.guild_id }),
+        ...(selector.messageId !== undefined && {
+          message_id: selector.messageId,
+        }),
         timeout_ms: timeout,
       }
     : undefined

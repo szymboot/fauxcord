@@ -416,7 +416,8 @@ function migrateRestFaultSelectors(db: Database): void {
     db.exec(`
       DROP INDEX IF EXISTS idx_active_rest_fault;
       CREATE UNIQUE INDEX idx_active_rest_fault
-        ON test_rest_faults(method, path)
+        ON test_rest_faults(method, path,
+          COALESCE(json_extract(options, '$.message_id'), ''))
         WHERE remaining > 0 AND method != 'GET'
           AND path != '/users/@me/channels';
       CREATE UNIQUE INDEX IF NOT EXISTS idx_active_rest_dm_fault

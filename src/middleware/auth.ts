@@ -74,6 +74,11 @@ export interface AppEnv {
     bot?: BotRecord
     /** OAuth2 access token information (set on Bearer token authentication) */
     accessToken?: AccessTokenRecord
+    /**
+     * Request body a REST observation is still reading (set only then); a
+     * disconnect fault waits for it before cutting the connection.
+     */
+    pendingBodyRead?: Promise<unknown>
   }
 }
 
