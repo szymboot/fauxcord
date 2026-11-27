@@ -1,3 +1,5 @@
+import { isSnowflakeString } from './bulk-delete'
+
 /** Exact request selector and Discord-shaped failure configured by tests. */
 export interface RestFaultRequest {
   method: 'DELETE' | 'PUT' | 'PATCH' | 'POST' | 'GET'
@@ -6,6 +8,8 @@ export interface RestFaultRequest {
   guild_id?: string
   /** Optional exact body selector, supported only for DM channel creation. */
   recipient_id?: string
+  /** Optional listed-message selector, supported only for bulk deletion. */
+  message_id?: string
   /** Exact normalized page selector, supported only on the three list GETs. */
   query?: RestFaultQuery
   status: number
@@ -118,6 +122,14 @@ export function isRestFaultMessageRead(method: unknown, path: string): boolean {
   )
 }
 
+/** Identifies the exact bulk deletion selector of one channel. */
+export function isRestFaultBulkDelete(method: unknown, path: string): boolean {
+  return (
+    method === 'POST' &&
+    /^\/channels\/\d{1,20}\/messages\/bulk-delete$/.test(path)
+  )
+}
+
 /** Identifies list routes whose faults select a page rather than ignoring queries. */
 export function isRestFaultPagePath(path: string): boolean {
   return (
@@ -185,13 +197,16 @@ export interface RestFaultSelectorShape {
   dmCreate: boolean
   /** Validated body selector; only present for DM channel creation. */
   recipientId: string | undefined
+  /** Validated body selector; only present for bulk deletion. */
+  messageId: string | undefined
   query: RestFaultQuery | undefined
 }
 
 /**
- * Validates the exact request selector (`method`, `path`, `guild_id`, and the
- * fault-only `recipient_id` and `query`) shared by REST faults and
- * observations. Returns undefined for an unsupported or inconsistent selector.
+ * Validates the exact request selector (`method`, `path`, `guild_id`,
+ * `message_id`, and the fault-only `recipient_id` and `query`) shared by REST
+ * faults and observations. Returns undefined for an unsupported or
+ * inconsistent selector.
  */
 export function validateRestFaultSelector(
   body: Record<string, unknown>
@@ -206,9 +221,15 @@ export function validateRestFaultSelector(
   const interactionSelector =
     parseRestFaultInteractionSelector(body.method, body.path) !== undefined
   const guildLeave = isRestFaultGuildLeave(body.method, body.path)
+  const bulkDelete = isRestFaultBulkDelete(body.method, body.path)
   if (
-    (channelEdit || inviteCreate || interactionSelector) &&
+    (channelEdit || inviteCreate || interactionSelector || bulkDelete) &&
     body.guild_id !== undefined
+  )
+    return undefined
+  if (
+    body.message_id !== undefined &&
+    (!bulkDelete || !isSnowflakeString(body.message_id))
   )
     return undefined
   if (
@@ -279,6 +300,7 @@ export function validateRestFaultSelector(
     applicationCommand !== undefined ||
     guildLeave ||
     interactionSelector ||
+    bulkDelete ||
     (body.method === 'POST' &&
       /^\/channels\/\d{1,20}\/messages$/.test(body.path)) ||
     (body.method === 'DELETE' &&
@@ -299,6 +321,8 @@ export function validateRestFaultSelector(
         dmCreate,
         recipientId:
           typeof body.recipient_id === 'string' ? body.recipient_id : undefined,
+        messageId:
+          typeof body.message_id === 'string' ? body.message_id : undefined,
         query,
       }
     : undefined
@@ -394,12 +418,13 @@ export function validateRestFault(
 
   const selector = validateRestFaultSelector(body)
   if (!selector) return undefined
-  const { userRead, dmCreate, recipientId, query } = selector
+  const { userRead, dmCreate, recipientId, messageId, query } = selector
   return {
     method: body.method as RestFaultRequest['method'],
     path: body.path,
     ...((userRead || dmCreate) && { guild_id: body.guild_id as string }),
     ...(dmCreate && recipientId !== undefined && { recipient_id: recipientId }),
+    ...(messageId !== undefined && { message_id: messageId }),
     ...(query && { query }),
     status,
     code,

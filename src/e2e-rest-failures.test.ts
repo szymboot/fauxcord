@@ -269,7 +269,7 @@ describe('deterministic REST failure controls', () => {
     '/channels/1/messages?wait=true',
     '/api/v10/channels/1/messages',
     '/channels/1/messages/2',
-    '/channels/1/messages/bulk-delete',
+    '/channels/1/messages/bulk-delete/',
     '/channels/123456789012345678901/messages',
     '/guilds/1/members/2',
   ])('rejects unsupported POST selector %s', async (selector) => {

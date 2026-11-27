@@ -7,6 +7,8 @@ import { isRestFaultApplicationScoped } from '../validators/rest-fault'
 import {
   consumeRestFault,
   getRestFaultRuntime,
+  hasMessageNarrowedRestFault,
+  readRestFaultMessageIds,
   resolveRestFaultRequestTarget,
 } from '../services/rest-faults'
 
@@ -50,18 +52,30 @@ export function createRestFaultMiddleware(
       )
         recipientId = payload.recipient_id
     }
+    const callerToken = target.interactionOwner ?? bot?.token
+    // Only a narrowed bulk-delete control makes matching wait for the body.
+    let messageIds: string[] | undefined
+    if (hasMessageNarrowedRestFault(db, c.req.method, path, callerToken)) {
+      messageIds = await readRestFaultMessageIds(c.req.raw)
+      // An upload that failed during that wait consumes no control.
+      if (!messageIds) {
+        await next()
+        return
+      }
+    }
     const fault = consumeRestFault(
       db,
       c.req.method,
       path,
-      target.interactionOwner ?? bot?.token,
+      callerToken,
       new URL(c.req.url).searchParams,
       recipientId,
       // Bearer callers never set `bot`; application-scoped selectors also
       // match the OAuth2 client (application) of the access token.
       isRestFaultApplicationScoped(c.req.method, path)
         ? c.get('accessToken')?.client_id
-        : undefined
+        : undefined,
+      messageIds
     )
     if (fault) {
       if (fault.mode === 'rate_limit') {
@@ -96,6 +110,9 @@ export function createRestFaultMiddleware(
             501
           )
         }
+        // Cutting the connection first would lose an upload still being read.
+        const pendingBodyRead = c.get('pendingBodyRead')
+        if (pendingBodyRead) await pendingBodyRead
         runtime.record(fault.id, { disconnected: 1 })
         bindings.incoming.socket.destroy()
         return c.body(null, 204)

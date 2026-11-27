@@ -4,9 +4,14 @@ import { randomUUID } from 'node:crypto'
 import type { Database } from '../db'
 import { generateSnowflake } from '../snowflake'
 import {
+  isSnowflakeString,
+  readBulkDeleteEntries,
+} from '../validators/bulk-delete'
+import {
   isRestFaultChannelEdit,
   isRestFaultGuildChannelCreatePath,
   isRestFaultApplicationScoped,
+  isRestFaultBulkDelete,
   isRestFaultGuildLeave,
   isRestFaultPagePath,
   normalizeRestFaultQuery,
@@ -498,7 +503,9 @@ function insertRestFault(
          AND ((f.method != 'GET' AND f.path != '/users/@me/channels') OR g.bot_token = ?)
          AND (f.path != '/users/@me/channels'
            OR json_extract(f.options, '$.recipient_id') IS NULL
-           OR ? IS NULL OR json_extract(f.options, '$.recipient_id') = ?)`
+           OR ? IS NULL OR json_extract(f.options, '$.recipient_id') = ?)
+         AND (json_extract(f.options, '$.message_id') IS NULL
+           OR ? IS NULL OR json_extract(f.options, '$.message_id') = ?)`
       )
       .get(
         request.method,
@@ -506,7 +513,9 @@ function insertRestFault(
         query,
         guild.bot_token,
         request.recipient_id ?? null,
-        request.recipient_id ?? null
+        request.recipient_id ?? null,
+        request.message_id ?? null,
+        request.message_id ?? null
       )
   )
     return 'CONFLICT'
@@ -530,6 +539,9 @@ function insertRestFault(
     JSON.stringify({
       ...(request.recipient_id !== undefined && {
         recipient_id: request.recipient_id,
+      }),
+      ...(request.message_id !== undefined && {
+        message_id: request.message_id,
       }),
       ...(request.mode && {
         mode: request.mode,
@@ -670,10 +682,63 @@ export function resolveRestFaultRequestTarget(
 }
 
 /**
+ * Reads the message IDs a bulk-delete request lists, from a copy of its raw
+ * body so 19-digit Snowflakes keep their precision and the route can still read
+ * it. Invalid entries are skipped; a body without a readable `messages` array
+ * lists nothing. Shared by narrowed fault and observation matching, which call
+ * it only when needed because it waits for the whole body.
+ * @param request - Incoming bulk-delete request
+ * @returns The listed IDs, or undefined when the body never fully arrived
+ */
+export async function readRestFaultMessageIds(
+  request: Request
+): Promise<string[] | undefined> {
+  let body: string
+  try {
+    body = await request.clone().text()
+  } catch {
+    return undefined
+  }
+  const entries = readBulkDeleteEntries(body) ?? []
+  return entries.filter((id) => isSnowflakeString(id))
+}
+
+/**
+ * Whether an active control of this exact request that the caller could consume
+ * is narrowed to a listed message, so that matching it needs the request body.
+ * Expired and invalidated controls are pruned first and never delay a request,
+ * nor do controls bound to another bot.
+ * @param db - Database
+ * @param method - HTTP method
+ * @param path - Selector-form path, see `resolveRestFaultRequestTarget`
+ * @param botToken - Token of a Bot caller
+ */
+export function hasMessageNarrowedRestFault(
+  db: Database,
+  method: string,
+  path: string,
+  botToken?: string
+): boolean {
+  if (!isRestFaultBulkDelete(method, path)) return false
+  pruneRestFaults(db)
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM test_rest_faults WHERE method = ? AND path = ?
+        AND remaining > 0
+        AND json_extract(options, '$.message_id') IS NOT NULL
+        AND (owner_token IS NULL OR owner_token = ?)`
+      )
+      .get(method, path, botToken ?? null) !== undefined
+  )
+}
+
+/**
  * Atomically consumes one matching attempt, with no ordinary route side
  * effects. `clientId` is the OAuth2 client of a Bearer-authenticated caller;
  * it only matters for application-scoped selectors, whose owning bot is the
- * application with that ID.
+ * application with that ID. `messageIds` are the IDs a bulk-delete request
+ * lists; of several matching narrowed controls the earliest armed is consumed.
  */
 export function consumeRestFault(
   db: Database,
@@ -682,7 +747,8 @@ export function consumeRestFault(
   botToken?: string,
   search = new URLSearchParams(),
   recipientId?: string,
-  clientId?: string
+  clientId?: string,
+  messageIds: string[] = []
 ): RestFault | undefined {
   pruneRestFaults(db)
   const applicationScoped = isRestFaultApplicationScoped(method, path)
@@ -712,12 +778,16 @@ export function consumeRestFault(
       AND (f.path != '/users/@me/channels'
         OR json_extract(f.options, '$.recipient_id') IS NULL
         OR json_extract(f.options, '$.recipient_id') = ?)
+      AND (json_extract(f.options, '$.message_id') IS NULL
+        OR json_extract(f.options, '$.message_id') IN
+          (SELECT value FROM json_each(?)))
       AND (f.owner_token IS NULL OR f.owner_token = ?
         OR (? = 1 AND f.owner_token IN
           (SELECT token FROM bots WHERE user_id = ?)))
       AND (? = 0 OR f.path NOT LIKE '/applications/%'
         OR EXISTS (SELECT 1 FROM bots b WHERE b.token = f.owner_token
           AND f.path LIKE '/applications/' || b.user_id || '/%'))
+      ORDER BY f.rowid
       LIMIT 1
     )
     RETURNING *`
@@ -730,6 +800,7 @@ export function consumeRestFault(
         method === 'POST' && isRestFaultGuildChannelCreatePath(path) ? 1 : 0,
         botToken ?? null,
         recipientId ?? null,
+        JSON.stringify(messageIds),
         botToken ?? null,
         Number(applicationScoped && clientId !== undefined),
         clientId ?? null,

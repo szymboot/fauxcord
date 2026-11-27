@@ -238,8 +238,9 @@ snapshot. IDENTIFY, RESUME, TTL and evidence are described in the
 
 `POST /_test/rest-faults` arms bounded failures (HTTP errors, `rate_limit`,
 `delay`, `disconnect`) for one exact REST request, scoped to a bot's guild, with
-`times`, TTL, inspection counters and reset cleanup. Selectors include message,
-channel, ban, member, role, invite and voice-state routes, plus the ban-appeal
+`times`, TTL, inspection counters and reset cleanup. Selectors include message
+(including bulk deletion, optionally narrowed by `message_id`), channel, ban,
+member, role, invite and voice-state routes, plus the ban-appeal
 paths `GET /guilds/:guildId/channels`, `DELETE /users/@me/guilds/:guildId`,
 guild application command and command-permission routes (consumable by the
 bot's token or by an OAuth2 Bearer token of its application),

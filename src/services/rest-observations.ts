@@ -34,6 +34,8 @@ export interface RestObservation {
   method: string
   path: string
   guild_id: string
+  /** Present only when narrowed to bulk-delete requests listing a message. */
+  message_id?: string
   count: number
   requests: RestObservedRequest[]
   expires_at: string
@@ -50,6 +52,8 @@ export interface RestObservationRecord {
   method: string
   path: string
   guildId: string
+  /** Message a bulk-delete request must list to be counted. */
+  messageId?: string
   /** Bot owning the selected guild when the observation was created. */
   token: string
   /** Whether only the owning bot (or its application) is observed. */
@@ -131,6 +135,7 @@ export class RestObservations {
       method: entry.method,
       path: entry.path,
       guild_id: entry.guildId,
+      ...(entry.messageId !== undefined && { message_id: entry.messageId }),
       count: entry.count,
       requests: entry.requests.map((request) => ({ ...request })),
       expires_at: new Date(entry.deadline).toISOString(),
@@ -166,6 +171,7 @@ export class RestObservations {
       method: request.method,
       path: request.path,
       guildId: scope.guild.id,
+      messageId: request.message_id,
       token: scope.guild.bot_token,
       // Mirrors which faults are consumed by every caller and which only by
       // the bot owning the selected guild.
@@ -225,6 +231,7 @@ export class RestObservations {
    * Selects the active observations an arriving request belongs to. The
    * caller scope matches fault consumption: restricted selectors observe the
    * guild's owning bot, and application-scoped ones also its Bearer tokens.
+   * Narrowing by `messageId` needs the body and is left to the caller.
    */
   match(call: RestObservationCall): RestObservationRecord[] {
     const now = Date.now()

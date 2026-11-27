@@ -1174,6 +1174,7 @@ Supported selectors (replace **every** ID with a concrete numeric string):
 | -------- | --------------------------------------------------- | --------------------------- |
 | `POST`   | `/channels/{channelId}/messages`                    | Message / edit-log sending  |
 | `POST`   | `/channels/{channelId}/invites`                     | Invite creation             |
+| `POST`   | `/channels/{channelId}/messages/bulk-delete`        | [Bulk message deletion](#bulk-message-deletion-failures) (optional `message_id`) |
 | `POST`   | `/users/@me/channels`                               | DM channel creation         |
 | `PATCH`  | `/channels/{channelId}`                             | Guild channel edit          |
 | `POST`   | `/guilds/{guildId}/channels`                        | Guild channel creation      |
@@ -1711,7 +1712,9 @@ Use separate Bot tokens or serialize scenarios targeting the same recipient.
 `status` is an integer from `400` through `599`; `code` is a nonnegative safe
 integer; `message` is a nonempty string of at most 1000 characters. `times` is an
 integer from `1` through `100`, defaulting to `1`. Invalid/malformed input returns
-`400`. An already active legacy fault for the same method/path returns `409`.
+`400`. An already active legacy fault for the same method/path returns `409`
+(bulk deletion controls narrowed to
+[different messages](#bulk-message-deletion-failures) are separate selectors).
 
 On a matching authenticated request, Fauxcord atomically decrements `remaining`
 and increments `consumed`, then returns the chosen status with exactly
@@ -1856,9 +1859,106 @@ downstream work.
 Controls and counters are isolated per
 database. `/_test/reset` clears them, and environment/Guild deletion cascades
 them; Channel deletion also removes channel-delete, message-send, message-edit,
-message-delete and message-page controls for
+message-delete, bulk-delete and message-page controls for
 that Channel. Exhausted records remain inspectable until cleared, and a fresh control may then
 be armed for the same selector.
+
+### Bulk message deletion failures
+
+To make chosen chunks of a bulk deletion fail (for example the discord-bot
+`/clear` command, which deletes up to 100 messages per request), arm `POST`
+with the exact bare `/channels/{channelId}/messages/bulk-delete` path. The
+Channel ID is a concrete numeric string of 1–20 digits; the `/api/v10`, `/api`
+and bare request prefixes all consume the same control, and request query
+parameters are ignored. The Channel must exist and belong to an existing Guild
+(`404` otherwise, for example for DMs and group DMs, which have no Guild). The
+Guild derives from the Channel: `guild_id`, `query` and `recipient_id` are
+rejected with `400`.
+
+**Fields.** Besides the common fields, this selector accepts an optional
+`message_id` that narrows the control:
+
+| Field        | Required | Description |
+| ------------ | -------- | ----------- |
+| `message_id` | —        | Exact Snowflake string: decimal, no leading zeros, at most `18446744073709551615`. The control matches only a request whose `messages` array contains this ID. Omit it to match every bulk-delete request to the Channel. |
+
+`message_id` is rejected with `400` on every other selector. Any other form of
+it (a number, `null`, an empty, non-numeric or out-of-range string) is rejected
+with `400` too. The message need not exist when arming. IDs are read from the
+raw request text, as the route reads them, so quoted strings and unquoted
+integers both match and 19-digit Snowflakes are never rounded. A narrowed
+control matches before the route validates the request: one ID, duplicates, more
+than 100 IDs or other invalid entries do not stop a listed ID from matching. A
+body without a readable `messages` array (malformed JSON, or `messages` missing
+or not an array) lists no message, so only a control without `message_id`
+matches it. A control without `message_id` is applied as soon as the request
+headers arrive. While a narrowed control the caller could consume is active on
+the Channel, matching waits for the whole body and applies the controls active at
+that moment, like the DM recipient selectors; an upload that fails during that
+wait consumes no control.
+
+**Scope.** Caller rules are those of the other Channel message mutations
+(message sending, editing and deletion): a mode-omitted control is consumed by
+any authenticated caller issuing a matching request, while explicit
+`rate_limit`, `delay` and `disconnect` modes bind to the Bot owning the
+Channel's Guild; other tokens do not consume them and follow the ordinary route,
+including its
+[permission checks](#bulk-delete-injected-messages-through-discord-rest).
+Unauthenticated requests (`401`) never count.
+
+**Conflicts and overlap.** Narrowed controls follow the DM recipient selectors.
+Active controls for the same Channel that overlap return `409`, including across
+modes: two controls without `message_id`, two with the same `message_id`, and a
+control without `message_id` together with any narrowed one (in either arming
+order). Controls narrowed to different messages, and controls of different
+Channels, are independent. A request listing several selected messages consumes
+exactly one attempt, from the earliest armed control that applies to the caller;
+the others keep their counts. After exhaustion, expiry or cancellation the
+selector can be armed again.
+
+A selected attempt fails before the route checks permissions, validates or
+deletes anything, so a Bot the route would refuse still receives the configured
+failure. Every listed message, with its embeds, attachment metadata, reactions,
+pins and polls, stays stored, and no `MESSAGE_DELETE_BULK` is queued. A delayed
+attempt never resumes the deletion, even after expiry, cancellation or reset.
+Once the control is exhausted, cancelled or expired, requests follow the
+[ordinary route](#bulk-delete-injected-messages-through-discord-rest),
+including its permission checks and validation. `times`, expiry,
+`remaining`/`consumed`, `outcomes`, inspection and cancellation work as for the
+other selectors. Channel, Guild and setup deletion and global or owning-Bot
+reset remove active and exhausted controls.
+`src/rest-bulk-delete-faults.test.ts` covers this selector.
+
+**Example: fail only the second chunk.** With 150 messages to clear, narrow the
+control to any message of the second chunk, here the 101st ID in the order the
+bot deletes them (replace both IDs with those of your fixtures):
+
+```bash
+curl -X POST http://localhost:3000/_test/rest-faults \
+  -H "Content-Type: application/json" \
+  -d '{
+    "method": "POST",
+    "path": "/channels/333333333333333333/messages/bulk-delete",
+    "message_id": "1513052391153471589",
+    "status": 500,
+    "code": 0,
+    "message": "Internal Server Error",
+    "times": 1
+  }'
+```
+
+The first request (100 IDs, without that message) returns `204`, deletes its
+messages and queues its `MESSAGE_DELETE_BULK`. The second request returns the
+configured `500` and keeps its 50 messages. `GET /_test/rest-faults/:id` then
+reports `consumed: 1` and `remaining: 0`, and a retry of the second chunk
+succeeds. If the library retries failed requests automatically, every retry is
+another attempt, so set `times` to the number of attempts that must fail. A
+control without `message_id` and `times: 1` would fail the first chunk instead.
+
+To count the chunks without failing them, create a
+[REST observation](#post-_testrest-observations--count-exact-rest-requests-without-failing-them)
+with the same `method` and `path`. Omit `message_id` to count every chunk; with
+it, only the requests listing that message are counted.
 
 ### Rate limits and transport failures
 
@@ -2152,8 +2252,10 @@ finish with their configured error and never enter the ordinary route.
 A REST fault fails a request before its route runs, so it cannot show how many
 requests a bot sent while behaving normally. An **observation** only counts and
 records the requests of an exact selector; every request still runs exactly as
-without it (no failure, delay, rate limit or changed response). Create it
-**before** triggering the behavior under test. This is how a consumer proves it
+without it (no failure, delay, rate limit or changed response; the only timing
+exception is the
+[bulk deletion `message_id`](#bulk-deletion-observations) upload wait). Create
+it **before** triggering the behavior under test. This is how a consumer proves it
 sent no request, or exactly one, for a burst of events.
 
 ```bash
@@ -2189,6 +2291,7 @@ edited.
 | `method`     | ✅       | HTTP method of a [`/_test/rest-faults` selector](#post-_testrest-faults--fail-bounded-exact-rest-attempts) |
 | `path`       | ✅       | Bare path with concrete numeric IDs, exactly as for faults; see the command wildcard below |
 | `guild_id`   | —        | Scope for global user selectors, with the same rules as for faults |
+| `message_id` | —        | Bulk deletion only: count only requests listing this message, with the same format and matching rules as for [bulk deletion faults](#bulk-message-deletion-failures) |
 | `timeout_ms` | —        | Lifetime, integer `1`–`600000` (default `60000`)                   |
 
 Unknown fields (including the fault-only `status`, `times`, `mode`, `query` and
@@ -2228,8 +2331,31 @@ delayed or held request appears once it finishes. Fauxcord does not count a
 request it rejects for authentication (`401`), since it cannot attribute it.
 
 Returns `201` with `id`, `method`, `path`, `guild_id` (the resolved guild),
-`count: 0`, `requests: []` and `expires_at`. After `timeout_ms` the observation
+`message_id` (only when supplied), `count: 0`, `requests: []` and
+`expires_at`. After `timeout_ms` the observation
 stops counting but stays readable until removed.
+
+### Bulk deletion observations
+
+Observe `POST /channels/{channelId}/messages/bulk-delete` to count how many
+requests a bot used, without failing them. Clearing 150 messages in chunks of
+100 gives `count: 2`, each entry with status `204`:
+
+```bash
+curl -X POST http://localhost:3000/_test/rest-observations \
+  -H "Content-Type: application/json" \
+  -d '{"method":"POST","path":"/channels/333333333333333333/messages/bulk-delete"}'
+```
+
+With `message_id`, only the requests listing that message are counted, and the
+observation echoes the field. As for every observation, a request counts only
+toward observations that are active when it arrives, and it is processed (faults
+included) as it would be without them. Reading the listed IDs needs the whole
+body, so a response produced before the upload finished (for example an
+unnarrowed fault) is delivered only once the body has arrived; a `disconnect`
+fault likewise cuts the connection only then. Observations without `message_id`
+still record a response as soon as it is produced. An upload that fails before
+its body arrives lists no message, so only they count it.
 
 ## `GET /_test/rest-observations/:id` — Read an observation
 
@@ -2237,7 +2363,7 @@ Returns the snapshot, or `404` for an unknown or cleared observation:
 
 | Field        | Description                                                                |
 | ------------ | -------------------------------------------------------------------------- |
-| `id`, `method`, `path`, `guild_id`, `expires_at` | As returned by creation (`path` as selected, including `*`) |
+| `id`, `method`, `path`, `guild_id`, `message_id`, `expires_at` | As returned by creation (`path` as selected, including `*`; `message_id` only when supplied) |
 | `count`      | Number of counted requests, never reset by the retention limit             |
 | `requests`   | Newest-last list of `{method, path, status, at, credential}`; `path` is the concrete request path, `at` an ISO timestamp, `credential` `"bot"` or `"bearer"`. At most the latest `1000` entries are kept (the oldest are dropped) while `count` keeps counting |
 | `state`      | `"active"`, or `"expired"` once `expires_at` has passed                    |
@@ -6792,6 +6918,10 @@ missing or belonging to another channel. Unknown channels return `404` / `10003`
 DM channels return `400` / `50024`, and REST authentication is required (`401`
 without it). The permission checks below apply to `Bot` callers. Invalid
 requests change no data and queue no deletion events.
+
+To make chosen requests fail, or to count them, use the
+[bulk deletion selector](#bulk-message-deletion-failures) of
+`/_test/rest-faults` and `/_test/rest-observations`.
 
 Missing IDs count toward the limit and are ignored during deletion. IDs in other
 channels and ephemeral interaction responses are also ignored; they are never
