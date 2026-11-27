@@ -1,4 +1,4 @@
-/** Guild permission checks scoped to message REST: sends, history and single-message access. */
+/** Guild permission checks scoped to message REST: sends, history, single-message access and bulk delete. */
 import type { Database } from '../db'
 import {
   DiscordErrorCode,
@@ -8,8 +8,13 @@ import {
 import { getChannel } from './channels'
 import { PermissionBit, resolveChannelPermissions } from './guild-permissions'
 
-const { VIEW_CHANNEL, SEND_MESSAGES, EMBED_LINKS, READ_MESSAGE_HISTORY } =
-  PermissionBit
+const {
+  VIEW_CHANNEL,
+  SEND_MESSAGES,
+  MANAGE_MESSAGES,
+  EMBED_LINKS,
+  READ_MESSAGE_HISTORY,
+} = PermissionBit
 
 /** A send denial with the HTTP statuses produced by this permission check. */
 export interface MessageSendError extends DiscordErrorResponse {
@@ -91,28 +96,31 @@ export function getMessageSendError(
 }
 
 /**
- * Checks that a bot may reach the messages of a channel (list the history, or
- * read, edit or delete a single message). It resolves the caller's guild
- * permissions exactly like sends do: owner and guild-level ADMINISTRATOR
+ * Checks that a bot may reach the messages of a channel (list the history, read,
+ * edit or delete a single message, or bulk-delete). It resolves the caller's
+ * guild permissions exactly like sends do: owner and guild-level ADMINISTRATOR
  * bypass, a non-member is denied, and a missing VIEW_CHANNEL is `403` / `50001`
- * (`Missing Access`). Reading additionally requires READ_MESSAGE_HISTORY,
- * reported as `403` / `50013` (`Missing Permissions`): the single-message read
- * returns that error, while the history list turns it into an empty page.
- * Threads resolve against their parent channel's overwrites. Unknown channels
- * and DM channels pass through (their existing behavior is kept), and so does a
- * channel without a guild.
+ * (`Missing Access`). Reading additionally requires READ_MESSAGE_HISTORY and
+ * bulk deletion requires MANAGE_MESSAGES; a visible channel without the extra
+ * permission is reported as `403` / `50013` (`Missing Permissions`), which the
+ * history list turns into an empty page. Threads resolve against their parent
+ * channel's overwrites. Unknown channels and DM channels pass through (their
+ * existing behavior is kept), and so does a channel without a guild.
  * @param db - Database
  * @param channelId - Channel holding the messages
  * @param userId - Bot user making the request
- * @param options - `read` also requires READ_MESSAGE_HISTORY
- * @param options.read - Whether the request reads messages (GET)
+ * @param options - Permissions required on top of VIEW_CHANNEL
+ * @param options.read - Whether the request reads messages (GET), which also
+ * requires READ_MESSAGE_HISTORY
+ * @param options.manage - Whether the request moderates messages (bulk delete),
+ * which also requires MANAGE_MESSAGES
  * @returns The denial, or null when the request may proceed
  */
 export function getMessageAccessError(
   db: Database,
   channelId: string,
   userId: string,
-  options: { read?: boolean } = {}
+  options: { read?: boolean; manage?: boolean } = {}
 ): MessageSendError | null {
   const channel = getChannel(db, channelId)
   if (!channel?.guild_id) return null
@@ -136,7 +144,8 @@ export function getMessageAccessError(
 
   if (!(permissions & VIEW_CHANNEL))
     return sendError(DiscordErrorCode.MISSING_ACCESS, 'Missing Access', 403)
-  return options.read && !(permissions & READ_MESSAGE_HISTORY)
+  return (options.read && !(permissions & READ_MESSAGE_HISTORY)) ||
+    (options.manage && !(permissions & MANAGE_MESSAGES))
     ? sendError(
         DiscordErrorCode.MISSING_PERMISSIONS,
         'Missing Permissions',

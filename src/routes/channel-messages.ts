@@ -432,7 +432,7 @@ export function createChannelMessageRoutes(
 
   // DELETE /channels/:channelId/messages/:messageId — Delete a message
   // Unlike PATCH (which enforces authorship), deletion is intentionally not
-  // ownership-guarded: the mock does not model MANAGE_MESSAGES, and real
+  // ownership-guarded: single deletion does not model MANAGE_MESSAGES, and real
   // Discord permits deleting other users' messages with that permission.
   app.delete('/channels/:channelId/messages/:messageId', (c) => {
     const { channelId, messageId } = c.req.param()
@@ -481,7 +481,22 @@ export function createChannelMessageRoutes(
         400
       )
     }
-    const messages = parseBulkDeleteMessages(await c.req.text())
+
+    const bot = c.get('bot')
+    const accessError = bot
+      ? getMessageAccessError(db, channelId, bot.user_id, { manage: true })
+      : null
+    if (accessError) return c.json(accessError.body, accessError.status)
+
+    const rawBody = await c.req.text()
+
+    // Reading the body awaits IO; access may have been revoked meanwhile.
+    const currentError = bot
+      ? getMessageAccessError(db, channelId, bot.user_id, { manage: true })
+      : null
+    if (currentError) return c.json(currentError.body, currentError.status)
+
+    const messages = parseBulkDeleteMessages(rawBody)
     const uniqueMessages = new Set(messages)
     if (uniqueMessages.size !== messages?.length) {
       return c.json(
