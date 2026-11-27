@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { GatewayIntentBits } from 'discord-api-types/v10'
 import { GatewayOp } from './gateway/opcodes'
+import { generateSnowflake } from './snowflake'
 import {
   createRealServer,
   seedBot,
@@ -299,7 +300,9 @@ describe('deterministic REST failure controls', () => {
   it.each(['delete', 'ban', 'patch', 'role'] as const)(
     'fails %s from native MESSAGE_CREATE without mutation, then succeeds',
     async (operation) => {
-      const messagePath = `/channels/${channel}/messages/${messageId}`
+      // The ban window is measured from the Snowflake, so the trigger is recent.
+      const triggerId = generateSnowflake()
+      const messagePath = `/channels/${channel}/messages/${triggerId}`
       const memberPath = `/guilds/${guild}/members/${user}`
       const path = {
         delete: messagePath,
@@ -361,7 +364,7 @@ describe('deterministic REST failure controls', () => {
         request(`/api/v10${path}`, method, body)
           .then((response) => {
             expect(frame.d).toMatchObject({
-              id: messageId,
+              id: triggerId,
               channel_id: channel,
               content: 'trigger',
             })
@@ -374,7 +377,7 @@ describe('deterministic REST failure controls', () => {
         `/_test/channels/${channel}/messages`,
         'POST',
         {
-          id: messageId,
+          id: triggerId,
           content: 'trigger',
           author: { id: user },
         }

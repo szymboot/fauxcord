@@ -50,6 +50,7 @@ import {
   createGuildAdvancedRoutes,
 } from './routes/guild-advanced'
 import { generateSnowflake } from './snowflake'
+import { storedTimestampFromSnowflake } from './timestamp'
 import { buildApp } from './app'
 import { createCommand } from './services/application-commands'
 import { createInteraction } from './services/interactions'
@@ -969,8 +970,15 @@ export function seedMessage(
 ): string {
   const messageId = generateSnowflake()
   db.prepare(
-    'INSERT INTO messages (id, channel_id, author_id, author_token, content) VALUES (?, ?, ?, ?, ?)'
-  ).run(messageId, channelId, authorId, authorToken, content)
+    'INSERT INTO messages (id, channel_id, author_id, author_token, content, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(
+    messageId,
+    channelId,
+    authorId,
+    authorToken,
+    content,
+    storedTimestampFromSnowflake(messageId)
+  )
   return messageId
 }
 

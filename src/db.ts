@@ -11,6 +11,7 @@ import {
 import { getRestPageHolds } from './services/rest-page-holds'
 import { getRestMemberReadHolds } from './services/rest-member-read-holds'
 import { parseReactionEmoji, reactionEmojiKey } from './services/reaction-emoji'
+import { storedTimestampFromSnowflake } from './timestamp'
 import BetterSqlite3 from 'better-sqlite3'
 import type { Database } from 'better-sqlite3'
 
@@ -24,6 +25,35 @@ function migrateMessageComponents(db: Database): void {
       "ALTER TABLE messages ADD COLUMN components TEXT NOT NULL DEFAULT '[]'"
     )
   }
+}
+
+/**
+ * Re-derives the creation time of stored messages whose ID is a valid
+ * Snowflake, for databases written before `created_at` came from the ID. Other
+ * messages keep their value, and consistent rows are not rewritten.
+ * @param db - Database instance
+ */
+function migrateMessageCreatedAt(db: Database): void {
+  const rows = db.prepare('SELECT id, created_at FROM messages').all() as {
+    id: string
+    created_at: string
+  }[]
+  // A whole-second edit time of the creation second would now precede it. The
+  // current edit time is compared in SQL so that a concurrent edit survives.
+  const update = db.prepare(
+    `UPDATE messages SET created_at = @createdAt,
+       edited_at = CASE WHEN edited_at = substr(@createdAt, 1, 19)
+         THEN @createdAt ELSE edited_at END
+     WHERE id = @id`
+  )
+  db.transaction(() => {
+    for (const row of rows) {
+      const createdAt = storedTimestampFromSnowflake(row.id)
+      if (createdAt && createdAt !== row.created_at) {
+        update.run({ createdAt, id: row.id })
+      }
+    }
+  })()
 }
 
 /** Thread-related columns added to the `channels` table, with their DDL. */
@@ -1335,6 +1365,7 @@ export function initializeDatabase(dbPath: string): Database {
   `)
 
   migrateMessageComponents(db)
+  migrateMessageCreatedAt(db)
   migrateUserGlobalName(db)
   migrateEmojiAnimated(db)
   migrateCustomReactionKeys(db)

@@ -14,6 +14,7 @@ import {
   type DepartingMember,
 } from './member-removal'
 import { getUser, type UserObject } from './users'
+import { toStoredTimestamp } from '../timestamp'
 
 /** Guild ban object for API responses (GuildBanResponse) */
 export interface GuildBanObject {
@@ -158,12 +159,16 @@ function deleteRecentGuildMessages(
   deleteMessageSeconds: number
 ): void {
   if (deleteMessageSeconds <= 0) return
+  // Millisecond precision on Snowflake's clock, matching message timestamps.
+  const since = toStoredTimestamp(
+    new Date(Date.now() - deleteMessageSeconds * 1000)
+  )
   db.prepare(
     `DELETE FROM messages
      WHERE author_id = ?
        AND channel_id IN (SELECT id FROM channels WHERE guild_id = ?)
-       AND created_at >= datetime('now', ?)`
-  ).run(userId, guildId, `-${deleteMessageSeconds} seconds`)
+       AND julianday(created_at) >= julianday(?)`
+  ).run(userId, guildId, since)
 }
 
 /**

@@ -111,7 +111,7 @@ curl -X POST http://localhost:3000/api/v10/channels/333333333333333333/messages 
   "id": "1513052391153471489",
   "content": "Hello, Fauxcord!",
   "author": { "id": "111111111111111111", "username": "MyTestBot", "bot": true },
-  "timestamp": "2026-06-07T10:00:00.000Z",
+  "timestamp": "2026-06-07T05:30:01.205000+00:00",
   ...
 }
 ```

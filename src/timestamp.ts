@@ -11,6 +11,8 @@
  * calling `toISOString()` directly.
  */
 
+import { parseSnowflakeTimestamp } from './snowflake'
+
 /**
  * Formats a `Date` as a Discord-style ISO 8601 timestamp string.
  * @param date - Date to format
@@ -27,16 +29,46 @@ export function toDiscordTimestamp(date: Date): string {
 }
 
 /**
+ * Parses a stored timestamp, treating SQLite's zone-less datetimes as UTC.
+ * Explicit ISO 8601 offsets are preserved when parsing fixture timestamps.
+ * @param value - SQLite datetime or an explicitly zoned ISO 8601 timestamp
+ * @returns Parsed date
+ */
+export function parseStoredTimestamp(value: string): Date {
+  const timestamp = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(
+    value
+  )
+    ? `${value.replace(' ', 'T')}Z`
+    : value
+  return new Date(timestamp)
+}
+
+/**
  * Formats a stored timestamp, treating SQLite's zone-less datetimes as UTC.
  * Explicit ISO 8601 offsets are preserved when parsing fixture timestamps.
  * @param value - SQLite datetime or an explicitly zoned ISO 8601 timestamp
  * @returns Discord timestamp with six fractional digits and a UTC offset
  */
 export function formatStoredTimestamp(value: string): string {
-  const timestamp = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(
-    value
-  )
-    ? `${value.replace(' ', 'T')}Z`
-    : value
-  return toDiscordTimestamp(new Date(timestamp))
+  return toDiscordTimestamp(parseStoredTimestamp(value))
+}
+
+/**
+ * Formats a `Date` as a zone-less UTC SQLite datetime with milliseconds, which
+ * stays comparable with the output of SQLite's `datetime()`.
+ * @param date - Date to format
+ * @returns Stored datetime (e.g. `2021-01-01 01:01:01.010`)
+ */
+export function toStoredTimestamp(date: Date): string {
+  return date.toISOString().replace('T', ' ').replace('Z', '')
+}
+
+/**
+ * Derives the stored creation time of a message from its Snowflake ID.
+ * @param messageId - Message ID
+ * @returns Stored datetime, or null when the ID is not a valid Snowflake
+ */
+export function storedTimestampFromSnowflake(messageId: string): string | null {
+  const date = parseSnowflakeTimestamp(messageId)
+  return date ? toStoredTimestamp(date) : null
 }
