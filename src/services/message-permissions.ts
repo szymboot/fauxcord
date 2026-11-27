@@ -1,4 +1,4 @@
-/** Guild permission checks scoped to message REST: sends and single-message access. */
+/** Guild permission checks scoped to message REST: sends, history and single-message access. */
 import type { Database } from '../db'
 import {
   DiscordErrorCode,
@@ -91,20 +91,21 @@ export function getMessageSendError(
 }
 
 /**
- * Checks that a bot may reach one message of a channel (read, edit or delete a
- * single message). It resolves the caller's guild permissions exactly like
- * sends do: owner and guild-level ADMINISTRATOR bypass, a non-member is denied,
- * and a missing VIEW_CHANNEL is `403` / `50001` (`Missing Access`). Reading
- * additionally requires READ_MESSAGE_HISTORY; real Discord answers a visible
- * channel without it with `403` / `50013` (`Missing Permissions`). Threads
- * resolve against their parent channel's overwrites. Unknown
- * channels and DM channels pass through (their existing behavior is kept), and
- * so does a channel without a guild.
+ * Checks that a bot may reach the messages of a channel (list the history, or
+ * read, edit or delete a single message). It resolves the caller's guild
+ * permissions exactly like sends do: owner and guild-level ADMINISTRATOR
+ * bypass, a non-member is denied, and a missing VIEW_CHANNEL is `403` / `50001`
+ * (`Missing Access`). Reading additionally requires READ_MESSAGE_HISTORY,
+ * reported as `403` / `50013` (`Missing Permissions`): the single-message read
+ * returns that error, while the history list turns it into an empty page.
+ * Threads resolve against their parent channel's overwrites. Unknown channels
+ * and DM channels pass through (their existing behavior is kept), and so does a
+ * channel without a guild.
  * @param db - Database
- * @param channelId - Channel holding the message
+ * @param channelId - Channel holding the messages
  * @param userId - Bot user making the request
  * @param options - `read` also requires READ_MESSAGE_HISTORY
- * @param options.read - Whether the request reads the message (GET)
+ * @param options.read - Whether the request reads messages (GET)
  * @returns The denial, or null when the request may proceed
  */
 export function getMessageAccessError(

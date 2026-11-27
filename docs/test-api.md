@@ -1784,7 +1784,9 @@ retaining the old counters. Creation and consumption are atomic in SQLite.
 Use `GET /_test/rest-faults/:id` to observe the normalized `query`, `remaining`
 and `consumed` without issuing a Bot request against the armed list route. This
 control endpoint accepts inspection without authentication and never consumes the
-fault. Ordinary native list data recovers after exhaustion or control deletion.
+fault. The ordinary list route runs again after exhaustion or control deletion;
+message history then applies the Bot's current
+[history access](#message-history-access-list).
 
 Regression coverage: `src/rest-page-faults.test.ts` exercises concrete later pages
 and native data recovery for all three routes, query normalization/conflicts,
@@ -6867,7 +6869,9 @@ restore its inherited permissions, or delete/recreate the setup to clear its
 guild fixtures. There is no queued permission state to cancel. Send enforcement
 does not yet cover feature-specific send permissions such as TTS, attachments,
 replies, stickers or polls; single-message access is described in
-[Single-message access](#single-message-access-get-patch-and-delete). It supplies Fauxcord prerequisites for bot integration tests;
+[Single-message access](#single-message-access-get-patch-and-delete) and history
+reads in [Message history access](#message-history-access-list). It supplies
+Fauxcord prerequisites for bot integration tests;
 the bot harness and end-to-end handler coverage remain downstream work.
 
 ### Single-message access (GET, PATCH and DELETE)
@@ -6889,17 +6893,54 @@ channel's overwrites, as threads inherit their parent's permissions.
 An unknown channel answers `404` / `10003` first. The access check then runs before the message lookup, the authorship rule (`PATCH` still
 answers `50005` afterwards), body validation, writes and Gateway dispatch, so a
 refused request stores and dispatches nothing. DM channels
-and non-Bot callers (Bearer/OAuth credentials) keep their previous behavior;
-the list route `GET /channels/:channelId/messages` is not checked, and `DELETE`
-still does not model `MANAGE_MESSAGES` for other users' messages. A denial from
+and non-Bot callers (Bearer/OAuth credentials) keep their previous behavior,
+and `DELETE` still does not model `MANAGE_MESSAGES` for other users' messages.
+The list route is covered in
+[Message history access](#message-history-access-list). A denial from
 a missing `READ_MESSAGE_HISTORY` uses `50013` because Discord documents the
 permission for "Get Channel Message" without giving the code; the code is the
 one libraries report in practice (discord.py `Forbidden: 403 ... error code:
 50013: Missing Permissions` from `fetch_message`), and `spec/openapi.json` does
-not list it. Under `DISABLE_AUTH=true` an unregistered token acts as the
+not list it. Under `DISABLE_AUTH=true` an unregistered `Bot` token acts as the
 placeholder `MockBot` user, which is not a guild member and is refused like on
 sends; register the bot (for example with `POST /_test/setup`) to read guild
 messages.
+
+### Message history access (list)
+
+`GET /channels/:channelId/messages` (also under `/api` and `/api/v10`) uses the
+same persisted permission resolution as the single-message checks above,
+including the owner and guild-level `ADMINISTRATOR` bypass. As in Discord's
+[Get Channel Messages](https://docs.discord.com/developers/resources/message#get-channel-messages),
+a channel the bot can see without being allowed to read its history is not an
+error but returns no messages:
+
+| Condition (bot caller, guild channel)                  | Response                       |
+| ------------------------------------------------------ | ------------------------------ |
+| Not a member of the channel's guild                    | `403` / `50001` Missing Access |
+| No `VIEW_CHANNEL` (`1024`)                             | `403` / `50001` Missing Access |
+| `VIEW_CHANNEL` but no `READ_MESSAGE_HISTORY` (`65536`) | `200` with an empty array `[]` |
+
+This applies to every page: no cursor, `before`, `after`, `around` and any
+`limit`. Threads (`10`, `11`, `12`) are resolved against the parent channel's
+overwrites. An unknown channel answers `404` / `10003` first. The access check
+then runs before the query parameters are read, so a refused caller gets the
+response above whatever values it sends; the check adds no query validation, and
+a permitted request handles those values as before. DM channels and non-Bot
+callers (Bearer/OAuth credentials) are not checked, and neither is the
+[`GET /_test/messages/:channelId`](#get-_testmessageschannelid--inspect-a-channels-messages)
+control. Under `DISABLE_AUTH=true` an unregistered `Bot` token (or an
+unrecognized authorization scheme) acts as the placeholder `MockBot` user, which
+is not a guild member and is refused. Discord also requires `CONNECT` for the
+history of a voice channel; neither this check nor the single-message checks
+model that.
+
+[REST fault controls](#post-_testrest-faults--fail-bounded-exact-rest-attempts)
+for a history page run before this check: each attempt that an active control
+matches receives the configured failure, even if the bot would be refused. A
+request that no active control matches uses the bot's current permissions.
+[Page holds](#rest-pagination-page-holds) select only member and ban pages, so
+none applies to this route.
 
 ## Member role permissions
 

@@ -127,7 +127,11 @@ describe('page-specific REST GET faults', () => {
         expect(await status(mismatch)).not.toBe(500)
       for (const auth of ['', 'Bot invalid', 'Bearer invalid'])
         expect(await status(url, 'GET', undefined, auth)).toBe(401)
-      expect(await status(url, 'GET', undefined, otherToken)).toBe(200)
+      // The other bot runs the ordinary route, which refuses history to a
+      // bot outside the channel's guild.
+      expect(await status(url, 'GET', undefined, otherToken)).toBe(
+        route === 'messages' ? 403 : 200
+      )
       await request(url, 'HEAD')
       await counters(fault.id, 2, 0)
       for (const prefix of ['/api', '/api/v10']) {
