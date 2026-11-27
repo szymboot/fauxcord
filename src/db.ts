@@ -34,17 +34,20 @@ function migrateMessageComponents(db: Database): void {
  * @param db - Database instance
  */
 function migrateMessageCreatedAt(db: Database): void {
-  const rows = db.prepare('SELECT id, created_at FROM messages').all() as {
-    id: string
-    created_at: string
-  }[]
-  const update = db.prepare('UPDATE messages SET created_at = ? WHERE id = ?')
+  const rows = db
+    .prepare('SELECT id, created_at, edited_at FROM messages')
+    .all() as { id: string; created_at: string; edited_at: string | null }[]
+  const update = db.prepare(
+    'UPDATE messages SET created_at = ?, edited_at = ? WHERE id = ?'
+  )
   db.transaction(() => {
     for (const row of rows) {
       const createdAt = storedTimestampFromSnowflake(row.id)
-      if (createdAt && createdAt !== row.created_at) {
-        update.run(createdAt, row.id)
-      }
+      if (!createdAt || createdAt === row.created_at) continue
+      // A whole-second edit time of the creation second would now precede it.
+      const editedAt =
+        row.edited_at === createdAt.slice(0, 19) ? createdAt : row.edited_at
+      update.run(createdAt, editedAt, row.id)
     }
   })()
 }

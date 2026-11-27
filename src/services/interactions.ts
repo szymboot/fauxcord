@@ -14,7 +14,8 @@ import {
 import { parseModal, type ModalObject } from '../validators/modal'
 
 import type { Database } from '../db'
-import { generateSnowflake } from '../snowflake'
+import { generateSnowflake, parseSnowflakeTimestamp } from '../snowflake'
+import { toDiscordTimestamp } from '../timestamp'
 import { gatewayBus } from '../gateway/bus'
 import { getGuildMember } from './guild-members'
 import { getUser } from './users'
@@ -80,6 +81,30 @@ interface InteractionRow {
 }
 
 /**
+ * Reads a stored message snapshot, deriving its creation time from its ID so
+ * that a snapshot stored by an older version agrees with the message.
+ * @param json - Serialized message snapshot
+ * @returns Message snapshot
+ */
+function readMessageSnapshot(json: string): Record<string, unknown> {
+  const message = JSON.parse(json) as Record<string, unknown>
+  const createdAt =
+    typeof message.id === 'string' ? parseSnowflakeTimestamp(message.id) : null
+  if (!createdAt) return message
+  const timestamp = toDiscordTimestamp(createdAt)
+  const edited = message.edited_timestamp
+  // A whole-second edit time of the creation second would precede it.
+  const editedEarlier =
+    typeof edited === 'string' &&
+    edited === `${timestamp.slice(0, 19)}.000000+00:00`
+  return {
+    ...message,
+    timestamp,
+    ...(editedEarlier && { edited_timestamp: timestamp }),
+  }
+}
+
+/**
  * Converts a DB interaction record into the API response / Gateway payload
  * format. Re-fetches the command's name/type from `application_commands`
  * (when `command_id` is set) so `data` always reflects the current command
@@ -141,7 +166,7 @@ function toInteractionObject(
     ...(user && { user: user as unknown as Record<string, unknown> }),
     app_permissions: permissions.appPermissions,
     ...(row.message_json && {
-      message: JSON.parse(row.message_json) as Record<string, unknown>,
+      message: readMessageSnapshot(row.message_json),
     }),
   }
 

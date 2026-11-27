@@ -2265,10 +2265,10 @@ history reads, both pin APIs, webhook and interaction messages, Gateway
 `MESSAGE_CREATE` / `MESSAGE_UPDATE`, and `GET /_test/messages/:channelId`.
 Editing never changes it; `edited_timestamp` records the edit.
 
-The same time decides the two-week bulk-delete limit (`400` / `50034`) and the
-message deletion window of a ban (`delete_message_seconds` or
-`delete_message_days`), so a bot that filters by `timestamp` agrees with the
-emulator.
+The same time decides the two-week bulk-delete limit (`400` / `50034`) and, to
+the millisecond, the message deletion window of a ban
+(`delete_message_seconds` or `delete_message_days`), so a bot that filters by
+`timestamp` agrees with the emulator.
 
 To test such time windows,
 [inject](#post-_testchannelschannelidmessages--inject-a-message-from-a-specific-user)
@@ -2279,11 +2279,11 @@ node -p '((BigInt(Date.now() - 15 * 86400000) - 1420070400000n) << 22n).toString
 ```
 
 Explicit IDs are not checked against the clock, so a future-dated ID produces a
-future `timestamp`. A value that is not a valid Snowflake (the injection
-endpoint also accepts 20-digit numbers above `18446744073709551615`) carries no
-time: its `timestamp` is when the message was stored, to the whole second.
-Opening an existing database re-derives the creation time of its stored
-messages.
+future `timestamp`. A value that is not a valid Snowflake carries no time: its
+`timestamp` is when the message was stored, to the whole second. The injection
+endpoint also accepts such values, namely numbers with a leading zero (such as
+`01`) and 20-digit numbers above `18446744073709551615`. Opening an existing
+database re-derives the creation time of its stored messages.
 
 ---
 

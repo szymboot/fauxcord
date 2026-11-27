@@ -62,12 +62,12 @@ export function snowflakeToTimestamp(snowflake: string): Date {
 
 /**
  * Restores the timestamp of an ID only when it is a valid Snowflake: an
- * unsigned 64-bit integer written in decimal.
+ * unsigned 64-bit integer written in decimal without leading zeros.
  * @param id - Candidate ID
  * @returns Date object of the timestamp, or null for any other ID
  */
 export function parseSnowflakeTimestamp(id: string): Date | null {
-  return /^\d{1,20}$/.test(id) && BigInt(id) <= MAX_SNOWFLAKE
+  return /^(?:0|[1-9]\d{0,19})$/.test(id) && BigInt(id) <= MAX_SNOWFLAKE
     ? snowflakeToTimestamp(id)
     : null
 }

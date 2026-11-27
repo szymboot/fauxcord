@@ -14,8 +14,9 @@ import {
   isTooOldForBulkDelete,
   type MessageObject,
 } from './services/messages'
+import { createInteraction } from './services/interactions'
 import { createTestUser } from './services/test-control'
-import { snowflakeToTimestamp } from './snowflake'
+import { generateSnowflake, snowflakeToTimestamp } from './snowflake'
 import {
   createFullTestApp,
   createTestGatewayServer,
@@ -284,6 +285,50 @@ describe('message timestamps derived from Snowflake IDs', () => {
   })
 
   it.each([
+    {
+      name: 'creation time',
+      edited: null,
+      expected: null,
+    },
+    {
+      name: 'creation-second edit',
+      edited: '2026-06-15T12:30:45.000000+00:00',
+      expected: '2026-06-15T12:30:45.678000+00:00',
+    },
+    {
+      name: 'later edit',
+      edited: '2026-06-15T12:30:46.000000+00:00',
+      expected: '2026-06-15T12:30:46.000000+00:00',
+    },
+  ])(
+    'derives the $name of a stored component message snapshot',
+    ({ edited, expected }) => {
+      const id = snowflakeAt(NOW.getTime())
+      const interaction = createInteraction(context.db, {
+        interactionId: generateSnowflake(),
+        applicationId: APPLICATION_ID,
+        token: 'snapshot-token',
+        type: 3,
+        guildId,
+        channelId,
+        userId: humanId,
+        // As stored by an older version: whole seconds from its own clock.
+        message: {
+          id,
+          timestamp: '2026-06-15T12:30:45.000000+00:00',
+          edited_timestamp: edited,
+        },
+      })
+
+      expect(interaction.message).toEqual({
+        id,
+        timestamp: '2026-06-15T12:30:45.678000+00:00',
+        edited_timestamp: expected,
+      })
+    }
+  )
+
+  it.each([
     { name: 'just inside', offset: 1, tooOld: false },
     { name: 'exactly at', offset: 0, tooOld: false },
     { name: 'just outside', offset: -1, tooOld: true },
@@ -333,23 +378,36 @@ describe('message timestamps derived from Snowflake IDs', () => {
     expect(new Set(fresh)).toEqual(new Set(recent))
   })
 
-  it('applies a ban message deletion window to the Snowflake time', async () => {
-    // The ban window is measured by SQLite's clock, so use the real one.
-    vi.useRealTimers()
+  it('applies a ban message deletion window to the millisecond', async () => {
     seedMember(context.db, guildId, '444444444444444444')
     humanId = '444444444444444444'
-    const old = await inject(snowflakeAt(Date.now() - 2 * DAY_MS))
-    const recent = await inject(snowflakeAt(Date.now() - 60_000))
+    const ids = [2 * DAY_MS, 1001, 1000, 0].map((age) =>
+      snowflakeAt(NOW.getTime() - age)
+    )
+    for (const id of ids) await inject(id)
+    // Rows without a Snowflake time keep their whole-second stored value.
+    for (const [messageId, second] of [
+      ['m-before', '44'],
+      ['m-inside', '45'],
+    ]) {
+      createMessage(
+        context.db,
+        { channelId, authorId: humanId, authorToken: '', messageId },
+        'http://localhost'
+      )
+      context.db
+        .prepare('UPDATE messages SET created_at = ? WHERE id = ?')
+        .run(`2026-06-15 12:30:${second}`, messageId)
+    }
 
     const res = await send(`/guilds/${guildId}/bans/${humanId}`, 'PUT', {
-      delete_message_seconds: 3600,
+      delete_message_seconds: 1,
     })
 
     expect(res.status).toBe(204)
-    const kept = await send(`/channels/${channelId}/messages/${old.id}`)
-    const purged = await send(`/channels/${channelId}/messages/${recent.id}`)
-    expect(kept.status).toBe(200)
-    expect(purged.status).toBe(404)
+    expect(
+      context.db.prepare('SELECT id FROM messages ORDER BY id').all()
+    ).toEqual([{ id: ids[0] }, { id: ids[1] }, { id: 'm-before' }])
   })
 
   it('derives the creation time of seeded messages', () => {
@@ -360,7 +418,23 @@ describe('message timestamps derived from Snowflake IDs', () => {
     )
   })
 
-  it.each(['m1', '18446744073709551616', '99999999999999999999'])(
+  it.each(['01', '00000000000000000000', '18446744073709551616'])(
+    'does not backdate an injected message with the non-Snowflake ID %s',
+    async (id) => {
+      const created = await inject(id)
+
+      // The fallback is SQLite's clock, which Vitest does not fake.
+      const stored = context.db
+        .prepare('SELECT created_at FROM messages WHERE id = ?')
+        .get(id) as { created_at: string }
+      expect(stored.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)
+      expect(created.timestamp).toBe(
+        `${stored.created_at.replace(' ', 'T')}.000000+00:00`
+      )
+    }
+  )
+
+  it.each(['m1', '01', '18446744073709551616', '99999999999999999999'])(
     'keeps the stored creation time for the non-Snowflake ID %s',
     (id) => {
       const created = createMessage(
@@ -461,20 +535,40 @@ describe('stored message creation times', () => {
       let db = initializeDatabase(dbPath)
       const channelId = seedChannel(db, seedGuild(db, seedBot(db)))
       const id = snowflakeAt(Date.parse('2026-01-02T03:04:05.006Z'))
+      const sameSecond = snowflakeAt(Date.parse('2026-01-02T03:04:05.007Z'))
       const insert = db.prepare(
-        "INSERT INTO messages (id, channel_id, author_id, created_at) VALUES (?, ?, '1', '2026-06-07 10:00:00')"
+        "INSERT INTO messages (id, channel_id, author_id, created_at, edited_at) VALUES (?, ?, '1', '2026-06-07 10:00:00', ?)"
       )
-      insert.run(id, channelId)
-      insert.run('m1', channelId)
+      insert.run(id, channelId, '2026-06-07 10:00:00')
+      insert.run(sameSecond, channelId, '2026-01-02 03:04:05')
+      insert.run('m1', channelId, '2026-06-07 10:00:00')
       closeDatabase(db)
 
       for (let reopen = 0; reopen < 2; reopen++) {
         db = initializeDatabase(dbPath)
         expect(
-          db.prepare('SELECT id, created_at FROM messages ORDER BY id').all()
+          db
+            .prepare(
+              'SELECT id, created_at, edited_at FROM messages ORDER BY id'
+            )
+            .all()
         ).toEqual([
-          { id, created_at: '2026-01-02 03:04:05.006' },
-          { id: 'm1', created_at: '2026-06-07 10:00:00' },
+          {
+            id,
+            created_at: '2026-01-02 03:04:05.006',
+            edited_at: '2026-06-07 10:00:00',
+          },
+          // A legacy edit within the creation second must not precede it.
+          {
+            id: sameSecond,
+            created_at: '2026-01-02 03:04:05.007',
+            edited_at: '2026-01-02 03:04:05.007',
+          },
+          {
+            id: 'm1',
+            created_at: '2026-06-07 10:00:00',
+            edited_at: '2026-06-07 10:00:00',
+          },
         ])
         closeDatabase(db)
       }
